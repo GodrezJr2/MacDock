@@ -34,6 +34,7 @@ class DockWindow : Window
 
     IntPtr hwnd;
     AppBar? appBar;
+    Genie? genie;
     double dpi = 1;
     readonly double screenW = SystemParameters.PrimaryScreenWidth, screenH = SystemParameters.PrimaryScreenHeight;
 
@@ -124,6 +125,11 @@ class DockWindow : Window
         Show();
         Refresh(initial: true);
         CompositionTarget.Rendering += OnFrame;
+        if (cfg.Genie)
+        {
+            genie = new Genie(IconRectFor, dpi);
+            genie.Start();
+        }
         var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(700) };
         t.Tick += (_, _) => { Refresh(); if (cfg.HideTaskbar) Taskbar.KeepHidden(); };
         t.Start();
@@ -133,6 +139,7 @@ class DockWindow : Window
     {
         CompositionTarget.Rendering -= OnFrame;
         appBar?.Remove();
+        genie?.Stop();
     }
 
     public void SetFullscreenHidden(bool hide)
@@ -491,12 +498,28 @@ class DockWindow : Window
         var fg = GetForegroundWindow();
         if (it.Windows.Any(w => w.Hwnd == fg))
         {
+            genie?.Capture(fg); // fresh pixels for the genie that the minimize event will start
             foreach (var w in it.Windows) Shell.Minimize(w.Hwnd);
             return;
         }
-        foreach (var w in Enumerable.Reverse(it.Windows))
-            if (IsIconic(w.Hwnd)) ShowWindow(w.Hwnd, SW_RESTORE);
-        Shell.Activate(it.Windows[0].Hwnd);
+        var minimized = it.Windows.Where(w => IsIconic(w.Hwnd)).ToList();
+        var front = minimized.Count > 0 ? minimized[0].Hwnd : it.Windows[0].Hwnd;
+        void Restore()
+        {
+            foreach (var w in Enumerable.Reverse(minimized)) ShowWindow(w.Hwnd, SW_RESTORE);
+            Shell.Activate(front);
+        }
+        if (minimized.Count > 0 && genie != null && genie.PlayRestore(front, Restore)) return;
+        Restore();
+    }
+
+    /// <summary>Screen rect (DIPs) of the dock icon that owns a window, for the genie to aim at.</summary>
+    Rect? IconRectFor(IntPtr hwnd)
+    {
+        var it = items.FirstOrDefault(i => !i.Leaving && i.Windows.Any(w => w.Hwnd == hwnd));
+        double plateBottom = Height - BottomGap;
+        if (it == null) return new Rect(Left + Width / 2 - B / 2, Top + plateBottom - Pad - B, B, B);
+        return new Rect(Left + it.X, Top + plateBottom - Pad - it.Size, it.Size, it.Size);
     }
 
     void Unpin(DockItem it)

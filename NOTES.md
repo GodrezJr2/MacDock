@@ -33,6 +33,13 @@ in .NET 10 WPF. Replaces the Windhawk taskbar restyle (ClearMacDock theme looked
   `Native.OpenMenu` lifts the flag while a menu is open.
 - Screenshots from PowerShell need SetProcessDPIAware, otherwise the capture is scaled.
 
+- Genie (Genie.cs): Windows' own minimize animation is switched off (SPI_SETANIMATION without
+  SPIF_UPDATEINIFILE, so a reboot undoes it; restored on quit). Snapshots of the window in front are copied
+  off the screen (BitBlt) on focus change, move end, every 1.5 s and right before a dock-click minimize. On
+  EVENT_SYSTEM_MINIMIZESTART the snapshot is drawn as a 48-row mesh in a Viewport3D overlay and bent into
+  the dock icon (squeeze sides, then slide rows down and pile them at the icon). Restore from the dock plays
+  it backwards, then restores the window. Restores via Alt+Tab have no animation. `"Genie": false` turns it off.
+
 ## Next ideas
-- Minimize "genie" / scale effect into the dock, attention bounce for flashing windows.
+- Zoom-from-icon when an app opens its first window; attention bounce for flashing windows.
 - Drag files onto an icon to open with it; multi-monitor.

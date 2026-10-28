@@ -21,6 +21,7 @@ class Config
     public double Magnify { get; set; } = 1.75;
     public bool HideTaskbar { get; set; } = true;
     public bool MenuBar { get; set; } = true;
+    public bool Genie { get; set; } = true;
 
     static string Dir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MacDock");
     static string FilePath => Path.Combine(Dir, "config.json");
