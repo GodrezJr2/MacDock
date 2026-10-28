@@ -110,8 +110,16 @@ static class Native
         SetWindowLongPtr(h, GWL_EXSTYLE, (IntPtr)(ex & ~WS_EX_NOACTIVATE));
         SetForegroundWindow(h);
         owner.Activate();
-        cm.Closed += (_, _) => SetWindowLongPtr(h, GWL_EXSTYLE, (IntPtr)ex);
+        // always put the flag back rather than the style we saw: if a second menu opened before the first
+        // closed, that saved style already lacked it and the bar would stay activatable for good
+        cm.Closed += (_, _) => EnsureNoActivate(h);
         cm.IsOpen = true;
+    }
+
+    public static void EnsureNoActivate(IntPtr h)
+    {
+        long ex = (long)GetWindowLongPtr(h, GWL_EXSTYLE);
+        if ((ex & WS_EX_NOACTIVATE) == 0) SetWindowLongPtr(h, GWL_EXSTYLE, (IntPtr)(ex | WS_EX_NOACTIVATE));
     }
 
     public static void Key(params byte[] vks)

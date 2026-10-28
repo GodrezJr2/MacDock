@@ -50,6 +50,11 @@ class DockWindow : Window
     double labelAlpha;
     DockItem? hovered;
     bool menuOpen;
+
+    delegate void WinEventProc(IntPtr hook, uint ev, IntPtr hwnd, int obj, int child, uint thread, uint time);
+    [DllImport("user32.dll")] static extern IntPtr SetWinEventHook(uint min, uint max, IntPtr mod, WinEventProc proc, uint pid, uint tid, uint flags);
+    WinEventProc? fgProc;
+    IntPtr lastAppWindow; // last foreground window that isn't ours
     int refreshCount;
 
     DockItem? pressed;
@@ -136,6 +141,7 @@ class DockWindow : Window
         {
             App.PollFullscreen();
             if (!IsVisible) return; // game mode: nothing else to do until the fullscreen app goes away
+            if (!menuOpen) EnsureNoActivate(hwnd);
             Refresh();
             if (cfg.HideTaskbar) Taskbar.KeepHidden();
         };
@@ -209,6 +215,10 @@ class DockWindow : Window
         appBar = new AppBar(hwnd, ABE_BOTTOM);
         appBar.Register((int)Math.Round((PlateH + BottomGap * 2) * dpi), (int)Math.Round(screenW * dpi), (int)Math.Round(screenH * dpi));
         HwndSource.FromHwnd(hwnd).AddHook(WndProc);
+
+        lastAppWindow = GetForegroundWindow();
+        fgProc = (_, _, h, obj, _, _, _) => { if (obj == 0 && h != IntPtr.Zero) lastAppWindow = h; };
+        SetWinEventHook(3, 3, IntPtr.Zero, fgProc, 0, 0, 0x2); // EVENT_SYSTEM_FOREGROUND, skip own process
     }
 
     IntPtr WndProc(IntPtr h, int msg, IntPtr w, IntPtr l, ref bool handled)
@@ -554,7 +564,10 @@ class DockWindow : Window
             Wake();
             return;
         }
+        // the app the user was in, even if the dock itself somehow got focus
         var fg = GetForegroundWindow();
+        GetWindowThreadProcessId(fg, out uint fgPid);
+        if (fgPid == (uint)Environment.ProcessId) fg = lastAppWindow;
         // a just-minimized last window can still be "foreground" while iconic: that one wants restoring
         if (!IsIconic(fg) && it.Windows.Any(w => w.Hwnd == fg))
         {
