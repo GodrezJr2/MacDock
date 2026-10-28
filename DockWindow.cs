@@ -132,10 +132,17 @@ class DockWindow : Window
             genie = new Genie(IconRectFor, dpi);
             genie.Start();
         }
-        var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(700) };
-        t.Tick += (_, _) => { Refresh(); if (cfg.HideTaskbar) Taskbar.KeepHidden(); };
-        t.Start();
+        refreshTimer.Tick += (_, _) =>
+        {
+            App.PollFullscreen();
+            if (!IsVisible) return; // game mode: nothing else to do until the fullscreen app goes away
+            Refresh();
+            if (cfg.HideTaskbar) Taskbar.KeepHidden();
+        };
+        refreshTimer.Start();
     }
+
+    readonly DispatcherTimer refreshTimer = new() { Interval = TimeSpan.FromMilliseconds(700) };
 
     public void Shutdown()
     {
@@ -147,7 +154,11 @@ class DockWindow : Window
     public void SetFullscreenHidden(bool hide)
     {
         Visibility = hide ? Visibility.Hidden : Visibility.Visible;
-        if (!hide) Wake();
+        // game mode: stay out of the way of whatever is fullscreen
+        genie?.Pause(hide);
+        refreshTimer.Interval = TimeSpan.FromMilliseconds(hide ? 3000 : 700);
+        if (hide) { Sleep(); Genie.Collect(trim: true); }
+        else Wake();
     }
 
     /// <summary>

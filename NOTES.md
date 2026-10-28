@@ -65,6 +65,15 @@ in .NET 10 WPF. Replaces the Windhawk taskbar restyle (ClearMacDock theme looked
 - `--restore` also puts Windows' minimize animation back (from WindowMetrics\MinAnimate), since a killed
   run leaves it off for the session.
 
+## Game mode
+- Fullscreen detection is polled on every dock refresh (foreground window covers the screen and is not the
+  desktop), because Explorer's ABN_FULLSCREENAPP is unreliable with its taskbar hidden.
+- While fullscreen: dock and menu bar hidden, render loop asleep, low-level mouse hook removed (it sat in the
+  game's input path), snapshot captures stopped and dropped, refresh slowed to 3 s, then GC + working-set
+  trim. Measured with Terminal in F11: 0.00% CPU, working set 17 MB; everything returns on exit.
+- Snapshot pixels live in native WIC memory, so replaced ones piled up to 500+ MB private until a GC ran;
+  Genie now collects every 6 snapshots.
+
 ## Next ideas
 - Zoom-from-icon when an app opens its first window; attention bounce for flashing windows.
 - Drag files onto an icon to open with it; multi-monitor.

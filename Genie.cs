@@ -310,6 +310,43 @@ class Genie
         SystemParametersInfoW(0x49, ai.cbSize, ref ai, 2);
     }
 
+    bool paused;
+
+    /// <summary>
+    /// Game mode (a fullscreen app is in front): no mouse hook in the input path, no screen captures, drop the
+    /// snapshots and give the memory back. Everything comes back when the fullscreen app goes away.
+    /// </summary>
+    public void Pause(bool on)
+    {
+        if (on == paused) return;
+        paused = on;
+        if (on)
+        {
+            timer.Stop();
+            if (mouseHook != IntPtr.Zero) { UnhookWindowsHookEx(mouseHook); mouseHook = IntPtr.Zero; }
+            armedFor = IntPtr.Zero;
+            overlay.Disarm();
+            snaps.Clear();
+            Collect();
+        }
+        else
+        {
+            mouseHook = SetWindowsHookExW(14, mouseProc, GetModuleHandleW(null), 0);
+            timer.Start();
+        }
+    }
+
+    [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll")] static extern bool SetProcessWorkingSetSize(IntPtr p, IntPtr min, IntPtr max);
+
+    public static void Collect(bool trim = false)
+    {
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        if (trim) SetProcessWorkingSetSize(GetCurrentProcess(), (IntPtr)(-1), (IntPtr)(-1));
+    }
+
     public void Stop()
     {
         timer.Stop();
@@ -353,7 +390,7 @@ class Genie
     /// </summary>
     public void Capture(IntPtr h, bool sync = false)
     {
-        if (h == IntPtr.Zero || overlay.Busy || (capturing && !sync) || !IsWindowVisible(h) || IsIconic(h)) return;
+        if (paused || h == IntPtr.Zero || overlay.Busy || (capturing && !sync) || !IsWindowVisible(h) || IsIconic(h)) return;
         GetWindowThreadProcessId(h, out uint pid);
         if (pid == (uint)Environment.ProcessId) return;
         if (DwmGetWindowAttribute(h, 9, out RECT r, Marshal.SizeOf<RECT>()) != 0) GetWindowRect(h, out r); // extended frame bounds
@@ -397,9 +434,15 @@ class Genie
         finally { if (dib != IntPtr.Zero) DeleteObject(dib); DeleteDC(mdc); ReleaseDC(IntPtr.Zero, sdc); }
     }
 
+    int stores;
+
     void Store(IntPtr h, BitmapSource img, Rect rect)
     {
+        if (paused) return;
         snaps[h] = new Snap(img, rect, DateTime.Now);
+        // Snapshot pixels live in native WIC memory the GC can't see, so replaced ones pile up (500+ MB)
+        // until a collection happens to run. Collect now and then to hand them back.
+        if (++stores % 6 == 0) Collect();
         if (snaps.Count > MaxSnaps)
             foreach (var k in snaps.Where(kv => !IsWindow(kv.Key)).Select(kv => kv.Key).Concat(snaps.OrderBy(kv => kv.Value.At).Select(kv => kv.Key)).Distinct().Take(snaps.Count - MaxSnaps).ToList())
                 snaps.Remove(k);

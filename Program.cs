@@ -52,13 +52,28 @@ class App : Application
         dock.Start();
     }
 
+    bool fullscreen;
+
     public static void Fullscreen(bool on)
     {
         if (Current is not App app) return;
         if (on && !ForegroundIsFullscreen()) return; // e.g. our own overlays; only hide for a real fullscreen app
+        if (on == app.fullscreen) return;
+        app.fullscreen = on;
         app.dock?.SetFullscreenHidden(on);
         if (app.bar != null) app.bar.Visibility = on ? Visibility.Hidden : Visibility.Visible;
     }
+
+    /// <summary>
+    /// Explorer's ABN_FULLSCREENAPP is unreliable (above all with its taskbar hidden), so the dock also asks
+    /// on every refresh whether the window in front covers the whole screen.
+    /// </summary>
+    public static void PollFullscreen()
+    {
+        if (Current is App app && ForegroundIsFullscreen() != app.fullscreen) Fullscreen(!app.fullscreen);
+    }
+
+    static readonly string[] desktopClasses = { "Progman", "WorkerW", "Shell_TrayWnd" };
 
     static bool ForegroundIsFullscreen()
     {
@@ -66,6 +81,9 @@ class App : Application
         if (fg == IntPtr.Zero) return false;
         Native.GetWindowThreadProcessId(fg, out uint pid);
         if (pid == (uint)Environment.ProcessId) return false;
+        var cls = new System.Text.StringBuilder(64);
+        Native.GetClassNameW(fg, cls, cls.Capacity);
+        if (Array.IndexOf(desktopClasses, cls.ToString()) >= 0) return false;
         Native.GetWindowRect(fg, out var r);
         double scale = GetDpiForSystem() / 96.0;
         return r.Left <= 0 && r.Top <= 0 && r.Right >= SystemParameters.PrimaryScreenWidth * scale && r.Bottom >= SystemParameters.PrimaryScreenHeight * scale;
