@@ -27,6 +27,9 @@ class DockItem
     public bool Launching;
     public DateTime LaunchStarted;
     public int WindowsAtLaunch;
+    public bool Attention;            // the app flashed its taskbar button: bounce until it comes to front
+    public DateTime AttentionStarted;
+    public bool AttentionBounce;      // BounceT is running an attention cycle (finishes the hop after it stops)
     public double DotAlpha;
 
     public Image? Img;

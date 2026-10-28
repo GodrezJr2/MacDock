@@ -54,6 +54,8 @@ static class Native
     public static readonly IntPtr HWND_TOPMOST = new(-1), HWND_NOTOPMOST = new(-2);
     public const uint SWP_NOSIZE = 0x1, SWP_NOMOVE = 0x2;
     [DllImport("user32.dll")] public static extern bool LockWorkStation();
+    [DllImport("user32.dll")] public static extern bool RegisterShellHookWindow(IntPtr h);
+    public const int HSHELL_FLASH = 0x8006;
     [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int v, int size);
     public const int DWMWA_CLOAKED = 14;
 

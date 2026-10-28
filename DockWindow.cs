@@ -215,6 +215,9 @@ class DockWindow : Window
         appBar = new AppBar(hwnd, ABE_BOTTOM);
         appBar.Register((int)Math.Round((PlateH + BottomGap * 2) * dpi), (int)Math.Round(screenW * dpi), (int)Math.Round(screenH * dpi));
         HwndSource.FromHwnd(hwnd).AddHook(WndProc);
+        // HSHELL_FLASH arrives when an app flashes its taskbar button (FlashWindowEx) asking for attention
+        shellHookMsg = RegisterWindowMessageW("SHELLHOOK");
+        RegisterShellHookWindow(hwnd);
 
         lastAppWindow = GetForegroundWindow();
         fgProc = (_, _, h, obj, _, _, _) => { if (obj == 0 && h != IntPtr.Zero) lastAppWindow = h; };
@@ -228,7 +231,23 @@ class DockWindow : Window
             if ((int)w == ABN_POSCHANGED) appBar.Reposition((int)Math.Round(screenW * dpi), (int)Math.Round(screenH * dpi));
             else if ((int)w == ABN_FULLSCREENAPP) App.Fullscreen(l != IntPtr.Zero);
         }
+        else if (msg == shellHookMsg && (int)w == HSHELL_FLASH) WantsAttention(l);
         return IntPtr.Zero;
+    }
+    uint shellHookMsg;
+    const double AttentionHop = 0.5, AttentionCycle = 1.1;
+
+    void WantsAttention(IntPtr h)
+    {
+        if (h == GetForegroundWindow()) return;
+        GetWindowThreadProcessId(h, out uint pid);
+        var (exe, aumid) = Shell.ProcessInfo(pid);
+        var probe = new AppWindow(h, pid, exe, aumid, "");
+        var it = items.FirstOrDefault(i => !i.Leaving && !i.IsTrash && (i.Windows.Any(x => x.Hwnd == h) || i.Owns(probe)));
+        if (it == null || it.Attention) return;
+        it.Attention = true;
+        it.AttentionStarted = DateTime.Now;
+        Wake();
     }
 
     // ---------------------------------------------------------------- model
@@ -391,7 +410,13 @@ class DockWindow : Window
             }
             it.Scale = Approach(it.Scale, target, k);
             it.Presence = Approach(it.Presence, it.Leaving ? 0 : 1, kp);
-            if (it.Scale != target || (!it.Leaving && it.Presence != 1) || it.Launching || it.BounceT > 0) settled = false;
+            if (it.Attention)
+            {
+                // stop once the user goes to the app, or after a few bounces like macOS does for a request
+                var fg = GetForegroundWindow();
+                if (it.Windows.Any(x => x.Hwnd == fg) || (DateTime.Now - it.AttentionStarted).TotalSeconds > AttentionCycle * 5) it.Attention = false;
+            }
+            if (it.Scale != target || (!it.Leaving && it.Presence != 1) || it.Launching || it.Attention || it.BounceT > 0) settled = false;
         }
         foreach (var gone in items.Where(i => i.Leaving && i.Presence < 0.02).ToList())
         {
@@ -413,7 +438,17 @@ class DockWindow : Window
         {
             it.X = x; it.Size = size;
             double bounce = 0;
-            if (it.Launching || it.BounceT > 0)
+            if (it.Attention || it.AttentionBounce)
+            {
+                // attention: one tall hop (up slowing, down speeding up), then a rest, repeated
+                double prev = it.BounceT % AttentionCycle;
+                it.BounceT += dt;
+                it.AttentionBounce = true;
+                double cur = it.BounceT % AttentionCycle;
+                if (!it.Attention && cur < prev) { it.BounceT = 0; it.AttentionBounce = false; }
+                else if (cur < AttentionHop) bounce = B * 0.9 * Math.Sin(Math.PI * cur / AttentionHop);
+            }
+            else if (it.Launching || it.BounceT > 0)
             {
                 const double period = 0.62;
                 double prev = it.BounceT % period;
