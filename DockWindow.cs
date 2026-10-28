@@ -38,7 +38,9 @@ class DockWindow : Window
     double dpi = 1;
     readonly double screenW = SystemParameters.PrimaryScreenWidth, screenH = SystemParameters.PrimaryScreenHeight;
 
-    double B => cfg.IconSize;
+    // like macOS: the dock grows to the screen edges, then its icons shrink so everything still fits
+    double B => Math.Min(cfg.IconSize, fitB);
+    double fitB = double.MaxValue;
     double Gap => Math.Round(B * 0.14);
     const double Pad = 7, BottomGap = 6, Radius = 20;
     double PlateH => B + Pad * 2;
@@ -382,7 +384,7 @@ class DockWindow : Window
         items.AddRange(next);
 
         string sig = string.Join("|", items.Select(i => i.Key + (i.Running ? "*" : "") + (i.Leaving ? "-" : "") + (i.Launching ? "^" : "")));
-        if (sig != lastSig) { lastSig = sig; FitWidth(); Wake(); }
+        if (sig != lastSig) { lastSig = sig; FitIcons(); FitWidth(); Wake(); }
         if (items.Any(i => i.Launching)) Wake();
     }
     string lastSig = "";
@@ -416,7 +418,7 @@ class DockWindow : Window
             place?.Invoke(it, x, size);
             x += (B * scale(it) + Gap) * it.Presence;
         }
-        return x - left - Gap;
+        return Math.Max(0, x - left - Gap); // no items yet: not minus one gap
     }
 
     void OnFrame(object? s, EventArgs e)
@@ -572,6 +574,19 @@ class DockWindow : Window
         if (!awake) return;
         awake = false;
         CompositionTarget.Rendering -= OnFrame;
+    }
+
+    /// <summary>Icon size that keeps the resting dock inside the screen with a small margin on each side.</summary>
+    void FitIcons()
+    {
+        int n = items.Count(i => !i.Leaving);
+        if (n == 0) return;
+        // width = n*b + n*gap (gap = 0.14 b, one of them before Trash) + separator + side padding
+        double b = (screenW - 2 * 16 - PadX * 2 - 1) / (n * 1.14);
+        double next = b >= cfg.IconSize ? double.MaxValue : Math.Floor(b);
+        if (next == fitB) return;
+        fitB = next;
+        if (!cfg.AutoHide) ReserveSpace(); // the plate got shorter or taller
     }
 
     /// <summary>The window only needs to be as wide as a fully magnified dock plus room for labels.</summary>
