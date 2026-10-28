@@ -23,7 +23,8 @@ class GenieWindow : Window
     readonly OrthographicCamera cam = new() { LookDirection = new Vector3D(0, 0, -1), UpDirection = new Vector3D(0, 1, 0) };
     readonly Stopwatch clock = new();
 
-    Rect win, icon;           // overlay-local DIPs
+    Rect win, icon;           // overlay-local physical pixels
+    Rect area;                // the overlay on screen, physical pixels (all monitors)
     double duration;
     bool restore;
     Action? done, started;
@@ -46,9 +47,6 @@ class GenieWindow : Window
         ShowActivated = false;
         ResizeMode = ResizeMode.NoResize;
         IsHitTestVisible = false;
-        Left = 0; Top = 0;
-        // one pixel short of the screen, or Explorer reports a fullscreen app and the dock hides itself
-        Width = SystemParameters.PrimaryScreenWidth; Height = SystemParameters.PrimaryScreenHeight - 1;
 
         var tex = new PointCollection();
         var idx = new Int32Collection();
@@ -86,13 +84,42 @@ class GenieWindow : Window
             DwmSetWindowAttribute(h, 33, ref noRound, 4);  // no rounded corners
             DwmSetWindowAttribute(h, 34, ref noBorder, 4); // no border
             MakeToolWindow(h, clickThrough: true);
-            // let clicks fall through while an animation is on screen (same-thread only, but it is short)
+            Fit();
             src.AddHook((IntPtr hw, int msg, IntPtr w, IntPtr l, ref bool handled) =>
             {
+                // let clicks fall through while an animation is on screen (same-thread only, but it is short)
                 if (msg == 0x84) { handled = true; return (IntPtr)(-1); } // WM_NCHITTEST → HTTRANSPARENT
+                // spanning monitors with different scaling: WPF would move and resize us to the suggested rect.
+                // The camera works in pixels, so the DPI WPF renders at does not matter; keep our rect.
+                if (msg == 0x02E0) { handled = true; return IntPtr.Zero; } // WM_DPICHANGED
                 return IntPtr.Zero;
             });
         };
+        Microsoft.Win32.SystemEvents.DisplaySettingsChanged += (_, _) => Dispatcher.BeginInvoke(Fit);
+    }
+
+    [DllImport("user32.dll")] static extern int GetSystemMetrics(int i);
+
+    /// <summary>
+    /// Cover every monitor (the virtual screen) in physical pixels, so a window on another monitor can fly
+    /// across to the dock. One pixel short at the bottom, or Explorer may report a fullscreen app.
+    /// </summary>
+    public void Fit()
+    {
+        var h = new WindowInteropHelper(this).Handle;
+        if (h == IntPtr.Zero) return;
+        area = new Rect(GetSystemMetrics(76), GetSystemMetrics(77), GetSystemMetrics(78), GetSystemMetrics(79) - 1);
+        SetWindowPos(h, IntPtr.Zero, (int)area.X, (int)area.Y, (int)area.Width, (int)area.Height, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+
+    /// <summary>Screen pixels to overlay-local pixels.</summary>
+    Rect Local(Rect px) { px.Offset(-area.X, -area.Y); return px; }
+
+    void Aim()
+    {
+        // orthographic camera spanning the whole overlay: one world unit is one physical pixel
+        cam.Position = new Point3D(area.Width / 2, -area.Height / 2, 10);
+        cam.Width = area.Width;
     }
 
     public bool Armed { get; private set; }
@@ -102,12 +129,11 @@ class GenieWindow : Window
     /// window vanishes we only have to uncloak, since the frame is already rendered. It must stay cloaked
     /// until then: covering the window during the press steals the click (Notepad maximized instead).
     /// </summary>
-    public void Arm(ImageSource img, Rect windowDip)
+    public void Arm(ImageSource img, Rect windowPx)
     {
         if (Busy) return;
-        win = icon = windowDip;
-        cam.Position = new Point3D(Width / 2, -Height / 2, 10);
-        cam.Width = Width;
+        win = icon = Local(windowPx);
+        Aim();
         brush.ImageSource = img;
         Shape(0);
         Armed = true;
@@ -125,16 +151,16 @@ class GenieWindow : Window
         brush.ImageSource = null;
     }
 
-    public bool Play(ImageSource img, Rect windowDip, Rect iconDip, bool restore, Action? done, Action? started = null)
+    /// <summary>Both rects in screen physical pixels.</summary>
+    public bool Play(ImageSource img, Rect windowPx, Rect iconPx, bool restore, Action? done, Action? started = null)
     {
         if (Busy) return false;
         bool prepared = Armed && ReferenceEquals(brush.ImageSource, img);
         Armed = false;
         // fixed full-screen overlay: resizing the swap chain per animation risks a stale first frame
-        win = windowDip;
-        icon = iconDip;
-        cam.Position = new Point3D(Width / 2, -Height / 2, 10);
-        cam.Width = Width;
+        win = Local(windowPx);
+        icon = Local(iconPx);
+        Aim();
         brush.ImageSource = img;
 
         this.restore = restore;
@@ -297,6 +323,7 @@ class Genie
         foreach (var ev in new[] { EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MINIMIZESTART })
             hooks.Add(SetWinEventHook(ev, ev, IntPtr.Zero, proc, 0, 0, 0x2)); // out of context, skip own process
         overlay.Show();
+        overlay.Fit(); // WPF sizes the window again after SourceInitialized
         overlay.Cloak(true);
         LoadPersisted();
         mouseHook = SetWindowsHookExW(14, mouseProc, GetModuleHandleW(null), 0); // WH_MOUSE_LL
@@ -396,9 +423,10 @@ class Genie
         GetWindowThreadProcessId(h, out uint pid);
         if (pid == (uint)Environment.ProcessId) return;
         if (DwmGetWindowAttribute(h, 9, out RECT r, Marshal.SizeOf<RECT>()) != 0) GetWindowRect(h, out r); // extended frame bounds
-        int sw = (int)Math.Round(SystemParameters.PrimaryScreenWidth * dpi), sh = (int)Math.Round(SystemParameters.PrimaryScreenHeight * dpi);
-        r.Left = Math.Max(0, r.Left); r.Top = Math.Max(0, r.Top);
-        r.Right = Math.Min(sw, r.Right); r.Bottom = Math.Min(sh, r.Bottom);
+        // clip to the virtual screen (all monitors), not just the primary one
+        int vx = GetSystemMetrics(76), vy = GetSystemMetrics(77);
+        r.Left = Math.Max(vx, r.Left); r.Top = Math.Max(vy, r.Top);
+        r.Right = Math.Min(vx + GetSystemMetrics(78), r.Right); r.Bottom = Math.Min(vy + GetSystemMetrics(79), r.Bottom);
         int w = r.Right - r.Left, ht = r.Bottom - r.Top;
         if (w < 80 || ht < 60) return;
         var rect = new Rect(r.Left, r.Top, w, ht);
@@ -461,15 +489,18 @@ class Genie
         foreach (var k in minimized.Take(Math.Max(0, minimized.Count - MaxMinimized))) snaps.Remove(k);
     }
 
-    Rect ToDip(Rect px) => new(px.X / dpi, px.Y / dpi, px.Width / dpi, px.Height / dpi);
+    [DllImport("user32.dll")] static extern int GetSystemMetrics(int i);
+
+    /// <summary>The dock icon's rect in screen pixels (the dock lives on the primary monitor, at its scale).</summary>
+    Rect? IconPx(IntPtr h) => iconRect(h) is Rect d ? new Rect(d.X * dpi, d.Y * dpi, d.Width * dpi, d.Height * dpi) : null;
 
     void PlayMinimize(IntPtr h)
     {
         armedFor = IntPtr.Zero;
         if (!snaps.TryGetValue(h, out var s)) { Log($"minimize without snapshot: {Describe(h)}"); overlay.Disarm(); return; }
         Persist(h, s);
-        if (iconRect(h) is not Rect ic) { overlay.Disarm(); return; }
-        if (!overlay.Play(s.Img, ToDip(s.RectPx), ic, restore: false, null)) overlay.Disarm();
+        if (IconPx(h) is not Rect ic) { overlay.Disarm(); return; }
+        if (!overlay.Play(s.Img, s.RectPx, ic, restore: false, null)) overlay.Disarm();
     }
 
     // ---------- snapshots on disk, so minimized windows still animate back after MacDock restarts
@@ -589,7 +620,7 @@ class Genie
         if (!snaps.TryGetValue(h, out var s)) return;
         armedFor = h;
         armPt = pt;
-        overlay.Arm(s.Img, ToDip(s.RectPx));
+        overlay.Arm(s.Img, s.RectPx);
     }
 
     /// <summary>
@@ -599,7 +630,7 @@ class Genie
     public void MinimizeFromDock(IntPtr h, Action minimize)
     {
         Capture(h, sync: true);
-        if (!snaps.TryGetValue(h, out var s) || iconRect(h) is not Rect ic || !overlay.Play(s.Img, ToDip(s.RectPx), ic, restore: false, null, minimize))
+        if (!snaps.TryGetValue(h, out var s) || IconPx(h) is not Rect ic || !overlay.Play(s.Img, s.RectPx, ic, restore: false, null, minimize))
             minimize();
     }
 
@@ -607,9 +638,9 @@ class Genie
     public bool PlayRestore(IntPtr h, Action done)
     {
         if (!snaps.TryGetValue(h, out var s)) { Log($"restore without snapshot: {Describe(h)}"); return false; }
-        if (iconRect(h) is not Rect ic) { Log($"restore without dock icon: {Describe(h)}"); return false; }
+        if (IconPx(h) is not Rect ic) { Log($"restore without dock icon: {Describe(h)}"); return false; }
         Forget(h);
-        if (overlay.Play(s.Img, ToDip(s.RectPx), ic, restore: true, done)) return true;
+        if (overlay.Play(s.Img, s.RectPx, ic, restore: true, done)) return true;
         Log($"restore skipped, overlay busy: {Describe(h)}");
         return false;
     }
