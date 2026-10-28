@@ -555,7 +555,8 @@ class DockWindow : Window
             return;
         }
         var fg = GetForegroundWindow();
-        if (it.Windows.Any(w => w.Hwnd == fg))
+        // a just-minimized last window can still be "foreground" while iconic: that one wants restoring
+        if (!IsIconic(fg) && it.Windows.Any(w => w.Hwnd == fg))
         {
             void MinimizeAll() { foreach (var w in it.Windows) Shell.Minimize(w.Hwnd); }
             if (genie != null) genie.MinimizeFromDock(fg, MinimizeAll);

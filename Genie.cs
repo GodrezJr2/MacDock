@@ -248,7 +248,7 @@ class Genie
     [DllImport("user32.dll")] static extern bool SystemParametersInfoW(uint action, uint param, ref ANIMATIONINFO info, uint flags);
 
     const uint EVENT_SYSTEM_FOREGROUND = 0x3, EVENT_SYSTEM_MOVESIZEEND = 0xB, EVENT_SYSTEM_MINIMIZESTART = 0x16;
-    const int MaxSnaps = 8;
+    const int MaxSnaps = 8, MaxMinimized = 30;
 
     record Snap(BitmapSource Img, Rect RectPx, DateTime At);
 
@@ -326,7 +326,8 @@ class Genie
             if (mouseHook != IntPtr.Zero) { UnhookWindowsHookEx(mouseHook); mouseHook = IntPtr.Zero; }
             armedFor = IntPtr.Zero;
             overlay.Disarm();
-            snaps.Clear();
+            // drop what can be captured again; keep minimized windows' snapshots for their way back
+            foreach (var k in snaps.Keys.Where(k => !IsIconic(k)).ToList()) snaps.Remove(k);
             Collect();
         }
         else
@@ -385,7 +386,7 @@ class Genie
 
     /// <summary>
     /// Copies the window's pixels straight off the screen (the window in front is what's visible there),
-    /// shrunk to at most 1280 px wide by GDI so no full-size bitmap is ever allocated. Runs off the UI thread
+    /// shrunk to at most 1024 px wide by GDI so no full-size bitmap is ever allocated. Runs off the UI thread
     /// unless <paramref name="sync"/> (the dock is about to minimize it).
     /// </summary>
     public void Capture(IntPtr h, bool sync = false)
@@ -413,7 +414,7 @@ class Genie
     static BitmapSource? Grab(RECT r)
     {
         int w = r.Right - r.Left, ht = r.Bottom - r.Top;
-        int dw = Math.Min(w, 1280), dh = (int)Math.Round(ht * (double)dw / w);
+        int dw = Math.Min(w, 1024), dh = (int)Math.Round(ht * (double)dw / w);
         IntPtr sdc = GetDC(IntPtr.Zero), mdc = CreateCompatibleDC(sdc);
         var bi = new BITMAPINFOHEADER { biSize = 40, biWidth = dw, biHeight = -dh, biPlanes = 1, biBitCount = 32 };
         IntPtr dib = CreateDIBSection(sdc, ref bi, 0, out IntPtr bits, IntPtr.Zero, 0);
@@ -443,9 +444,20 @@ class Genie
         // Snapshot pixels live in native WIC memory the GC can't see, so replaced ones pile up (500+ MB)
         // until a collection happens to run. Collect now and then to hand them back.
         if (++stores % 6 == 0) Collect();
-        if (snaps.Count > MaxSnaps)
-            foreach (var k in snaps.Where(kv => !IsWindow(kv.Key)).Select(kv => kv.Key).Concat(snaps.OrderBy(kv => kv.Value.At).Select(kv => kv.Key)).Distinct().Take(snaps.Count - MaxSnaps).ToList())
-                snaps.Remove(k);
+        Prune();
+    }
+
+    /// <summary>
+    /// A minimized window can't be captured again, so its snapshot is the only way to animate it back:
+    /// keep those (up to MaxMinimized) and only evict snapshots of windows that are still on screen.
+    /// </summary>
+    void Prune()
+    {
+        foreach (var k in snaps.Keys.Where(k => !IsWindow(k)).ToList()) snaps.Remove(k);
+        var visible = snaps.Where(kv => !IsIconic(kv.Key)).OrderBy(kv => kv.Value.At).Select(kv => kv.Key).ToList();
+        foreach (var k in visible.Take(Math.Max(0, visible.Count - MaxSnaps))) snaps.Remove(k);
+        var minimized = snaps.Where(kv => IsIconic(kv.Key)).OrderBy(kv => kv.Value.At).Select(kv => kv.Key).ToList();
+        foreach (var k in minimized.Take(Math.Max(0, minimized.Count - MaxMinimized))) snaps.Remove(k);
     }
 
     Rect ToDip(Rect px) => new(px.X / dpi, px.Y / dpi, px.Width / dpi, px.Height / dpi);
