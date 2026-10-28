@@ -52,12 +52,16 @@ in .NET 10 WPF. Replaces the Windhawk taskbar restyle (ClearMacDock theme looked
   sends ABN_FULLSCREENAPP and the dock hid itself mid-animation; App.Fullscreen also checks the
   foreground window really covers the screen.
 
-- Minimize "flash": the overlay used to be shown/hidden per animation, and a freshly shown window
-  presents a stale or blank frame first. Now it stays shown and is parked at -32000 when idle (moving a shown
-  window is instant and off-screen it cannot block clicks). Do NOT try WS_EX_LAYERED|TRANSPARENT on it:
-  WPF strips WS_EX_LAYERED from an AllowsTransparency=false window, leaving a full-screen topmost window
-  that eats every click. Dock-click minimizes show the snapshot first and minimize the window under it on
-  the second tick.
+- Minimize "flash", round 2: the overlay is always shown full-screen and DWM-cloaked when idle (cloaked
+  windows take no clicks, like other virtual desktops). Title-bar minimizes: a low-level mouse hook sees the
+  press on a window's minimize button (WM_NCHITTEST = HTMINBUTTON), takes a fresh snapshot and draws it into
+  the cloaked overlay; on release (same spot) it uncloaks over the window, so it is already up when the
+  window vanishes. Without that (keyboard, PostMessage) there are ~2 frames of gap from the async
+  EVENT_SYSTEM_MINIMIZESTART. DPI-unaware apps fail the hit test and fall back to that.
+- Dead ends: parking the overlay at -32000 (it worked, but the "white frame" I blamed it for was a test
+  click that maximized Notepad); WS_EX_LAYERED|TRANSPARENT added by hand (WPF strips LAYERED, the
+  full-screen overlay then ate every click). Synthetic mouse_event clicks on caption buttons don't minimize,
+  so real title-bar clicks can only be judged by Jay.
 - `--restore` also puts Windows' minimize animation back (from WindowMetrics\MinAnimate), since a killed
   run leaves it off for the session.
 

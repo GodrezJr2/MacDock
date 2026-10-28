@@ -95,9 +95,41 @@ class GenieWindow : Window
         };
     }
 
+    public bool Armed { get; private set; }
+
+    /// <summary>
+    /// While a window's minimize button is held, draw its snapshot into the still-cloaked overlay. When the
+    /// window vanishes we only have to uncloak, since the frame is already rendered. It must stay cloaked
+    /// until then: covering the window during the press steals the click (Notepad maximized instead).
+    /// </summary>
+    public void Arm(ImageSource img, Rect windowDip)
+    {
+        if (Busy) return;
+        win = icon = windowDip;
+        cam.Position = new Point3D(Width / 2, -Height / 2, 10);
+        cam.Width = Width;
+        brush.ImageSource = img;
+        Shape(0);
+        Armed = true;
+    }
+
+    /// <summary>The minimize button was released: show the prepared snapshot over the window before it goes.</summary>
+    public void Reveal() { if (Armed && !Busy) Cloak(false); }
+
+    public void Disarm()
+    {
+        if (!Armed || Busy) return;
+        Armed = false;
+        Cloak(true);
+        mesh.Positions = new Point3DCollection();
+        brush.ImageSource = null;
+    }
+
     public bool Play(ImageSource img, Rect windowDip, Rect iconDip, bool restore, Action? done, Action? started = null)
     {
         if (Busy) return false;
+        bool prepared = Armed && ReferenceEquals(brush.ImageSource, img);
+        Armed = false;
         // fixed full-screen overlay: resizing the swap chain per animation risks a stale first frame
         win = windowDip;
         icon = iconDip;
@@ -108,11 +140,13 @@ class GenieWindow : Window
         this.restore = restore;
         this.done = done;
         this.started = started;
-        frame = 0;
+        frame = prepared ? 2 : 0;
         duration = restore ? 0.5 : 0.56;
         Busy = true;
         Shape(restore ? 1 : 0);
-        Left = 0; Top = 0;
+        // reveal at once: the overlay's last frame is the empty one rendered before it was cloaked, so the
+        // worst case is one transparent frame, never a stale or white one (and if armed, the snapshot is ready)
+        Cloak(false);
         clock.Restart();
         CompositionTarget.Rendering += OnFrame;
         return true;
@@ -120,9 +154,12 @@ class GenieWindow : Window
 
     void OnFrame(object? s, EventArgs e)
     {
-        // the snapshot is on screen once we get a second tick; only now may the real window vanish under it
-        if (++frame == 2) { started?.Invoke(); started = null; clock.Restart(); }
-        double t = frame < 2 ? 0 : Math.Min(1, clock.Elapsed.TotalSeconds / duration);
+        // tick 2: our first frame has been rendered, so uncloak; tick 3: it is on screen, so the real window
+        // may now vanish under it and the motion starts
+        frame++;
+        if (frame == 2) Cloak(false);
+        if (frame == 3) { started?.Invoke(); started = null; clock.Restart(); }
+        double t = frame < 3 ? 0 : Math.Min(1, clock.Elapsed.TotalSeconds / duration);
         Shape(restore ? 1 - t : t);
         if (t < 1) return;
 
@@ -132,17 +169,29 @@ class GenieWindow : Window
         // before hiding so the next Show doesn't flash this one
         After(restore ? 90 : 0, () =>
         {
+            Cloak(true);
             mesh.Positions = new Point3DCollection();
             brush.ImageSource = null;
-            After(40, () => { Park(); Busy = false; });
+            Busy = false;
         });
     }
 
     /// <summary>
-    /// Idle overlay stays shown but far off-screen: showing a hidden window costs a frame of stale or blank
-    /// pixels (the flash), while moving a shown one is instant, and off-screen it can never block a click.
+    /// The overlay is always shown, full-screen, and DWM-cloaked while idle. Showing a hidden window, or moving
+    /// one back from off-screen (WPF stops rendering it there), shows a frame of the white class background
+    /// first: that was the flash. A cloaked window keeps rendering, is invisible and takes no clicks
+    /// (like windows on another virtual desktop), and uncloaking reveals the frame already drawn.
     /// </summary>
-    public void Park() { Left = -32000; Top = -32000; }
+    public void Cloak(bool on)
+    {
+        var h = new WindowInteropHelper(this).Handle;
+        if (h == IntPtr.Zero || on == cloaked) return;
+        int v = on ? 1 : 0;
+        DwmSetWindowAttribute(h, 13, ref v, 4); // DWMWA_CLOAK
+        cloaked = on;
+    }
+    bool cloaked;
+
 
     static void After(int ms, Action a)
     {
@@ -210,6 +259,20 @@ class Genie
     readonly WinEventProc proc;
     readonly List<IntPtr> hooks = new();
     readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromSeconds(6) };
+
+    // low-level mouse hook: spot a press on a window's minimize button before the window vanishes
+    delegate IntPtr LowLevelProc(int code, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] static extern IntPtr SetWindowsHookExW(int id, LowLevelProc proc, IntPtr mod, uint tid);
+    [DllImport("user32.dll")] static extern bool UnhookWindowsHookEx(IntPtr h);
+    [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr h, int code, IntPtr w, IntPtr l);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandleW(string? name);
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
+    [DllImport("user32.dll")] static extern IntPtr SendMessageTimeoutW(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
+    readonly LowLevelProc mouseProc;
+    IntPtr mouseHook;
+    IntPtr armedFor;
+    POINT armPt;
     int originalMinAnimate = -1;
 
     public Genie(Func<IntPtr, Rect?> iconRect, double dpi)
@@ -217,6 +280,7 @@ class Genie
         this.iconRect = iconRect;
         this.dpi = dpi;
         proc = OnEvent;
+        mouseProc = OnMouse;
         timer.Tick += (_, _) => Capture(GetForegroundWindow());
     }
 
@@ -233,7 +297,8 @@ class Genie
         foreach (var ev in new[] { EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MINIMIZESTART })
             hooks.Add(SetWinEventHook(ev, ev, IntPtr.Zero, proc, 0, 0, 0x2)); // out of context, skip own process
         overlay.Show();
-        overlay.Park();
+        overlay.Cloak(true);
+        mouseHook = SetWindowsHookExW(14, mouseProc, GetModuleHandleW(null), 0); // WH_MOUSE_LL
         timer.Start();
     }
 
@@ -250,6 +315,7 @@ class Genie
         timer.Stop();
         foreach (var h in hooks) UnhookWinEvent(h);
         hooks.Clear();
+        if (mouseHook != IntPtr.Zero) { UnhookWindowsHookEx(mouseHook); mouseHook = IntPtr.Zero; }
         if (originalMinAnimate >= 0)
         {
             var ai = new ANIMATIONINFO { cbSize = (uint)Marshal.SizeOf<ANIMATIONINFO>(), iMinAnimate = originalMinAnimate };
@@ -343,8 +409,51 @@ class Genie
 
     void PlayMinimize(IntPtr h)
     {
-        if (!snaps.TryGetValue(h, out var s) || iconRect(h) is not Rect ic) return;
-        overlay.Play(s.Img, ToDip(s.RectPx), ic, restore: false, null);
+        armedFor = IntPtr.Zero;
+        if (!snaps.TryGetValue(h, out var s) || iconRect(h) is not Rect ic) { overlay.Disarm(); return; }
+        if (!overlay.Play(s.Img, ToDip(s.RectPx), ic, restore: false, null)) overlay.Disarm();
+    }
+
+    IntPtr OnMouse(int code, IntPtr w, IntPtr l)
+    {
+        // keep the hook itself instant; the real work runs on the dispatcher right after
+        if (code >= 0)
+        {
+            if ((int)w == 0x201) // WM_LBUTTONDOWN
+            {
+                var pt = Marshal.PtrToStructure<POINT>(l);
+                overlay.Dispatcher.BeginInvoke(() => MaybeArm(pt));
+            }
+            else if ((int)w == 0x202 && armedFor != IntPtr.Zero) // WM_LBUTTONUP
+            {
+                // released where it was pressed: the window is about to minimize, so put the snapshot up now
+                // instead of waiting for the (asynchronous) minimize event
+                var up = Marshal.PtrToStructure<POINT>(l);
+                if (Math.Abs(up.X - armPt.X) < 12 && Math.Abs(up.Y - armPt.Y) < 12) overlay.Reveal();
+                // no minimize after the release: take the cover away again quickly (it is a full-screen window)
+                var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(220) };
+                var armed = armedFor;
+                t.Tick += (_, _) => { t.Stop(); if (armedFor == armed) { armedFor = IntPtr.Zero; overlay.Disarm(); } };
+                t.Start();
+            }
+        }
+        return CallNextHookEx(mouseHook, code, w, l);
+    }
+
+    void MaybeArm(POINT pt)
+    {
+        if (overlay.Busy || overlay.Armed) return;
+        var h = GetAncestor(WindowFromPoint(pt), 2); // GA_ROOT
+        if (h == IntPtr.Zero) return;
+        GetWindowThreadProcessId(h, out uint pid);
+        if (pid == (uint)Environment.ProcessId) return;
+        IntPtr lp = (IntPtr)(((pt.Y & 0xFFFF) << 16) | (pt.X & 0xFFFF));
+        if (SendMessageTimeoutW(h, 0x84, IntPtr.Zero, lp, 0x2, 50, out var hit) == IntPtr.Zero || (int)hit != 8) return; // HTMINBUTTON
+        Capture(h, sync: true);
+        if (!snaps.TryGetValue(h, out var s)) return;
+        armedFor = h;
+        armPt = pt;
+        overlay.Arm(s.Img, ToDip(s.RectPx));
     }
 
     /// <summary>
