@@ -22,6 +22,8 @@ class Config
     public bool HideTaskbar { get; set; } = true;
     public bool MenuBar { get; set; } = true;
     public bool Genie { get; set; } = true;
+    /// <summary>Put every app icon on a macOS-style squircle tile.</summary>
+    public bool IconTiles { get; set; } = true;
 
     static string Dir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MacDock");
     static string FilePath => Path.Combine(Dir, "config.json");

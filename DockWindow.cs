@@ -254,7 +254,7 @@ class DockWindow : Window
         else it.Exe = spec;
         it.Name = Shell.DisplayName(spec) ?? Shell.FriendlyName(it.Exe, it.Aumid, spec);
         if (it.Exe != null && it.Name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) it.Name = Shell.FriendlyName(it.Exe, null, it.Name);
-        it.Icon = Shell.Icon(spec) ?? (it.Exe != null ? Shell.Icon(it.Exe) : null);
+        it.Icon = AppIcon(Shell.Icon(spec) ?? (it.Exe != null ? Shell.Icon(it.Exe) : null));
         return pinnedCache[spec] = it;
     }
 
@@ -270,9 +270,11 @@ class DockWindow : Window
             Exe = w.Exe,
             Launch = launch,
             Name = Shell.FriendlyName(w.Exe, w.Aumid, w.Title),
-            Icon = (launch != null ? Shell.Icon(launch) : null) ?? (w.Exe != null ? Shell.Icon(w.Exe) : null),
+            Icon = AppIcon((launch != null ? Shell.Icon(launch) : null) ?? (w.Exe != null ? Shell.Icon(w.Exe) : null)),
         };
     }
+
+    ImageSource? AppIcon(ImageSource? icon) => cfg.IconTiles ? IconTile.Make(icon) : icon;
 
     void Refresh(bool initial = false)
     {
