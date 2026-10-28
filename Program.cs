@@ -27,6 +27,7 @@ static class Program
 class App : Application
 {
     DockWindow? dock;
+    public static DockWindow? Dock => (Current as App)?.dock;
     MenuBarWindow? bar;
     Config cfg = new();
 

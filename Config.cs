@@ -24,6 +24,8 @@ class Config
     public bool Genie { get; set; } = true;
     /// <summary>Put every app icon on a macOS-style squircle tile.</summary>
     public bool IconTiles { get; set; } = true;
+    /// <summary>Slide the dock away until the pointer touches the bottom edge (no space reserved for it).</summary>
+    public bool AutoHide { get; set; }
 
     static string Dir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MacDock");
     static string FilePath => Path.Combine(Dir, "config.json");

@@ -259,6 +259,7 @@ class MenuBarWindow : Window
             new Separator(),
             Item("Lock Screen", () => LockWorkStation(), "Win+L"),
             new Separator(),
+            Item("Automatically Hide Dock", () => App.Dock?.SetAutoHide(!App.Dock.AutoHide), check: App.Dock?.AutoHide == true),
             Item("Open MacDock at Login", ToggleLogin, check: atLogin),
             Item("Edit Dock Settings…", () => Shell.Launch(System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MacDock", "config.json"))),
             Item("Quit MacDock", App.Quit),

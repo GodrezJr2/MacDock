@@ -110,6 +110,11 @@ class DockWindow : Window
         canvas.Children.Add(separator);
         canvas.Children.Add(label);
         Content = canvas;
+        canvas.RenderTransform = slide;
+        // the frame loop sleeps when nothing moves: wake it when the pointer hits the edge of a hidden dock, and
+        // now and then while the dock is up so it can notice the pointer has left and slide away
+        edgeTimer.Tick += (_, _) => { if (IsVisible && ((hide > 0 && AtBottomEdge()) || (hide < 1 && !awake))) Wake(); };
+        edgeTimer.IsEnabled = cfg.AutoHide;
 
         trash = new DockItem { Key = "trash", Name = "Recycle Bin", IsTrash = true, Launch = Shell.TrashPath, Icon = Shell.Icon(Shell.TrashPath, cache: false), Presence = 1 };
 
@@ -213,7 +218,7 @@ class DockWindow : Window
         MakeToolWindow(hwnd);
         dpi = VisualTreeHelper.GetDpi(this).DpiScaleX;
         appBar = new AppBar(hwnd, ABE_BOTTOM);
-        appBar.Register((int)Math.Round((PlateH + BottomGap * 2) * dpi), (int)Math.Round(screenW * dpi), (int)Math.Round(screenH * dpi));
+        if (!cfg.AutoHide) ReserveSpace();
         HwndSource.FromHwnd(hwnd).AddHook(WndProc);
         // HSHELL_FLASH arrives when an app flashes its taskbar button (FlashWindowEx) asking for attention
         shellHookMsg = RegisterWindowMessageW("SHELLHOOK");
@@ -235,6 +240,42 @@ class DockWindow : Window
         return IntPtr.Zero;
     }
     uint shellHookMsg;
+
+    void ReserveSpace() => appBar?.Register((int)Math.Round((PlateH + BottomGap * 2) * dpi), (int)Math.Round(screenW * dpi), (int)Math.Round(screenH * dpi));
+
+    // ---------------------------------------------------------------- auto-hide
+
+    double hide;                      // 0 = shown, 1 = slid below the screen edge
+    DateTime peekUntil, lastNear;
+    readonly TranslateTransform slide = new();
+    readonly DispatcherTimer edgeTimer = new() { Interval = TimeSpan.FromMilliseconds(60) };
+
+    /// <summary>The pointer is on the bottom edge of the primary screen (where the hidden dock waits).</summary>
+    bool AtBottomEdge()
+    {
+        GetCursorPos(out var p);
+        return p.Y >= Math.Round(screenH * dpi) - 2 && p.X >= 0 && p.X < Math.Round(screenW * dpi);
+    }
+
+    /// <summary>Show the dock for a moment even when hidden: a genie aiming at it, an app asking for attention.</summary>
+    void Peek(double seconds)
+    {
+        if (!cfg.AutoHide) return;
+        var until = DateTime.Now.AddSeconds(seconds);
+        if (until > peekUntil) peekUntil = until;
+        Wake();
+    }
+
+    public bool AutoHide => cfg.AutoHide;
+
+    public void SetAutoHide(bool on)
+    {
+        cfg.AutoHide = on;
+        cfg.Save();
+        if (on) appBar?.Remove(); else ReserveSpace();
+        edgeTimer.IsEnabled = on;
+        Wake();
+    }
     const double AttentionHop = 0.5, AttentionCycle = 1.1;
 
     void WantsAttention(IntPtr h)
@@ -247,6 +288,7 @@ class DockWindow : Window
         if (it == null || it.Attention) return;
         it.Attention = true;
         it.AttentionStarted = DateTime.Now;
+        Peek(AttentionCycle * 5);
         Wake();
     }
 
@@ -387,10 +429,21 @@ class DockWindow : Window
         double mx = cp.X / dpi - Left, my = cp.Y / dpi - Top;
         double plateBottom = Height - BottomGap, plateTop = plateBottom - PlateH;
         double tallest = items.Count > 0 ? items.Max(i => i.Size) : B;
-        bool hovering = !menuOpen && IsVisible &&
+        bool hovering = !menuOpen && IsVisible && hide < 0.5 &&
             mx >= plateLeft && mx <= plateLeft + plateW &&
             my >= plateBottom - Pad - tallest - 6 && my <= Height + 2;
         if (dragging) hovering = my >= plateTop - 70;
+
+        if (cfg.AutoHide)
+        {
+            var now = DateTime.Now;
+            if (hovering || dragging || pressed != null || menuOpen || AtBottomEdge()) lastNear = now;
+            // linger a moment after the pointer leaves, like macOS
+            bool show = now < peekUntil || (now - lastNear).TotalSeconds < 0.35;
+            hide = Approach(hide, show ? 0 : 1, 1 - Math.Exp(-dt * 13));
+        }
+        else hide = Approach(hide, 0, 1 - Math.Exp(-dt * 13));
+        slide.Y = hide * (PlateH + BottomGap + 3);
 
         // magnification targets come from the resting (unmagnified) layout so they don't feed back on themselves
         double restW = Layout(_ => 1, 0, null, null) + PadX * 2;
@@ -496,7 +549,8 @@ class DockWindow : Window
         frostBrush.Viewbox = new Rect((Left + plateLeft) * fx, (Top + plateTop) * fy, plateW * fx, PlateH * fy);
 
         // nothing moving and the pointer is away: stop ticking until something wakes us
-        if (settled && !hovering && items.All(i => !i.Leaving)) Sleep();
+        bool hideSettled = hide == (cfg.AutoHide && DateTime.Now >= peekUntil && (DateTime.Now - lastNear).TotalSeconds >= 0.35 ? 1 : 0);
+        if (settled && hideSettled && !hovering && items.All(i => !i.Leaving)) Sleep();
     }
 
     static double Approach(double v, double target, double k)
@@ -627,6 +681,7 @@ class DockWindow : Window
     /// <summary>Screen rect (DIPs) of the dock icon that owns a window, for the genie to aim at.</summary>
     Rect? IconRectFor(IntPtr hwnd)
     {
+        Peek(1.4); // a hidden dock slides up to catch the window
         var it = items.FirstOrDefault(i => !i.Leaving && i.Windows.Any(w => w.Hwnd == hwnd));
         double plateBottom = Height - BottomGap;
         if (it == null) return new Rect(Left + Width / 2 - B / 2, Top + plateBottom - Pad - B, B, B);
@@ -645,7 +700,6 @@ class DockWindow : Window
     void OnRightUp(object s, MouseButtonEventArgs e)
     {
         var it = ItemAt(e.GetPosition(canvas).X);
-        if (it == null || it.Img == null) return;
         e.Handled = true;
 
         var cm = new ContextMenu();
@@ -656,7 +710,12 @@ class DockWindow : Window
             cm.Items.Add(mi);
         }
 
-        if (it.IsTrash)
+        if (it == null || it.Img == null)
+        {
+            // the plate between icons (the divider on macOS): dock settings
+            Add(cfg.AutoHide ? "Turn Hiding Off" : "Turn Hiding On", () => SetAutoHide(!cfg.AutoHide));
+        }
+        else if (it.IsTrash)
         {
             Add("Open", () => Shell.Launch(Shell.TrashPath));
             Add("Empty Recycle Bin", () => { SHEmptyRecycleBinW(IntPtr.Zero, null, 0); Refresh(); });
@@ -689,10 +748,14 @@ class DockWindow : Window
             }
         }
 
-        cm.PlacementTarget = it.Img;
-        cm.Placement = PlacementMode.Custom;
-        cm.CustomPopupPlacementCallback = (popup, target, _) =>
-            new[] { new CustomPopupPlacement(new Point((target.Width - popup.Width) / 2, -popup.Height + 8), PopupPrimaryAxis.Horizontal) };
+        if (it?.Img == null) cm.Placement = PlacementMode.MousePoint;
+        else
+        {
+            cm.PlacementTarget = it.Img;
+            cm.Placement = PlacementMode.Custom;
+            cm.CustomPopupPlacementCallback = (popup, target, _) =>
+                new[] { new CustomPopupPlacement(new Point((target.Width - popup.Width) / 2, -popup.Height + 8), PopupPrimaryAxis.Horizontal) };
+        }
         cm.Opened += (_, _) => menuOpen = true;
         cm.Closed += (_, _) => { menuOpen = false; Wake(); };
         OpenMenu(this, cm);
