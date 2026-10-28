@@ -29,17 +29,25 @@ class GenieWindow : Window
     Action? done;
     public bool Busy { get; private set; }
 
+    [StructLayout(LayoutKind.Sequential)] struct MARGINS { public int l, r, t, b; }
+    [DllImport("dwmapi.dll")] static extern int DwmExtendFrameIntoClientArea(IntPtr h, ref MARGINS m);
+    [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int v, int size);
+
+    // Not a layered window: those are read back from the GPU every frame, which made the genie stutter.
+    // A normal full-screen window with its frame extended over the client lets DWM compose our alpha directly.
     public GenieWindow()
     {
         WindowStyle = WindowStyle.None;
-        AllowsTransparency = true;
-        Background = null;
+        AllowsTransparency = false;
+        Background = Brushes.Transparent;
         Topmost = true;
         ShowInTaskbar = false;
         ShowActivated = false;
         ResizeMode = ResizeMode.NoResize;
         IsHitTestVisible = false;
-        Left = -10; Top = -10; Width = 1; Height = 1;
+        Left = 0; Top = 0;
+        // one pixel short of the screen, or Explorer reports a fullscreen app and the dock hides itself
+        Width = SystemParameters.PrimaryScreenWidth; Height = SystemParameters.PrimaryScreenHeight - 1;
 
         var tex = new PointCollection();
         var idx = new Int32Collection();
@@ -65,19 +73,35 @@ class GenieWindow : Window
         vp.Children.Add(new ModelVisual3D { Content = group });
         Content = vp;
 
-        SourceInitialized += (_, _) => MakeToolWindow(new WindowInteropHelper(this).Handle, clickThrough: true);
+        SourceInitialized += (_, _) =>
+        {
+            var h = new WindowInteropHelper(this).Handle;
+            var src = HwndSource.FromHwnd(h);
+            src.CompositionTarget.BackgroundColor = Colors.Transparent;
+            var m = new MARGINS { l = -1, r = -1, t = -1, b = -1 };
+            DwmExtendFrameIntoClientArea(h, ref m);
+            int none = 1, noRound = 1, noBorder = unchecked((int)0xFFFFFFFE);
+            DwmSetWindowAttribute(h, 38, ref none, 4);     // DWMWA_SYSTEMBACKDROP_TYPE = none
+            DwmSetWindowAttribute(h, 33, ref noRound, 4);  // no rounded corners
+            DwmSetWindowAttribute(h, 34, ref noBorder, 4); // no border
+            MakeToolWindow(h, clickThrough: true);
+            // let clicks fall through while an animation is on screen
+            src.AddHook((IntPtr hw, int msg, IntPtr w, IntPtr l, ref bool handled) =>
+            {
+                if (msg == 0x84) { handled = true; return (IntPtr)(-1); } // WM_NCHITTEST → HTTRANSPARENT
+                return IntPtr.Zero;
+            });
+        };
     }
 
     public bool Play(ImageSource img, Rect windowDip, Rect iconDip, bool restore, Action? done)
     {
         if (Busy) return false;
-        var bounds = Rect.Union(windowDip, iconDip);
-        bounds.Inflate(2, 2);
-        Left = bounds.Left; Top = bounds.Top; Width = bounds.Width; Height = bounds.Height;
-        win = new Rect(windowDip.X - bounds.X, windowDip.Y - bounds.Y, windowDip.Width, windowDip.Height);
-        icon = new Rect(iconDip.X - bounds.X, iconDip.Y - bounds.Y, iconDip.Width, iconDip.Height);
-        cam.Position = new Point3D(bounds.Width / 2, -bounds.Height / 2, 10);
-        cam.Width = bounds.Width;
+        // fixed full-screen overlay: resizing the swap chain per animation risks a stale first frame
+        win = windowDip;
+        icon = iconDip;
+        cam.Position = new Point3D(Width / 2, -Height / 2, 10);
+        cam.Width = Width;
         brush.ImageSource = img;
 
         this.restore = restore;
@@ -99,10 +123,22 @@ class GenieWindow : Window
 
         CompositionTarget.Rendering -= OnFrame;
         done?.Invoke();
-        // keep the last frame up a moment so the real window has painted before the overlay goes
-        var hide = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(restore ? 90 : 10) };
-        hide.Tick += (_, _) => { hide.Stop(); Visibility = Visibility.Hidden; brush.ImageSource = null; Busy = false; };
-        hide.Start();
+        // keep the last frame up a moment so the real window has painted, then render an empty frame
+        // before hiding so the next Show doesn't flash this one
+        After(restore ? 90 : 0, () =>
+        {
+            mesh.Positions = new Point3DCollection();
+            brush.ImageSource = null;
+            After(40, () => { Visibility = Visibility.Hidden; Busy = false; });
+        });
+    }
+
+    static void After(int ms, Action a)
+    {
+        if (ms <= 0) { a(); return; }
+        var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(ms) };
+        t.Tick += (_, _) => { t.Stop(); a(); };
+        t.Start();
     }
 
     static double Smooth(double x) { x = Math.Clamp(x, 0, 1); return x * x * (3 - 2 * x); }
@@ -162,7 +198,7 @@ class Genie
     readonly Dictionary<IntPtr, Snap> snaps = new();
     readonly WinEventProc proc;
     readonly List<IntPtr> hooks = new();
-    readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromSeconds(1.5) };
+    readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromSeconds(6) };
     int originalMinAnimate = -1;
 
     public Genie(Func<IntPtr, Rect?> iconRect, double dpi)
@@ -213,10 +249,24 @@ class Genie
         }
     }
 
-    /// <summary>Copies the window's pixels straight off the screen; the window in front is what's visible there.</summary>
-    public void Capture(IntPtr h)
+    [StructLayout(LayoutKind.Sequential)]
+    struct BITMAPINFOHEADER { public int biSize, biWidth, biHeight; public short biPlanes, biBitCount; public int biCompression, biSizeImage, biXPelsPerMeter, biYPelsPerMeter, biClrUsed, biClrImportant; }
+    [DllImport("gdi32.dll")] static extern IntPtr CreateDIBSection(IntPtr dc, ref BITMAPINFOHEADER bi, uint usage, out IntPtr bits, IntPtr section, uint offset);
+    [DllImport("gdi32.dll")] static extern bool StretchBlt(IntPtr dst, int x, int y, int w, int h, IntPtr src, int sx, int sy, int sw, int sh, uint rop);
+    [DllImport("gdi32.dll")] static extern int SetStretchBltMode(IntPtr dc, int mode);
+    [DllImport("gdi32.dll")] static extern bool SetBrushOrgEx(IntPtr dc, int x, int y, IntPtr old);
+    [DllImport("gdi32.dll")] static extern bool GdiFlush();
+
+    bool capturing;
+
+    /// <summary>
+    /// Copies the window's pixels straight off the screen (the window in front is what's visible there),
+    /// shrunk to at most 1280 px wide by GDI so no full-size bitmap is ever allocated. Runs off the UI thread
+    /// unless <paramref name="sync"/> (the dock is about to minimize it).
+    /// </summary>
+    public void Capture(IntPtr h, bool sync = false)
     {
-        if (h == IntPtr.Zero || overlay.Busy || !IsWindowVisible(h) || IsIconic(h)) return;
+        if (h == IntPtr.Zero || overlay.Busy || (capturing && !sync) || !IsWindowVisible(h) || IsIconic(h)) return;
         GetWindowThreadProcessId(h, out uint pid);
         if (pid == (uint)Environment.ProcessId) return;
         if (DwmGetWindowAttribute(h, 9, out RECT r, Marshal.SizeOf<RECT>()) != 0) GetWindowRect(h, out r); // extended frame bounds
@@ -225,21 +275,44 @@ class Genie
         r.Right = Math.Min(sw, r.Right); r.Bottom = Math.Min(sh, r.Bottom);
         int w = r.Right - r.Left, ht = r.Bottom - r.Top;
         if (w < 80 || ht < 60) return;
+        var rect = new Rect(r.Left, r.Top, w, ht);
 
-        IntPtr sdc = GetDC(IntPtr.Zero), mdc = CreateCompatibleDC(sdc), bmp = CreateCompatibleBitmap(sdc, w, ht);
+        if (sync) { if (Grab(r) is BitmapSource now) Store(h, now, rect); return; }
+        capturing = true;
+        System.Threading.Tasks.Task.Run(() => Grab(r)).ContinueWith(t =>
+        {
+            capturing = false;
+            if (t.Status == System.Threading.Tasks.TaskStatus.RanToCompletion && t.Result is BitmapSource img) Store(h, img, rect);
+        }, System.Threading.Tasks.TaskScheduler.FromCurrentSynchronizationContext());
+    }
+
+    static BitmapSource? Grab(RECT r)
+    {
+        int w = r.Right - r.Left, ht = r.Bottom - r.Top;
+        int dw = Math.Min(w, 1280), dh = (int)Math.Round(ht * (double)dw / w);
+        IntPtr sdc = GetDC(IntPtr.Zero), mdc = CreateCompatibleDC(sdc);
+        var bi = new BITMAPINFOHEADER { biSize = 40, biWidth = dw, biHeight = -dh, biPlanes = 1, biBitCount = 32 };
+        IntPtr dib = CreateDIBSection(sdc, ref bi, 0, out IntPtr bits, IntPtr.Zero, 0);
         try
         {
-            var old = SelectObject(mdc, bmp);
-            BitBlt(mdc, 0, 0, w, ht, sdc, r.Left, r.Top, 0x00CC0020); // SRCCOPY
+            if (dib == IntPtr.Zero) return null;
+            var old = SelectObject(mdc, dib);
+            SetStretchBltMode(mdc, 4); // HALFTONE: proper filtering when shrinking
+            SetBrushOrgEx(mdc, 0, 0, IntPtr.Zero);
+            StretchBlt(mdc, 0, 0, dw, dh, sdc, r.Left, r.Top, w, ht, 0x00CC0020); // SRCCOPY
+            GdiFlush();
             SelectObject(mdc, old);
-            BitmapSource img = Imaging.CreateBitmapSourceFromHBitmap(bmp, IntPtr.Zero, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
-            if (w > 1280) img = new WriteableBitmap(new TransformedBitmap(img, new ScaleTransform(1280.0 / w, 1280.0 / w)));
+            var img = BitmapSource.Create(dw, dh, 96, 96, PixelFormats.Bgr32, null, bits, dw * dh * 4, dw * 4);
             img.Freeze();
-            snaps[h] = new Snap(img, new Rect(r.Left, r.Top, w, ht), DateTime.Now);
+            return img;
         }
-        catch { }
-        finally { DeleteObject(bmp); DeleteDC(mdc); ReleaseDC(IntPtr.Zero, sdc); }
+        catch { return null; }
+        finally { if (dib != IntPtr.Zero) DeleteObject(dib); DeleteDC(mdc); ReleaseDC(IntPtr.Zero, sdc); }
+    }
 
+    void Store(IntPtr h, BitmapSource img, Rect rect)
+    {
+        snaps[h] = new Snap(img, rect, DateTime.Now);
         if (snaps.Count > MaxSnaps)
             foreach (var k in snaps.Where(kv => !IsWindow(kv.Key)).Select(kv => kv.Key).Concat(snaps.OrderBy(kv => kv.Value.At).Select(kv => kv.Key)).Distinct().Take(snaps.Count - MaxSnaps).ToList())
                 snaps.Remove(k);

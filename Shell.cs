@@ -163,8 +163,11 @@ static class Shell
 
     static readonly HashSet<string> skipClasses = new() { "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Windows.UI.Core.CoreWindow" };
 
+    static readonly Dictionary<IntPtr, string?> windowAumidCache = new();
+
     public static List<AppWindow> AppWindows()
     {
+        if (windowAumidCache.Count > 400) windowAumidCache.Clear();
         var list = new List<AppWindow>();
         uint self = (uint)Environment.ProcessId;
         var cls = new StringBuilder(256);
@@ -184,7 +187,13 @@ static class Shell
 
             var title = new StringBuilder(tl + 1); GetWindowTextW(h, title, title.Capacity);
             var (exe, paumid) = ProcessInfo(pid);
-            string? aumid = WindowAumid(h) ?? paumid;
+            if (!windowAumidCache.TryGetValue(h, out var waumid))
+            {
+                waumid = WindowAumid(h);
+                // UWP frames get their AUMID a moment after they appear, so don't remember a miss for them
+                if (waumid != null || cls.ToString() != "ApplicationFrameWindow") windowAumidCache[h] = waumid;
+            }
+            string? aumid = waumid ?? paumid;
             if (cls.ToString() == "ApplicationFrameWindow")
             {
                 // UWP frame: the real app lives in a child CoreWindow from another process.

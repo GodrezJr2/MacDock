@@ -40,6 +40,18 @@ in .NET 10 WPF. Replaces the Windhawk taskbar restyle (ClearMacDock theme looked
   the dock icon (squeeze sides, then slide rows down and pile them at the icon). Restore from the dock plays
   it backwards, then restores the window. Restores via Alt+Tab have no animation. `"Genie": false` turns it off.
 
+## Performance (28 Oct 2026)
+- Was 24% of a core idle and 640 MB: render loop ran at 165 Hz forever on a full-width layered window, and
+  genie snapshots allocated full-size bitmaps on the UI thread every 1.5 s.
+- Now: the dock loop sleeps once everything settles (values snap to their targets) and wakes on mouse,
+  refresh changes or launches; the dock window is only as wide as a fully magnified dock; snapshots are
+  shrunk by GDI StretchBlt into a DIB off the UI thread every 6 s; window AUMIDs are cached. Idle 2.5% of
+  one core, ~230 MB private.
+- The genie overlay is a non-layered full-screen window with its frame extended (DWM composes the alpha,
+  no GPU readback): 125-165 fps vs choppy before. It is 1 px shorter than the screen, otherwise Explorer
+  sends ABN_FULLSCREENAPP and the dock hid itself mid-animation; App.Fullscreen also checks the
+  foreground window really covers the screen.
+
 ## Next ideas
 - Zoom-from-icon when an app opens its first window; attention bounce for flashing windows.
 - Drag files onto an icon to open with it; multi-monitor.

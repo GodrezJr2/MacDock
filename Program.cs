@@ -54,9 +54,23 @@ class App : Application
     public static void Fullscreen(bool on)
     {
         if (Current is not App app) return;
+        if (on && !ForegroundIsFullscreen()) return; // e.g. our own overlays; only hide for a real fullscreen app
         app.dock?.SetFullscreenHidden(on);
         if (app.bar != null) app.bar.Visibility = on ? Visibility.Hidden : Visibility.Visible;
     }
+
+    static bool ForegroundIsFullscreen()
+    {
+        var fg = Native.GetForegroundWindow();
+        if (fg == IntPtr.Zero) return false;
+        Native.GetWindowThreadProcessId(fg, out uint pid);
+        if (pid == (uint)Environment.ProcessId) return false;
+        Native.GetWindowRect(fg, out var r);
+        double scale = GetDpiForSystem() / 96.0;
+        return r.Left <= 0 && r.Top <= 0 && r.Right >= SystemParameters.PrimaryScreenWidth * scale && r.Bottom >= SystemParameters.PrimaryScreenHeight * scale;
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern uint GetDpiForSystem();
 
     public static void Quit()
     {

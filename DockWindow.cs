@@ -111,6 +111,8 @@ class DockWindow : Window
         SourceInitialized += OnSourceInitialized;
         MouseLeftButtonDown += OnLeftDown;
         MouseMove += OnMouseMove;
+        MouseEnter += (_, _) => Wake();
+        MouseLeave += (_, _) => Wake();
         MouseLeftButtonUp += OnLeftUp;
         MouseRightButtonUp += OnRightUp;
     }
@@ -124,7 +126,7 @@ class DockWindow : Window
         };
         Show();
         Refresh(initial: true);
-        CompositionTarget.Rendering += OnFrame;
+        Wake();
         if (cfg.Genie)
         {
             genie = new Genie(IconRectFor, dpi);
@@ -137,7 +139,7 @@ class DockWindow : Window
 
     public void Shutdown()
     {
-        CompositionTarget.Rendering -= OnFrame;
+        Sleep();
         appBar?.Remove();
         genie?.Stop();
     }
@@ -145,6 +147,7 @@ class DockWindow : Window
     public void SetFullscreenHidden(bool hide)
     {
         Visibility = hide ? Visibility.Hidden : Visibility.Visible;
+        if (!hide) Wake();
     }
 
     /// <summary>
@@ -182,6 +185,7 @@ class DockWindow : Window
             rtb.Render(dv);
             rtb.Freeze();
             frostBrush.ImageSource = rtb;
+            Wake();
         }
         catch { frostBrush.ImageSource = null; }
     }
@@ -272,7 +276,7 @@ class DockWindow : Window
         running = running.OrderBy(r => { int i = items.IndexOf(r); return i < 0 ? int.MaxValue : i; }).ToList();
         next.AddRange(running);
 
-        if (++refreshCount % 6 == 0) { var ic = Shell.Icon(Shell.TrashPath, cache: false); if (ic != null) trash.Icon = ic; if (trash.Img != null) trash.Img.Source = trash.Icon; }
+        if (++refreshCount % 40 == 0) { var ic = Shell.Icon(Shell.TrashPath, cache: false); if (ic != null) trash.Icon = ic; if (trash.Img != null) trash.Img.Source = trash.Icon; }
         trash.Windows.Clear();
         next.Add(trash);
 
@@ -292,7 +296,12 @@ class DockWindow : Window
         }
         items.Clear();
         items.AddRange(next);
+
+        string sig = string.Join("|", items.Select(i => i.Key + (i.Running ? "*" : "") + (i.Leaving ? "-" : "") + (i.Launching ? "^" : "")));
+        if (sig != lastSig) { lastSig = sig; FitWidth(); Wake(); }
+        if (items.Any(i => i.Launching)) Wake();
     }
+    string lastSig = "";
 
     void CreateVisuals(DockItem it, bool instant)
     {
@@ -348,6 +357,7 @@ class DockWindow : Window
         Layout(_ => 1, restLeft, (it, x, size) => centers[it] = x + B * it.Presence / 2, null);
 
         double R = B * 2.9, k = 1 - Math.Exp(-dt * 17), kp = 1 - Math.Exp(-dt * 9);
+        bool settled = !dragging && pressed == null;
         foreach (var it in items)
         {
             double target = 1;
@@ -356,8 +366,9 @@ class DockWindow : Window
                 double d = Math.Abs(mx - centers[it]);
                 if (d < R) target = 1 + (cfg.Magnify - 1) * (Math.Cos(Math.PI * d / R) + 1) / 2;
             }
-            it.Scale += (target - it.Scale) * k;
-            it.Presence += ((it.Leaving ? 0 : 1) - it.Presence) * kp;
+            it.Scale = Approach(it.Scale, target, k);
+            it.Presence = Approach(it.Presence, it.Leaving ? 0 : 1, kp);
+            if (it.Scale != target || (!it.Leaving && it.Presence != 1) || it.Launching || it.BounceT > 0) settled = false;
         }
         foreach (var gone in items.Where(i => i.Leaving && i.Presence < 0.02).ToList())
         {
@@ -394,7 +405,8 @@ class DockWindow : Window
             it.Img!.Width = it.Img.Height = Math.Max(0.1, size);
             it.Img.Opacity = it == pressed ? (dragging ? (dragOut ? 0.45 : 0.9) : 0.6) : Math.Min(1, it.Presence * 1.3);
 
-            it.DotAlpha += ((it.Running ? 1 : 0) - it.DotAlpha) * kp;
+            it.DotAlpha = Approach(it.DotAlpha, it.Running ? 1 : 0, kp);
+            if (it.DotAlpha != (it.Running ? 1 : 0)) settled = false;
             it.Dot!.Opacity = it.DotAlpha * it.Presence;
             Canvas.SetLeft(it.Dot, ix + size / 2 - 2.5);
             Canvas.SetTop(it.Dot, plateBottom - 5.5);
@@ -408,7 +420,8 @@ class DockWindow : Window
         });
 
         // tooltip label above the hovered icon
-        labelAlpha += ((hovered != null ? 1 : 0) - labelAlpha) * (1 - Math.Exp(-dt * 22));
+        labelAlpha = Approach(labelAlpha, hovered != null ? 1 : 0, 1 - Math.Exp(-dt * 22));
+        if (labelAlpha != (hovered != null ? 1 : 0)) settled = false;
         if (hovered != null)
         {
             if (labelText.Text != hovered.Name) { labelText.Text = hovered.Name; label.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity)); }
@@ -423,6 +436,39 @@ class DockWindow : Window
         frost.Width = plateW; frost.Height = PlateH;
         double fx = frostW / screenW, fy = frostH / screenH;
         frostBrush.Viewbox = new Rect((Left + plateLeft) * fx, (Top + plateTop) * fy, plateW * fx, PlateH * fy);
+
+        // nothing moving and the pointer is away: stop ticking until something wakes us
+        if (settled && !hovering && items.All(i => !i.Leaving)) Sleep();
+    }
+
+    static double Approach(double v, double target, double k)
+    {
+        v += (target - v) * k;
+        return Math.Abs(target - v) < 0.002 ? target : v;
+    }
+
+    bool awake;
+    void Wake()
+    {
+        if (awake) return;
+        awake = true;
+        lastT = clock.Elapsed.TotalSeconds;
+        CompositionTarget.Rendering += OnFrame;
+    }
+    void Sleep()
+    {
+        if (!awake) return;
+        awake = false;
+        CompositionTarget.Rendering -= OnFrame;
+    }
+
+    /// <summary>The window only needs to be as wide as a fully magnified dock plus room for labels.</summary>
+    void FitWidth()
+    {
+        double w = Math.Min(screenW, items.Count * (B * cfg.Magnify + Gap) + PadX * 2 + 2 * Gap + 320);
+        if (Math.Abs(w - Width) < 1) return;
+        Width = w;
+        Left = (screenW - w) / 2;
     }
 
     // ---------------------------------------------------------------- input
@@ -439,6 +485,7 @@ class DockWindow : Window
 
     void OnMouseMove(object s, MouseEventArgs e)
     {
+        Wake();
         if (pressed == null || e.LeftButton != MouseButtonState.Pressed) return;
         var p = e.GetPosition(canvas);
         if (!dragging && pressed.Pinned && (Math.Abs(p.X - pressPt.X) > 8 || Math.Abs(p.Y - pressPt.Y) > 8)) dragging = true;
@@ -493,12 +540,13 @@ class DockWindow : Window
             it.Launching = true;
             it.LaunchStarted = DateTime.Now;
             it.WindowsAtLaunch = 0;
+            Wake();
             return;
         }
         var fg = GetForegroundWindow();
         if (it.Windows.Any(w => w.Hwnd == fg))
         {
-            genie?.Capture(fg); // fresh pixels for the genie that the minimize event will start
+            genie?.Capture(fg, sync: true); // fresh pixels for the genie that the minimize event will start
             foreach (var w in it.Windows) Shell.Minimize(w.Hwnd);
             return;
         }
@@ -583,7 +631,7 @@ class DockWindow : Window
         cm.CustomPopupPlacementCallback = (popup, target, _) =>
             new[] { new CustomPopupPlacement(new Point((target.Width - popup.Width) / 2, -popup.Height + 8), PopupPrimaryAxis.Horizontal) };
         cm.Opened += (_, _) => menuOpen = true;
-        cm.Closed += (_, _) => menuOpen = false;
+        cm.Closed += (_, _) => { menuOpen = false; Wake(); };
         OpenMenu(this, cm);
     }
 }
