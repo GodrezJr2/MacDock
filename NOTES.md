@@ -74,6 +74,14 @@ in .NET 10 WPF. Replaces the Windhawk taskbar restyle (ClearMacDock theme looked
 - Snapshot pixels live in native WIC memory, so replaced ones piled up to 500+ MB private until a GC ran;
   Genie now collects every 6 snapshots.
 
+## Restores without animation
+- Snapshots used to live only in memory, so every MacDock restart (many on 28 Oct while iterating) left the
+  already-minimized windows with nothing to animate. On each minimize the snapshot is now also written to
+  %LOCALAPPDATA%\MacDock\snaps\<hwnd>_<pid>_<x>_<y>_<w>_<h>.png and reloaded at start for windows that are
+  still minimized (pid must match, so a reused handle is ignored); the file goes when the window is restored.
+- %APPDATA%\MacDock\genie.log records each minimize/restore that could not animate and why (no snapshot,
+  no dock icon, overlay busy) with the process name. Read it when Jay reports a missing animation.
+
 ## Next ideas
 - Zoom-from-icon when an app opens its first window; attention bounce for flashing windows.
 - Drag files onto an icon to open with it; multi-monitor.

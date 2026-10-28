@@ -298,6 +298,7 @@ class Genie
             hooks.Add(SetWinEventHook(ev, ev, IntPtr.Zero, proc, 0, 0, 0x2)); // out of context, skip own process
         overlay.Show();
         overlay.Cloak(true);
+        LoadPersisted();
         mouseHook = SetWindowsHookExW(14, mouseProc, GetModuleHandleW(null), 0); // WH_MOUSE_LL
         timer.Start();
     }
@@ -465,8 +466,88 @@ class Genie
     void PlayMinimize(IntPtr h)
     {
         armedFor = IntPtr.Zero;
-        if (!snaps.TryGetValue(h, out var s) || iconRect(h) is not Rect ic) { overlay.Disarm(); return; }
+        if (!snaps.TryGetValue(h, out var s)) { Log($"minimize without snapshot: {Describe(h)}"); overlay.Disarm(); return; }
+        Persist(h, s);
+        if (iconRect(h) is not Rect ic) { overlay.Disarm(); return; }
         if (!overlay.Play(s.Img, ToDip(s.RectPx), ic, restore: false, null)) overlay.Disarm();
+    }
+
+    // ---------- snapshots on disk, so minimized windows still animate back after MacDock restarts
+
+    static readonly string SnapDir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MacDock", "snaps");
+    static readonly string LogPath = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MacDock", "genie.log");
+
+    /// <summary>File name carries hwnd, owning pid (guards against a reused handle) and the window rect.</summary>
+    static string SnapFile(IntPtr h, uint pid, Rect r) => System.IO.Path.Combine(SnapDir, $"{h.ToInt64()}_{pid}_{(int)r.X}_{(int)r.Y}_{(int)r.Width}_{(int)r.Height}.png");
+
+    void Persist(IntPtr h, Snap s)
+    {
+        GetWindowThreadProcessId(h, out uint pid);
+        var file = SnapFile(h, pid, s.RectPx);
+        var img = s.Img;
+        System.Threading.Tasks.Task.Run(() =>
+        {
+            try
+            {
+                System.IO.Directory.CreateDirectory(SnapDir);
+                foreach (var old in System.IO.Directory.GetFiles(SnapDir, $"{h.ToInt64()}_*.png")) System.IO.File.Delete(old);
+                var enc = new PngBitmapEncoder();
+                enc.Frames.Add(BitmapFrame.Create(img));
+                using var fs = System.IO.File.Create(file);
+                enc.Save(fs);
+            }
+            catch (Exception e) { Log($"persist failed: {e.Message}"); }
+        });
+    }
+
+    static void Forget(IntPtr h)
+    {
+        try { foreach (var f in System.IO.Directory.GetFiles(SnapDir, $"{h.ToInt64()}_*.png")) System.IO.File.Delete(f); } catch { }
+    }
+
+    /// <summary>On start: load snapshots of windows that are still minimized, delete the rest.</summary>
+    void LoadPersisted()
+    {
+        if (!System.IO.Directory.Exists(SnapDir)) return;
+        foreach (var f in System.IO.Directory.GetFiles(SnapDir, "*.png"))
+        {
+            try
+            {
+                var p = System.IO.Path.GetFileNameWithoutExtension(f).Split('_');
+                var h = (IntPtr)long.Parse(p[0]);
+                uint pid = uint.Parse(p[1]);
+                GetWindowThreadProcessId(h, out uint now);
+                if (!IsWindow(h) || !IsIconic(h) || now != pid) { System.IO.File.Delete(f); continue; }
+                var bi = new BitmapImage();
+                bi.BeginInit();
+                bi.CacheOption = BitmapCacheOption.OnLoad;
+                bi.UriSource = new Uri(f);
+                bi.EndInit();
+                bi.Freeze();
+                snaps[h] = new Snap(bi, new Rect(double.Parse(p[2]), double.Parse(p[3]), double.Parse(p[4]), double.Parse(p[5])), DateTime.Now);
+            }
+            catch { try { System.IO.File.Delete(f); } catch { } }
+        }
+    }
+
+    static string Describe(IntPtr h)
+    {
+        GetWindowThreadProcessId(h, out uint pid);
+        string name = "?";
+        try { name = System.Diagnostics.Process.GetProcessById((int)pid).ProcessName; } catch { }
+        return $"{name} ({h})";
+    }
+
+    /// <summary>Small diagnostic log of animations that could not play, kept under ~100 KB.</summary>
+    static void Log(string s)
+    {
+        try
+        {
+            var fi = new System.IO.FileInfo(LogPath);
+            if (fi.Exists && fi.Length > 100_000) fi.Delete();
+            System.IO.File.AppendAllText(LogPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {s}\n");
+        }
+        catch { }
     }
 
     IntPtr OnMouse(int code, IntPtr w, IntPtr l)
@@ -525,7 +606,11 @@ class Genie
     /// <summary>Plays the window coming out of the dock, then calls <paramref name="done"/> to actually restore it.</summary>
     public bool PlayRestore(IntPtr h, Action done)
     {
-        if (!snaps.TryGetValue(h, out var s) || iconRect(h) is not Rect ic) return false;
-        return overlay.Play(s.Img, ToDip(s.RectPx), ic, restore: true, done);
+        if (!snaps.TryGetValue(h, out var s)) { Log($"restore without snapshot: {Describe(h)}"); return false; }
+        if (iconRect(h) is not Rect ic) { Log($"restore without dock icon: {Describe(h)}"); return false; }
+        Forget(h);
+        if (overlay.Play(s.Img, ToDip(s.RectPx), ic, restore: true, done)) return true;
+        Log($"restore skipped, overlay busy: {Describe(h)}");
+        return false;
     }
 }
