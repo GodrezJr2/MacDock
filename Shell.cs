@@ -223,13 +223,23 @@ static class Shell
     {
         if (IsIconic(h)) ShowWindow(h, SW_RESTORE);
         if (SetForegroundWindow(h)) { BringWindowToTop(h); return; }
-        // We usually own the last input (a click on the dock), but fall back to borrowing the foreground thread.
+        // The click on the dock gave us the last input, but after the genie animation the mouse may have moved
+        // over another app and taken that right away. An empty mouse input makes us the last input again.
+        SendInput(1, new[] { new INPUT() }, Marshal.SizeOf<INPUT>());
+        if (SetForegroundWindow(h)) { BringWindowToTop(h); return; }
+        // fall back to borrowing the foreground thread
         uint fgThread = GetWindowThreadProcessId(GetForegroundWindow(), out _);
         uint me = GetCurrentThreadId();
         AttachThreadInput(me, fgThread, true);
         SetForegroundWindow(h);
         BringWindowToTop(h);
         AttachThreadInput(me, fgThread, false);
+        // a window restored from minimized sits at the bottom of the z-order; at least lift it above the rest
+        if (GetForegroundWindow() != h)
+        {
+            SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            SetWindowPos(h, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
     }
 
     public static void Minimize(IntPtr h) => PostMessageW(h, WM_SYSCOMMAND, (IntPtr)SC_MINIMIZE, IntPtr.Zero);

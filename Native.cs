@@ -48,6 +48,11 @@ static class Native
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowExW(IntPtr parent, IntPtr after, string? cls, string? title);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern uint RegisterWindowMessageW(string s);
     [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+    // INPUT with a MOUSEINPUT body (the largest union member, so the size matches the native struct)
+    [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint Type; public int Dx, Dy; public uint MouseData, Flags, Time; public IntPtr Extra; }
+    [DllImport("user32.dll")] public static extern uint SendInput(uint n, INPUT[] inputs, int size);
+    public static readonly IntPtr HWND_TOPMOST = new(-1), HWND_NOTOPMOST = new(-2);
+    public const uint SWP_NOSIZE = 0x1, SWP_NOMOVE = 0x2;
     [DllImport("user32.dll")] public static extern bool LockWorkStation();
     [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int v, int size);
     public const int DWMWA_CLOAKED = 14;
