@@ -111,6 +111,7 @@ class DockWindow : Window
         canvas.Children.Add(plate);
         canvas.Children.Add(separator);
         canvas.Children.Add(label);
+        Panel.SetZIndex(label, 2);
         Content = canvas;
         canvas.RenderTransform = slide;
         // the frame loop sleeps when nothing moves: wake it when the pointer hits the edge of a hidden dock, and
@@ -137,6 +138,7 @@ class DockWindow : Window
             if (e.Category == Microsoft.Win32.UserPreferenceCategory.Desktop) Dispatcher.BeginInvoke(LoadWallpaper);
         };
         Show();
+        StartBadges();
         Refresh(initial: true);
         Wake();
         if (cfg.Genie)
@@ -227,7 +229,7 @@ class DockWindow : Window
         RegisterShellHookWindow(hwnd);
 
         lastAppWindow = GetForegroundWindow();
-        fgProc = (_, _, h, obj, _, _, _) => { if (obj == 0 && h != IntPtr.Zero) lastAppWindow = h; };
+        fgProc = (_, _, h, obj, _, _, _) => { if (obj == 0 && h != IntPtr.Zero) { lastAppWindow = h; UpdateBadges(); } };
         SetWinEventHook(3, 3, IntPtr.Zero, fgProc, 0, 0, 0x2); // EVENT_SYSTEM_FOREGROUND, skip own process
     }
 
@@ -385,6 +387,7 @@ class DockWindow : Window
 
         string sig = string.Join("|", items.Select(i => i.Key + (i.Running ? "*" : "") + (i.Leaving ? "-" : "") + (i.Launching ? "^" : "")));
         if (sig != lastSig) { lastSig = sig; FitIcons(); FitWidth(); Wake(); }
+        UpdateBadges();
         if (items.Any(i => i.Launching)) Wake();
     }
     string lastSig = "";
@@ -397,8 +400,86 @@ class DockWindow : Window
         int at = canvas.Children.IndexOf(label);
         canvas.Children.Insert(at, it.Dot);
         canvas.Children.Insert(at, it.Img);
+        if (!it.IsTrash) canvas.Children.Insert(at + 2, CreateBadge(it));
         it.Presence = instant ? 1 : 0;
         it.Scale = 1;
+    }
+
+    // ---------------------------------------------------------------- badges
+
+    List<(string App, long Arrived)> toasts = new();
+    readonly DispatcherTimer toastTimer = new() { Interval = TimeSpan.FromSeconds(3) };
+    bool readingToasts;
+
+    void StartBadges()
+    {
+        if (!cfg.Badges) return;
+        Badges.Load();
+        toastTimer.Tick += (_, _) =>
+        {
+            if (readingToasts || !IsVisible) return;
+            readingToasts = true;
+            System.Threading.Tasks.Task.Run(Badges.Toasts).ContinueWith(r =>
+            {
+                readingToasts = false;
+                if (r.Status == System.Threading.Tasks.TaskStatus.RanToCompletion) { toasts = r.Result; UpdateBadges(); }
+            }, System.Threading.Tasks.TaskScheduler.FromCurrentSynchronizationContext());
+        };
+        toastTimer.Start();
+    }
+
+    Border CreateBadge(DockItem it)
+    {
+        double h = B * 0.38;
+        it.BadgeText = new TextBlock
+        {
+            Foreground = Brushes.White,
+            FontFamily = new FontFamily("Segoe UI Variable Text, Segoe UI"),
+            FontWeight = FontWeights.SemiBold,
+            FontSize = h * 0.64,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        it.BadgeView = new Border
+        {
+            Child = it.BadgeText,
+            Height = h,
+            MinWidth = h,
+            Padding = new Thickness(h * 0.26, 0, h * 0.26, h * 0.04),
+            CornerRadius = new CornerRadius(h / 2),
+            Background = new SolidColorBrush(Color.FromRgb(0xFF, 0x3B, 0x30)), // macOS system red
+            Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 4, ShadowDepth = 1, Direction = 270, Opacity = 0.3 },
+            RenderTransform = new ScaleTransform(),
+            IsHitTestVisible = false,
+            Visibility = Visibility.Collapsed,
+        };
+        Panel.SetZIndex(it.BadgeView, 1); // over every icon (a neighbour's corner overlaps it), under the label
+        return it.BadgeView;
+    }
+
+    /// <summary>Badge = the larger of a "(N)" window title and Action Center toasts since the app was last in front.</summary>
+    void UpdateBadges()
+    {
+        if (!cfg.Badges) return;
+        var fg = GetForegroundWindow();
+        foreach (var it in items)
+        {
+            if (it.BadgeText == null) continue;
+            int n = it.Windows.Count == 0 ? 0 : it.Windows.Max(w => Badges.FromTitle(w.Title));
+            if (it.Aumid != null)
+            {
+                // the app is in front: whatever it showed has been seen
+                bool front = it.Windows.Any(w => w.Hwnd == fg);
+                long seen = Badges.SeenAt(it.Aumid);
+                int fresh = toasts.Count(t => t.Arrived > seen && string.Equals(t.App, it.Aumid, StringComparison.OrdinalIgnoreCase));
+                if (front && fresh > 0) { Badges.MarkSeen(it.Aumid); fresh = 0; }
+                n = Math.Max(n, fresh);
+            }
+            if (n == it.Badge) continue;
+            it.Badge = n;
+            it.BadgeText.Text = n > 999 ? "999+" : n.ToString();
+            Wake();
+        }
     }
 
     // ---------------------------------------------------------------- frame
@@ -477,6 +558,7 @@ class DockWindow : Window
         {
             canvas.Children.Remove(gone.Img);
             canvas.Children.Remove(gone.Dot);
+            canvas.Children.Remove(gone.BadgeView);
             gone.Img = null; gone.Dot = null;
             items.Remove(gone);
         }
@@ -523,6 +605,18 @@ class DockWindow : Window
             it.Dot!.Opacity = it.DotAlpha * it.Presence;
             Canvas.SetLeft(it.Dot, ix + size / 2 - 2.5);
             Canvas.SetTop(it.Dot, plateBottom - 5.5);
+
+            if (it.BadgeView != null)
+            {
+                // on the tile's top-right corner, scaled with the icon
+                double s = size / B, iconTop = plateBottom - Pad - size - bounce;
+                it.BadgeView.Visibility = it.Badge > 0 ? Visibility.Visible : Visibility.Collapsed;
+                var st = (ScaleTransform)it.BadgeView.RenderTransform;
+                st.ScaleX = st.ScaleY = s;
+                Canvas.SetLeft(it.BadgeView, ix + size * 0.94 - it.BadgeView.ActualWidth * s * 0.72);
+                Canvas.SetTop(it.BadgeView, iconTop + size * 0.05 - it.BadgeView.ActualHeight * s * 0.32);
+                it.BadgeView.Opacity = it.Img.Opacity;
+            }
 
             if (hovering && !dragging && mx >= x - Gap / 2 && mx < x + size + Gap / 2) hovered = it;
         }, sx =>
@@ -750,7 +844,7 @@ class DockWindow : Window
                 cfg.Pinned.Add(it.Launch);
                 cfg.Save();
                 items.Remove(it);
-                canvas.Children.Remove(it.Img); canvas.Children.Remove(it.Dot);
+                canvas.Children.Remove(it.Img); canvas.Children.Remove(it.Dot); canvas.Children.Remove(it.BadgeView);
                 it.Img = null; it.Dot = null;
                 Refresh(initial: true);
             });

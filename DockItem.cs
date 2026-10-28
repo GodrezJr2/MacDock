@@ -34,6 +34,9 @@ class DockItem
 
     public Image? Img;
     public Ellipse? Dot;
+    public int Badge;                 // unread count, 0 = no badge
+    public Border? BadgeView;
+    public TextBlock? BadgeText;
 
     public bool Running => Windows.Count > 0;
 
