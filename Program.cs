@@ -15,6 +15,7 @@ static class Program
         {
             // escape hatch if the dock was killed while the taskbar was hidden
             Taskbar.Restore(force: true);
+            Genie.RestoreSystemAnimation();
             return;
         }
         using var mutex = new Mutex(true, "MacDock.Singleton", out bool first);

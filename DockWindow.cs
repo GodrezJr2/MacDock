@@ -546,8 +546,9 @@ class DockWindow : Window
         var fg = GetForegroundWindow();
         if (it.Windows.Any(w => w.Hwnd == fg))
         {
-            genie?.Capture(fg, sync: true); // fresh pixels for the genie that the minimize event will start
-            foreach (var w in it.Windows) Shell.Minimize(w.Hwnd);
+            void MinimizeAll() { foreach (var w in it.Windows) Shell.Minimize(w.Hwnd); }
+            if (genie != null) genie.MinimizeFromDock(fg, MinimizeAll);
+            else MinimizeAll();
             return;
         }
         var minimized = it.Windows.Where(w => IsIconic(w.Hwnd)).ToList();

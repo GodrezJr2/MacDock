@@ -52,6 +52,15 @@ in .NET 10 WPF. Replaces the Windhawk taskbar restyle (ClearMacDock theme looked
   sends ABN_FULLSCREENAPP and the dock hid itself mid-animation; App.Fullscreen also checks the
   foreground window really covers the screen.
 
+- Minimize "flash": the overlay used to be shown/hidden per animation, and a freshly shown window
+  presents a stale or blank frame first. Now it stays shown and is parked at -32000 when idle (moving a shown
+  window is instant and off-screen it cannot block clicks). Do NOT try WS_EX_LAYERED|TRANSPARENT on it:
+  WPF strips WS_EX_LAYERED from an AllowsTransparency=false window, leaving a full-screen topmost window
+  that eats every click. Dock-click minimizes show the snapshot first and minimize the window under it on
+  the second tick.
+- `--restore` also puts Windows' minimize animation back (from WindowMetrics\MinAnimate), since a killed
+  run leaves it off for the session.
+
 ## Next ideas
 - Zoom-from-icon when an app opens its first window; attention bounce for flashing windows.
 - Drag files onto an icon to open with it; multi-monitor.

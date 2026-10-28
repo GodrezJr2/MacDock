@@ -26,7 +26,8 @@ class GenieWindow : Window
     Rect win, icon;           // overlay-local DIPs
     double duration;
     bool restore;
-    Action? done;
+    Action? done, started;
+    int frame;
     public bool Busy { get; private set; }
 
     [StructLayout(LayoutKind.Sequential)] struct MARGINS { public int l, r, t, b; }
@@ -85,7 +86,7 @@ class GenieWindow : Window
             DwmSetWindowAttribute(h, 33, ref noRound, 4);  // no rounded corners
             DwmSetWindowAttribute(h, 34, ref noBorder, 4); // no border
             MakeToolWindow(h, clickThrough: true);
-            // let clicks fall through while an animation is on screen
+            // let clicks fall through while an animation is on screen (same-thread only, but it is short)
             src.AddHook((IntPtr hw, int msg, IntPtr w, IntPtr l, ref bool handled) =>
             {
                 if (msg == 0x84) { handled = true; return (IntPtr)(-1); } // WM_NCHITTEST → HTTRANSPARENT
@@ -94,7 +95,7 @@ class GenieWindow : Window
         };
     }
 
-    public bool Play(ImageSource img, Rect windowDip, Rect iconDip, bool restore, Action? done)
+    public bool Play(ImageSource img, Rect windowDip, Rect iconDip, bool restore, Action? done, Action? started = null)
     {
         if (Busy) return false;
         // fixed full-screen overlay: resizing the swap chain per animation risks a stale first frame
@@ -106,10 +107,12 @@ class GenieWindow : Window
 
         this.restore = restore;
         this.done = done;
+        this.started = started;
+        frame = 0;
         duration = restore ? 0.5 : 0.56;
         Busy = true;
         Shape(restore ? 1 : 0);
-        Visibility = Visibility.Visible;
+        Left = 0; Top = 0;
         clock.Restart();
         CompositionTarget.Rendering += OnFrame;
         return true;
@@ -117,7 +120,9 @@ class GenieWindow : Window
 
     void OnFrame(object? s, EventArgs e)
     {
-        double t = Math.Min(1, clock.Elapsed.TotalSeconds / duration);
+        // the snapshot is on screen once we get a second tick; only now may the real window vanish under it
+        if (++frame == 2) { started?.Invoke(); started = null; clock.Restart(); }
+        double t = frame < 2 ? 0 : Math.Min(1, clock.Elapsed.TotalSeconds / duration);
         Shape(restore ? 1 - t : t);
         if (t < 1) return;
 
@@ -129,9 +134,15 @@ class GenieWindow : Window
         {
             mesh.Positions = new Point3DCollection();
             brush.ImageSource = null;
-            After(40, () => { Visibility = Visibility.Hidden; Busy = false; });
+            After(40, () => { Park(); Busy = false; });
         });
     }
+
+    /// <summary>
+    /// Idle overlay stays shown but far off-screen: showing a hidden window costs a frame of stale or blank
+    /// pixels (the flash), while moving a shown one is instant, and off-screen it can never block a click.
+    /// </summary>
+    public void Park() { Left = -32000; Top = -32000; }
 
     static void After(int ms, Action a)
     {
@@ -214,14 +225,24 @@ class Genie
         // Windows' own minimize animation would fight ours. Not written to the profile, so a reboot undoes it.
         var ai = new ANIMATIONINFO { cbSize = (uint)Marshal.SizeOf<ANIMATIONINFO>() };
         if (SystemParametersInfoW(0x48, ai.cbSize, ref ai, 0)) originalMinAnimate = ai.iMinAnimate;
+        if (Microsoft.Win32.Registry.GetValue(@"HKEY_CURRENT_USER\Control Panel\Desktop\WindowMetrics", "MinAnimate", null) is string saved)
+            originalMinAnimate = saved == "0" ? 0 : 1;
         ai.iMinAnimate = 0;
         SystemParametersInfoW(0x49, ai.cbSize, ref ai, 2);
 
         foreach (var ev in new[] { EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MINIMIZESTART })
             hooks.Add(SetWinEventHook(ev, ev, IntPtr.Zero, proc, 0, 0, 0x2)); // out of context, skip own process
         overlay.Show();
-        overlay.Visibility = Visibility.Hidden;
+        overlay.Park();
         timer.Start();
+    }
+
+    /// <summary>Puts Windows' minimize animation back to the user's saved setting (used by --restore).</summary>
+    public static void RestoreSystemAnimation()
+    {
+        bool on = Microsoft.Win32.Registry.GetValue(@"HKEY_CURRENT_USER\Control Panel\Desktop\WindowMetrics", "MinAnimate", "1") as string != "0";
+        var ai = new ANIMATIONINFO { cbSize = (uint)Marshal.SizeOf<ANIMATIONINFO>(), iMinAnimate = on ? 1 : 0 };
+        SystemParametersInfoW(0x49, ai.cbSize, ref ai, 2);
     }
 
     public void Stop()
@@ -324,6 +345,17 @@ class Genie
     {
         if (!snaps.TryGetValue(h, out var s) || iconRect(h) is not Rect ic) return;
         overlay.Play(s.Img, ToDip(s.RectPx), ic, restore: false, null);
+    }
+
+    /// <summary>
+    /// Minimize started by the dock: put the fresh snapshot on screen first, then minimize the window under it,
+    /// so there is no frame where neither is visible.
+    /// </summary>
+    public void MinimizeFromDock(IntPtr h, Action minimize)
+    {
+        Capture(h, sync: true);
+        if (!snaps.TryGetValue(h, out var s) || iconRect(h) is not Rect ic || !overlay.Play(s.Img, ToDip(s.RectPx), ic, restore: false, null, minimize))
+            minimize();
     }
 
     /// <summary>Plays the window coming out of the dock, then calls <paramref name="done"/> to actually restore it.</summary>
