@@ -454,7 +454,7 @@ class Genie
     /// </summary>
     void Prune()
     {
-        foreach (var k in snaps.Keys.Where(k => !IsWindow(k)).ToList()) snaps.Remove(k);
+        foreach (var k in snaps.Keys.Where(k => !IsWindow(k)).ToList()) { snaps.Remove(k); Forget(k); }
         var visible = snaps.Where(kv => !IsIconic(kv.Key)).OrderBy(kv => kv.Value.At).Select(kv => kv.Key).ToList();
         foreach (var k in visible.Take(Math.Max(0, visible.Count - MaxSnaps))) snaps.Remove(k);
         var minimized = snaps.Where(kv => IsIconic(kv.Key)).OrderBy(kv => kv.Value.At).Select(kv => kv.Key).ToList();
