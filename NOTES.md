@@ -85,3 +85,17 @@ in .NET 10 WPF. Replaces the Windhawk taskbar restyle (ClearMacDock theme looked
 ## Next ideas
 - Zoom-from-icon when an app opens its first window; attention bounce for flashing windows.
 - Drag files onto an icon to open with it; multi-monitor.
+## 29 Oct 2026
+- Dock restores came back behind other apps: the restore runs after the genie, when the mouse may have
+  moved over another app and taken our SetForegroundWindow right. Shell.Activate sends an empty SendInput
+  mouse event first (PowerToys trick), then AttachThreadInput, then a TOPMOST/NOTOPMOST lift.
+- Genie on other monitors: the overlay spans the virtual screen in physical pixels (camera units = pixels,
+  WM_DPICHANGED swallowed, refit after Show since WPF resizes it once). Monitors: primary 1920x1080 @100%,
+  second 2560x1600 @125% at x=1920, y=-203.
+- Icons on Tahoe squircle tiles (IconTile.cs, "IconTiles"). Jay kept the white tiles over the Sequoia look.
+- Attention bounce: shell hook window, HSHELL_FLASH → hop-and-rest bounce until the app comes to front (max 5).
+- Auto-hide ("AutoHide", menu bar system menu or right-click the plate): AppBar removed, content slides via
+  a TranslateTransform; hidden it is fully transparent so clicks pass. The frame loop sleeps, so a 60 ms
+  timer wakes it at the bottom edge and while the dock is up (otherwise it never noticed the pointer left).
+- Jay wants every finished change committed right away.
+- Next ideas: Recent apps section, Downloads stack, per-app icon overrides.
