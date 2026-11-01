@@ -121,7 +121,7 @@ class BatteryPopup : Flyout
         Panel.Padding = new Thickness(16, 14, 16, 14);
         Panel.Child = stack;
 
-        if (meter.Last is PowerMeter.Sample last) Apply(last);
+        if (meter.Recent is PowerMeter.Sample recent) Apply(recent);
         Loaded += (_, _) => Refresh();
         timer.Tick += (_, _) => Refresh();
         timer.Start();

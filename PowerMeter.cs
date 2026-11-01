@@ -38,8 +38,12 @@ sealed class PowerMeter : IDisposable
     long nextGpuAt;
     bool gpuAsleep;
 
-    /// <summary>The most recent sample, so a reopened flyout can show numbers at once.</summary>
-    public Sample? Last { get; private set; }
+    Sample? last;
+    long lastAt;
+
+    /// <summary>The latest sample if it is only a few seconds old, so a reopened flyout can show numbers at once
+    /// without flashing an old charge level.</summary>
+    public Sample? Recent => last is Sample s && Environment.TickCount64 - lastAt < 5000 ? s : null;
     double restW = DefaultRestW;
     bool restLearned;
     int learnedSamples;
@@ -65,7 +69,8 @@ sealed class PowerMeter : IDisposable
         lock (gate)
         {
             var s = ReadLocked();
-            Last = s;
+            last = s;
+            lastAt = Environment.TickCount64;
             return s;
         }
     }
