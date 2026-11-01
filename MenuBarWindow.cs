@@ -36,8 +36,16 @@ class MenuBarWindow : Window
     IntPtr target;                 // last foreground window that isn't ours
     string appTitle = "File Explorer";
     readonly Dictionary<uint, string> nameCache = new();
+    Flyout? flyout;            // the open menu bar extra (battery, Wi-Fi, background apps, control center)
+    Type? flyoutType;
+    Type? lastClosedType;
+    int popupClosedAt;
+    readonly TextBlock ethGlyph;
+    readonly WifiGlyph wifiGlyph = new() { Width = 17, Height = 12.5, VerticalAlignment = VerticalAlignment.Center };
 
-    readonly TextBlock appName, clock, battPct, battGlyph;
+    readonly TextBlock appName, clock, battPct;
+    readonly BatteryGlyph battGlyph = new() { Width = 26, Height = 12.5, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 1, 0, 0) };
+    PowerMeter? powerMeter; // kept across flyout openings so its smoothing and "rest" learning carry on
     readonly FontFamily font = new("Segoe UI Variable Text, Segoe UI");
     readonly FontFamily icons = new("Segoe Fluent Icons, Segoe MDL2 Assets");
 
@@ -62,15 +70,29 @@ class MenuBarWindow : Window
         foreach (var (name, build) in new (string, Func<List<object>>)[] { ("File", FileMenu), ("Edit", EditMenu), ("View", ViewMenu), ("Window", WindowMenu), ("Help", HelpMenu) })
             left.Children.Add(Button(Text(name), b => ShowMenu(b, build())));
 
-        battGlyph = new TextBlock { FontFamily = icons, FontSize = 15, Foreground = Brushes.White, VerticalAlignment = VerticalAlignment.Center };
         battPct = Text("", FontWeights.Normal);
-        battPct.Margin = new Thickness(0, 0, 5, 0);
+        battPct.Margin = new Thickness(0, 0, 6, 0);
         var batt = new StackPanel { Orientation = Orientation.Horizontal };
         batt.Children.Add(battPct); batt.Children.Add(battGlyph);
-        right.Children.Add(Button(batt, _ => Key(VK_LWIN, (byte)'A')));
-        right.Children.Add(Button(Glyph(""), _ => Key(VK_LWIN, (byte)'A')));
+        if (Tray.Enabled)
+        {
+            var chevron = Glyph("");
+            chevron.FontSize = 11;
+            right.Children.Add(Button(chevron, b => Toggle(b, () => new TrayFlyout())));
+        }
+        var battButton = Button(batt, b => Toggle(b, () => new BatteryPopup(powerMeter ??= new PowerMeter())));
+        battButton.MouseRightButtonUp += (_, _) => Shell.Launch("ms-settings:batterysaver");
+        right.Children.Add(battButton);
+        ethGlyph = Glyph("");
+        ethGlyph.Visibility = Visibility.Collapsed;
+        var net = new Grid { Children = { wifiGlyph, ethGlyph } };
+        var wifiButton = Button(net, b => Toggle(b, () => new WifiFlyout()));
+        wifiButton.MouseRightButtonUp += (_, _) => Shell.Launch("ms-settings:network-wifi");
+        right.Children.Add(wifiButton);
         right.Children.Add(Button(Glyph(""), _ => Key(VK_LWIN, (byte)'S')));
-        right.Children.Add(Button(ControlCenterIcon(), _ => Key(VK_LWIN, (byte)'A')));
+        Border? ccButton = null;
+        ccButton = Button(ControlCenterIcon(), b => Toggle(b, () => new ControlCenter(() => Toggle(wifiButton, () => new WifiFlyout(), force: true))));
+        right.Children.Add(ccButton);
         clock = Text("", FontWeights.Normal);
         right.Children.Add(Button(clock, _ => Key(VK_LWIN, (byte)'N')));
 
@@ -86,6 +108,7 @@ class MenuBarWindow : Window
         t.Tick += (_, _) => Tick();
         t.Start();
         Tick();
+        IsVisibleChanged += (_, _) => { if (!IsVisible) flyout?.Close(); };
     }
 
     void OnSourceInitialized(object? s, EventArgs e)
@@ -113,8 +136,40 @@ class MenuBarWindow : Window
 
     public void Shutdown()
     {
+        flyout?.Close();
+        powerMeter?.Dispose();
         if (hook != IntPtr.Zero) UnhookWinEvent(hook);
         appBar?.Remove();
+    }
+
+    /// <summary>
+    /// Opens a menu bar extra under its item, or closes it when it is the one already open. The click that
+    /// closed a flyout (it lost focus to this very click) must not reopen it.
+    /// </summary>
+    void Toggle<T>(Border anchor, Func<T> make, bool force = false) where T : Flyout
+    {
+        // decide before building: some flyouts start work in their constructor (TrayFlyout hosts the tray)
+        var type = typeof(T);
+        if (!force)
+        {
+            if (flyout != null && flyoutType == type) { flyout.Close(); return; }
+            if (lastClosedType == type && Environment.TickCount - popupClosedAt < 300) return;
+        }
+        flyout?.Close();
+        var f = make();
+        f.PlaceUnder(anchor, screenW);
+        // stamp on Closing, before any Closed handler: those can pump messages (Tray.Stop) and let the very click
+        // that closed us reach this method first
+        f.Closing += (_, _) =>
+        {
+            lastClosedType = type;
+            popupClosedAt = Environment.TickCount;
+        };
+        f.Closed += (_, _) => { if (flyout == f) { flyout = null; flyoutType = null; } };
+        flyout = f;
+        flyoutType = type;
+        f.Show();
+        f.Activate();
     }
 
     void OnForeground(IntPtr hk, uint ev, IntPtr h, int obj, int child, uint thread, uint time)
@@ -136,6 +191,8 @@ class MenuBarWindow : Window
         appName.Text = name;
     }
 
+    int ticks;
+
     void Tick()
     {
         var now = DateTime.Now;
@@ -143,10 +200,17 @@ class MenuBarWindow : Window
         if (GetSystemPowerStatus(out var ps) && ps.BatteryFlag != 128 && ps.BatteryLifePercent <= 100)
         {
             int pct = ps.BatteryLifePercent;
-            bool charging = ps.ACLineStatus == 1;
-            int lvl = Math.Min(10, pct / 10);
-            battGlyph.Text = ((char)(lvl == 10 ? (charging ? 0xE83E : 0xE83F) : (charging ? 0xE85A : 0xE850) + lvl)).ToString();
+            bool onAc = ps.ACLineStatus == 1;
+            battGlyph.Set(pct, onAc, onAc && (ps.BatteryFlag & 8) != 0);
             battPct.Text = pct + "%";
+        }
+        if (++ticks % 5 == 1)
+        {
+            var cur = Wifi.Current();
+            bool wired = cur == null && Wifi.Wired();
+            wifiGlyph.Set(cur?.Bars ?? 0, cur == null);
+            wifiGlyph.Visibility = wired ? Visibility.Collapsed : Visibility.Visible;
+            ethGlyph.Visibility = wired ? Visibility.Visible : Visibility.Collapsed;
         }
     }
 

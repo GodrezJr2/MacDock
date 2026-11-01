@@ -42,5 +42,19 @@ class DockItem
 
     public bool Owns(AppWindow w) =>
         (Aumid != null && w.Aumid != null && string.Equals(Aumid, w.Aumid, StringComparison.OrdinalIgnoreCase)) ||
-        (Exe != null && w.Exe != null && string.Equals(Exe, w.Exe, StringComparison.OrdinalIgnoreCase));
+        (Exe != null && w.Exe != null && (string.Equals(Exe, w.Exe, StringComparison.OrdinalIgnoreCase) || LauncherOf(Exe, w.Exe)));
+
+    /// <summary>
+    /// Squirrel apps (Discord, Slack, Teams classic…) are pinned through …\App\Update.exe, while their windows
+    /// belong to …\App\app-1.0.9266\App.exe; a version bump moves the exe too. Treat the launcher's folder as owning
+    /// everything below it.
+    /// </summary>
+    static bool LauncherOf(string pinned, string running)
+    {
+        var dir = System.IO.Path.GetDirectoryName(pinned);
+        if (dir == null || !running.StartsWith(dir + System.IO.Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return false;
+        // Update.exe owns its whole folder; a launcher stub (…\Discord\Discord.exe) owns the same exe name below it
+        return System.IO.Path.GetFileName(pinned).Equals("Update.exe", StringComparison.OrdinalIgnoreCase)
+            || System.IO.Path.GetFileName(pinned).Equals(System.IO.Path.GetFileName(running), StringComparison.OrdinalIgnoreCase);
+    }
 }

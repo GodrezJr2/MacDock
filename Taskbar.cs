@@ -10,9 +10,25 @@ static class Taskbar
     static IntPtr originalState = IntPtr.Zero;
     static bool hidden;
 
+    /// <summary>
+    /// Explorer's own taskbar. Our tray host (ManagedShell, see <see cref="Tray"/>) also registers a
+    /// Shell_TrayWnd, topmost, so a plain FindWindow can return ours instead.
+    /// </summary>
+    static IntPtr Main()
+    {
+        IntPtr h = IntPtr.Zero;
+        uint self = (uint)Environment.ProcessId;
+        while ((h = FindWindowExW(IntPtr.Zero, h, "Shell_TrayWnd", null)) != IntPtr.Zero)
+        {
+            GetWindowThreadProcessId(h, out uint pid);
+            if (pid != self) return h;
+        }
+        return IntPtr.Zero;
+    }
+
     static IEnumerable<IntPtr> Bars()
     {
-        var main = FindWindowW("Shell_TrayWnd", null);
+        var main = Main();
         if (main != IntPtr.Zero) yield return main;
         IntPtr h = IntPtr.Zero;
         while ((h = FindWindowExW(IntPtr.Zero, h, "Shell_SecondaryTrayWnd", null)) != IntPtr.Zero) yield return h;
@@ -20,7 +36,7 @@ static class Taskbar
 
     public static void Hide()
     {
-        var main = FindWindowW("Shell_TrayWnd", null);
+        var main = Main();
         if (main == IntPtr.Zero) return;
         var d = new APPBARDATA { cbSize = System.Runtime.InteropServices.Marshal.SizeOf<APPBARDATA>(), hWnd = main };
         if (!hidden) originalState = (IntPtr)(long)SHAppBarMessage(ABM_GETSTATE, ref d);
@@ -41,7 +57,7 @@ static class Taskbar
     public static void Restore(bool force = false)
     {
         if (!hidden && !force) return;
-        var main = FindWindowW("Shell_TrayWnd", null);
+        var main = Main();
         if (main == IntPtr.Zero) return;
         var d = new APPBARDATA { cbSize = System.Runtime.InteropServices.Marshal.SizeOf<APPBARDATA>(), hWnd = main, lParam = force && !hidden ? IntPtr.Zero : originalState };
         SHAppBarMessage(ABM_SETSTATE, ref d);

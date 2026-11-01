@@ -596,7 +596,11 @@ class Genie
                 // released where it was pressed: the window is about to minimize, so put the snapshot up now
                 // instead of waiting for the (asynchronous) minimize event
                 var up = Marshal.PtrToStructure<POINT>(l);
-                if (Math.Abs(up.X - armPt.X) < 12 && Math.Abs(up.Y - armPt.Y) < 12) overlay.Reveal();
+                // Only when the window's thread holds the mouse capture (DefWindowProc tracking its caption button):
+                // then the release still reaches it under our overlay. WinUI 3 / custom title bars don't capture, so
+                // the release would land on the uncovered overlay and the app never minimizes; for them wait for
+                // EVENT_SYSTEM_MINIMIZESTART instead.
+                if (Math.Abs(up.X - armPt.X) < 12 && Math.Abs(up.Y - armPt.Y) < 12 && HoldsCapture(armedFor)) overlay.Reveal();
                 // no minimize after the release: take the cover away again quickly (it is a full-screen window)
                 var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(220) };
                 var armed = armedFor;
@@ -605,6 +609,17 @@ class Genie
             }
         }
         return CallNextHookEx(mouseHook, code, w, l);
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct GUITHREADINFO { public int cbSize, flags; public IntPtr hwndActive, hwndFocus, hwndCapture, hwndMenuOwner, hwndMoveSize, hwndCaret; public int caretL, caretT, caretR, caretB; }
+    [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread, ref GUITHREADINFO info);
+
+    static bool HoldsCapture(IntPtr h)
+    {
+        uint tid = GetWindowThreadProcessId(h, out _);
+        var gi = new GUITHREADINFO { cbSize = Marshal.SizeOf<GUITHREADINFO>() };
+        return tid != 0 && GetGUIThreadInfo(tid, ref gi) && gi.hwndCapture != IntPtr.Zero && GetAncestor(gi.hwndCapture, 2) == h;
     }
 
     void MaybeArm(POINT pt)

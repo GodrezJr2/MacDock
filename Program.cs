@@ -18,6 +18,12 @@ static class Program
             Genie.RestoreSystemAnimation();
             return;
         }
+        if (args.Contains("--battery"))
+        {
+            // dev aid: show the battery flyout on its own, without the dock or the menu bar
+            new Application { ShutdownMode = ShutdownMode.OnMainWindowClose }.Run(new BatteryPopup());
+            return;
+        }
         using var mutex = new Mutex(true, "MacDock.Singleton", out bool first);
         if (!first) return;
         new App().Run();
@@ -48,6 +54,7 @@ class App : Application
 
         cfg = Config.Load();
         if (cfg.HideTaskbar) Taskbar.Hide();
+        Tray.Enabled = cfg.MenuBar && cfg.TrayIcons;
         if (cfg.MenuBar) { bar = new MenuBarWindow(); bar.Show(); }
         dock = new DockWindow(cfg);
         dock.Start();
@@ -97,12 +104,14 @@ class App : Application
         if (Current is not App app) return;
         app.dock?.Shutdown();
         app.bar?.Shutdown();
+        Tray.Stop();
         Taskbar.Restore();
         app.Shutdown();
     }
 
     protected override void OnExit(ExitEventArgs e)
     {
+        Tray.Stop();
         Taskbar.Restore();
         base.OnExit(e);
     }

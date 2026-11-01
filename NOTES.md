@@ -99,3 +99,49 @@ in .NET 10 WPF. Replaces the Windhawk taskbar restyle (ClearMacDock theme looked
   timer wakes it at the bottom edge and while the dock is up (otherwise it never noticed the pointer left).
 - Jay wants every finished change committed right away.
 - Next ideas: Recent apps section, Downloads stack, per-app icon overrides.
+
+## Battery flyout (31 Oct 2026)
+- Menu bar battery is now a drawn macOS-style glyph (BatteryGlyph.cs: fill by %, green while charging, bolt on AC).
+  Left click opens BatteryPopup (no more Win+A / Wi-Fi panel); right click opens Windows' battery settings.
+  Dev aid: `MacDock.exe --battery` shows the flyout alone.
+- Flyout tiles: DC in / Total draw / From battery (Into battery while charging) + CPU/GPU/rest bar.
+- Data (PowerMeter.cs): battery class IOCTLs give only battery-side rate (0 on AC when full or at the 80% limit);
+  no adapter sensor exists (checked root\wmi, Acer WMI classes, EMI). Unprivileged sources that work: EMI v2 on the
+  CPU PPM device (RAPL_Package0_PKG, picowatt-hours) and NVML GPU power. So on battery the total is measured
+  (discharge rate); on AC total ≈ CPU + GPU + "rest", where rest is learned on battery (draw − CPU − GPU, EMA)
+  and saved to %LOCALAPPDATA%\MacDock\power.json (default 14 W). DC in ≈ total + charge rate.
+- Sensors are only polled while the flyout is open (NVML can wake a suspended dGPU), so calibration needs the
+  flyout open on battery for ~a minute. Psys (MSR 0x64D) would be the real platform number but needs a kernel
+  driver (OpenSense/PawnIO); not tried.
+- Lag fix (1 Nov 2026): the flyout froze the pointer every second in iGPU / battery mode. Measured: nvmlInit 613 ms,
+  nvmlDeviceGetPowerUsage ~470 ms per call while the dGPU sleeps (each query wakes it), all on the UI thread.
+  Now PowerMeter.Read runs via Task.Run, NVML/EMI open lazily on the first read, a GPU read slower than 150 ms
+  means "GPU off" (0 W, recheck every 30 s), and the flyout opens with the last cached sample. Jay confirmed no lag.
+
+## Menu bar extras + fixes (31 Oct 2026, part 2)
+- Flyout.cs: shared base for menu bar extras (dark panel, closes on Esc / focus loss, PlaceUnder). MenuBarWindow.Toggle
+  opens one at a time; clicking the open item closes it.
+- ^ item (TrayFlyout.cs + Tray.cs): hosts the notification area through ManagedShell 0.0.374 (RetroBar's library):
+  it registers its own topmost Shell_TrayWnd, so Taskbar.cs now picks Explorer's Shell_TrayWnd by process.
+  Clicks go to the app via NotifyIcon.IconMouseDown/Up (Discord opens, right click = app menu). `"TrayIcons": false`
+  turns it off.
+- Wi-Fi (WifiFlyout.cs): WinRT WiFiAdapter scan / connect (saved profile, else inline password) / disconnect, Radio
+  on/off. Menu bar shows drawn Wi-Fi bars, or an Ethernet glyph on a wired connection. Right click = Wi-Fi settings.
+- Control Center (ControlCenter.cs, SystemControls.cs): Wi-Fi + Bluetooth radios, Dark Mode (registry +
+  WM_SETTINGCHANGE ImmersiveColorSet), Power Mode (PowerSetActiveOverlayScheme), brightness (WMI), volume (Core Audio
+  IAudioEndpointVolume), Now Playing (GlobalSystemMediaTransportControls).
+- TFM is now net10.0-windows10.0.22621.0 for WinRT; OutputPath pinned to bin\Release\net10.0-windows\.
+- Search item still opens Windows search (Win+S); clock still opens the notification center.
+- Discord showed twice: its pin resolves to the Squirrel stub …\Discord\Discord.exe, windows run from
+  …\Discord\app-1.0.x\Discord.exe. DockItem.LauncherOf matches the same exe name (or Update.exe) below the pin's folder.
+- Minimize did nothing in WinUI apps (OpenSense): the genie overlay was revealed on mouse-up, but those custom
+  title bars don't hold mouse capture, so the up landed on our overlay. Early reveal now only when the window's
+  thread holds the capture (GetGUIThreadInfo); otherwise the normal MINIMIZESTART path animates. Needs a real
+  click by Jay to confirm.
+
+### Tray hosting only while the ^ flyout is open (31 Oct 2026)
+- Bug: with MacDock running, OpenSense (WinUI 3) crashed at startup. Log: `System.NotImplementedException: SetShownInSwitchers failed` in `H.NotifyIcon.TaskbarIcon.PrepareContextMenuWindow` (AppWindow.IsShownInSwitchers → E_NOTIMPL).
+- Cause: ManagedShell's own topmost `Shell_TrayWnd`. Windows App SDK treats a non-Explorer Shell_TrayWnd as an unsupported shell. Turning `TrayIcons` off made OpenSense start fine.
+- ManagedShell's ExplorerTrayService (reads Explorer's ToolbarWindow32) is no option: the Win11 tray is XAML.
+- Fix: `Tray.Start()` runs when TrayFlyout opens and `Tray.Stop()` when it closes (a fresh ShellManager each time). Apps re-add their icons on TaskbarCreated within ~1 s, so the grid fills live and shows "Loading…" first. `Tray.Enabled` replaces the startup Start.
+- Remaining risk: a WinUI app launched while the flyout is open can still hit the crash.

@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net10.0-windows</TargetFramework>
+    <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
     <UseWPF>true</UseWPF>
     <Nullable>enable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
@@ -11,6 +11,14 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <StartupObject>MacDock.Program</StartupObject>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- keep the old output folder (autostart and notes point at it) after the TFM gained a Windows SDK version -->
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <OutputPath>bin\$(Configuration)\net10.0-windows\</OutputPath>
   </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ManagedShell" Version="0.0.374" />
+    <PackageReference Include="System.Management" Version="10.0.14" />
+  </ItemGroup>
 
 </Project>

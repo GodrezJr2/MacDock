@@ -28,6 +28,8 @@ class Config
     public bool AutoHide { get; set; }
     /// <summary>Red unread badges from window titles and Action Center toasts.</summary>
     public bool Badges { get; set; } = true;
+    /// <summary>Host the notification-area icons (Discord, Steam…) behind a ^ item in the menu bar.</summary>
+    public bool TrayIcons { get; set; } = true;
 
     static string Dir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MacDock");
     static string FilePath => Path.Combine(Dir, "config.json");
