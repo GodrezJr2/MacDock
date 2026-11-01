@@ -145,3 +145,15 @@ in .NET 10 WPF. Replaces the Windhawk taskbar restyle (ClearMacDock theme looked
 - ManagedShell's ExplorerTrayService (reads Explorer's ToolbarWindow32) is no option: the Win11 tray is XAML.
 - Fix: `Tray.Start()` runs when TrayFlyout opens and `Tray.Stop()` when it closes (a fresh ShellManager each time). Apps re-add their icons on TaskbarCreated within ~1 s, so the grid fills live and shows "Loading…" first. `Tray.Enabled` replaces the startup Start.
 - Remaining risk: a WinUI app launched while the flyout is open can still hit the crash.
+
+## Going public (1 Nov 2026)
+- Flyout opened with a stale cached sample (13% for ~1.5 s, real 7%). PowerMeter keeps `last`/`lastAt` private and
+  exposes `Recent` only when under 5 s old; BatteryPopup uses it.
+- README + LICENSE (MIT). docs/: dock.png, genie.png, battery.png, control-center.png, film.webp (README hero loop),
+  macdock.mp4.
+- Film: one 16 s gdigrab take (2560x1600) → frames → Motion Studio scene `macdock-readme` (local, gitignored there):
+  image sequences for the dock sweep and genie, stills for the flyouts, captions + wordmark. Render
+  `node bin/ms.mjs render macdock-readme --no-audio`, then ffmpeg to 960 px / 20 fps webp.
+- Wi-Fi SSID in Control Center masked with ffmpeg `drawbox` in the tile colour (boxblur errored, gblur left green
+  chroma fringes). Check any new capture for SSID, account names and folder paths before committing.
+- Seen while recording: VS Code started via Code.exe showed as a second VS Code icon next to the pinned one. Not fixed.
