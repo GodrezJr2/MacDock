@@ -1,17 +1,22 @@
 # MacDock — notes
 
 ## Goal
-A MyDockFinder-style macOS dock + menu bar for Jay's Windows 11 (Predator, 2560x1600 @125%), built from scratch
-in .NET 10 WPF. Replaces the Windhawk taskbar restyle (ClearMacDock theme looked worse, reverted to LiquidGlass2).
+A MyDockFinder-style macOS dock + menu bar for Jay's Windows 11 (Predator, 2560x1600 @125%), built from scratch.
+Since 3 Nov 2026 it is **Rust only** (plain Win32 + tiny-skia + `windows` 0.58, GNU toolchain): all new features
+and maintenance happen in `src/`. The C# / WPF (.NET 10) version is retired: source at git tag `csharp-final`,
+its last build zipped at `D:\Project\_archive\MacDock-csharp-final-build.zip`. Sections below dated before
+3 Nov describe the C# build; its decisions and dead ends still apply to the Rust code.
 
 ## Run
-- Build: `dotnet build -c Release` → `bin\Release\net10.0-windows\MacDock.exe`
+- Build: `cargo build --release` → `target\release\macdock.exe` (PATH needs `%USERPROFILE%\.cargo\bin`).
+- Run the copy at `%LOCALAPPDATA%\Programs\MacDock\macdock.exe` (the project folder has a Low Mandatory Label,
+  so an exe started from it runs at low integrity: no AppBar, read-only %APPDATA%). Login entry points there.
 - Quit: Windows logo (menu bar) → Quit MacDock. This also restores the taskbar.
-- If it was killed and the taskbar is still hidden: `MacDock.exe --restore`
+- If it was killed and the taskbar is still hidden: `macdock.exe --restore`
 - Config: `%APPDATA%\MacDock\config.json` (Pinned list of `shell:AppsFolder\<AppID>` / .lnk / .exe,
-  IconSize, Magnify, HideTaskbar, MenuBar). Errors: `%APPDATA%\MacDock\error.log`.
+  IconSize, Magnify, HideTaskbar, MenuBar, …). Crash: `%APPDATA%\MacDock\panic.log`.
 
-## What it does
+## What it does (C# era, same in Rust)
 - Dock: cosine magnification from the resting layout (R = 2.9 × icon), smoothed per frame; launch bounce
   (|sin|, 0.62 s period) until a new window shows up; running dots; hover label; Trash with separator;
   click = launch / activate / minimize if already in front; right-click menu (windows, Keep/Remove, Show in
@@ -249,4 +254,4 @@ Jay: "you can install a full rust" → go for the full rewrite; C# build stays u
 - Repo is Rust-only since 3 Nov 2026 (Jay): C# sources removed, Rust moved from rust/ to the root; the last C#
   version is tag `csharp-final`. Build output is now target/ at the root.
 - Next: click-test CC sliders/toggles and Wi-Fi join, run the Rust build as Jay's daily driver and fix what he hits;
-  then retire the C# build (startup shortcut → Rust exe).
+  C# build retired 3 Nov 2026.

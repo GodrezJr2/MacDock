@@ -1,7 +1,4 @@
-bin/
-obj/
-.acl-recovery/
-.tmp-probe/
-.build/
 target/
 testenv/
+.acl-recovery/
+.claude/
