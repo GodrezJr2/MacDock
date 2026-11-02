@@ -3,4 +3,5 @@ obj/
 .acl-recovery/
 .tmp-probe/
 .build/
-rust/target/
+target/
+testenv/

@@ -2,7 +2,9 @@
 name = "macdock"
 version = "0.1.0"
 edition = "2021"
-description = "MacDock dock, Rust prototype (compare against the C# WPF build)"
+description = "A macOS-style dock and menu bar for Windows 11"
+license = "MIT"
+repository = "https://github.com/GodrezJr2/MacDock"
 
 [dependencies]
 tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }

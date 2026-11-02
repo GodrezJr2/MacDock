@@ -3,7 +3,7 @@
 # MacDock
 
 **A macOS-style dock and menu bar for Windows 11.**
-Written from scratch in C# / WPF on .NET 10. No Windhawk, no Explorer patching.
+Written from scratch in Rust on plain Win32. No Windhawk, no Explorer patching, about 13 MB of memory.
 
 <img src="docs/film.webp" alt="MacDock running on Windows 11: the dock magnifies under the pointer, a window minimizes into its icon with the genie effect, then the battery and Control Center flyouts open from the menu bar" width="100%">
 
@@ -12,8 +12,8 @@ Written from scratch in C# / WPF on .NET 10. No Windhawk, no Explorer patching.
 <br>
 
 ![Windows 11](https://img.shields.io/badge/Windows-11-0078D4?logo=windows11&logoColor=white)
-![.NET 10](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet&logoColor=white)
-![WPF](https://img.shields.io/badge/UI-WPF-6E4FB8)
+![Rust](https://img.shields.io/badge/Rust-stable-CE422B?logo=rust&logoColor=white)
+![Win32](https://img.shields.io/badge/UI-Win32%20%2B%20tiny--skia-6E4FB8)
 ![License: MIT](https://img.shields.io/badge/license-MIT-34C759)
 
 </div>
@@ -43,8 +43,8 @@ Written from scratch in C# / WPF on .NET 10. No Windhawk, no Explorer patching.
 ### The genie
 <img src="docs/genie.png" alt="A Visual Studio Code window bending into its dock icon mid-minimize">
 
-The window you minimize is snapshotted and drawn as a 48-row mesh in a `Viewport3D` overlay, then
-squeezed and poured into its icon. Restore from the dock plays it backwards. Windows' own minimize
+The window you minimize is snapshotted and drawn as a 48-row mesh by MacDock's own scanline rasterizer
+(bilinear, anti-aliased edges, rows split across threads), then squeezed and poured into its icon. Restore from the dock plays it backwards. Windows' own minimize
 animation is switched off while MacDock runs and comes back when it quits.
 
 </td>
@@ -85,25 +85,27 @@ notification-area icons (Discord, Steam, …).
 - Dock and menu bar are real **AppBars**: maximized windows stop at them.
 - A fullscreen game hides both, puts the render loop to sleep and removes the mouse hook. On the
   author's laptop that measured 0.00% CPU and a 17 MB working set while a game was in front.
-- Idle on the desktop: about 2.5% of one core and ~230 MB, because the dock only redraws while
-  something is moving.
+- Idle on the desktop: 0% CPU and about 13 MB private memory, because nothing redraws unless something
+  is moving (see [Rust vs the old C# build](#rust-vs-the-old-c-build)).
 
 ## Install
 
-You need Windows 11 and the [.NET 10 SDK](https://dotnet.microsoft.com/download).
+You need Windows 11 and [Rust](https://rustup.rs) (stable, MSVC or GNU toolchain).
 
 ```powershell
 git clone https://github.com/GodrezJr2/MacDock.git
 cd MacDock
-dotnet build -c Release
-.\bin\Release\net10.0-windows\MacDock.exe
+cargo build --release
+.\target\release\macdock.exe
 ```
+
+The result is one ~1 MB exe with no runtime to install; copy it wherever you like.
 
 MacDock hides the Windows taskbar while it runs and restores it when you quit.
 
 - **Quit:** Windows logo in the menu bar → **Quit MacDock**
-- **If it was killed** and the taskbar is still hidden: `MacDock.exe --restore`
-- **Start with Windows:** put a shortcut to `MacDock.exe` in `shell:startup`
+- **If it was killed** and the taskbar is still hidden: `macdock.exe --restore`
+- **Start with Windows:** Windows logo in the menu bar → **Open MacDock at Login**
 
 ## Configure
 
@@ -122,7 +124,7 @@ Settings live in `%APPDATA%\MacDock\config.json`, created on first run.
 | `TrayIcons` | `true` | Host notification-area icons behind the `^` item |
 | `HideTaskbar` | `true` | Hide the Windows taskbar while MacDock runs |
 
-Errors go to `%APPDATA%\MacDock\error.log`.
+A crash writes `%APPDATA%\MacDock\panic.log` and still puts the taskbar back.
 
 ## How it works
 
@@ -137,10 +139,10 @@ position on screen. Because the dock is an AppBar, the wallpaper is almost alway
 <details>
 <summary><b>A genie with no flash</b></summary>
 
-The overlay is one full-screen window that stays DWM-cloaked until it is needed, so it never takes clicks.
-For a title-bar minimize, a low-level mouse hook sees the press on the minimize button, takes a fresh
-snapshot and draws it into the hidden overlay; on release the overlay uncloaks over the window, so the
-animation is already up when the window disappears. Snapshots are shrunk off the UI thread and saved to
+For a title-bar minimize, a low-level mouse hook (on its own thread) sees the press on the minimize button
+and MacDock pre-draws the first frame from a fresh snapshot; on release the overlay is shown from the hook
+itself, so the animation is already up when the window disappears. Only the mesh's bounding box is redrawn
+and pushed to the screen each frame. Snapshots are shrunk off the UI thread and saved to
 disk, so windows minimized before a restart still animate on restore.
 </details>
 
@@ -165,14 +167,29 @@ are read off the UI thread, and a sleeping NVIDIA GPU is left asleep instead of 
 
 - Built and tested on one machine: a Windows 11 laptop at 2560×1600, 125% scale, with an NVIDIA GPU.
   Other setups may show rough edges; issues are welcome.
-- The dock sits at the bottom of the primary monitor.
+- Dock and menu bar live on the primary monitor; other monitors have no taskbar while MacDock runs.
 - While the `^` tray flyout is open, a WinUI 3 app started at that moment can fail to start, because the
   tray host registers its own `Shell_TrayWnd`. The host only runs while that flyout is open.
 - GPU power needs an NVIDIA GPU; without one the breakdown shows CPU and the rest.
 
+## Rust vs the old C# build
+
+MacDock started as C# / WPF on .NET 10 and was rewritten in Rust (plain Win32, tiny-skia, WinRT through the
+`windows` crate) to make it lighter. Same features, same `config.json`. Measured on the same laptop and screen,
+20 s idle plus a 10 s scripted pointer sweep over the dock:
+
+| | C# / WPF | Rust |
+| --- | --- | --- |
+| Private memory | 320-379 MB | 12.9 MB |
+| CPU idle | 0.04-0.6% | 0% |
+| CPU while magnifying | 2.0-2.3% | 1.65% |
+| Threads | 21-26 | 11 |
+| On disk | 30 MB + .NET runtime | 1.1 MB exe |
+
+The C# version is kept at the tag [`csharp-final`](https://github.com/GodrezJr2/MacDock/tree/csharp-final).
+
 ## Credits
 
-- Tray icon hosting uses [ManagedShell](https://github.com/cairoshell/ManagedShell), the library behind RetroBar and Cairo.
 - Built by [@GodrezJr2](https://github.com/GodrezJr2) with Claude Code as an AI pair programmer.
 - macOS and the Dock are trademarks of Apple Inc. MacDock is an independent project, not affiliated with or endorsed by Apple.
 
