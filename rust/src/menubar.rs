@@ -311,11 +311,11 @@ impl MenuBar {
 
     pub fn start(&mut self) {
         enable_blur(self.hwnd, 4, 0x6A1E1C1C);
-        self.place();
         unsafe {
             SetTimer(self.hwnd, TIMER_TICK, 1000, None);
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
         }
+        self.place();
         self.on_foreground(unsafe { GetForegroundWindow() });
         self.render();
     }
@@ -359,7 +359,9 @@ impl MenuBar {
         let mut d = self.appbar_data();
         unsafe {
             if !self.appbar {
-                SHAppBarMessage(ABM_NEW, &mut d);
+                if SHAppBarMessage(ABM_NEW, &mut d) == 0 {
+                    return; // refused (e.g. we run at low integrity); maximized windows will slide under us
+                }
                 self.appbar = true;
             }
             d.rc = RECT { left: 0, top: 0, right: self.px(self.screen_w), bottom: self.px(H) };

@@ -339,9 +339,6 @@ impl Dock {
             self.seen = Some(badges::Seen::load());
         }
         self.refresh(true);
-        if !self.cfg.auto_hide {
-            self.reserve();
-        }
         unsafe {
             SetTimer(self.hwnd, TIMER_REFRESH, 700, None);
             if self.cfg.auto_hide {
@@ -358,6 +355,9 @@ impl Dock {
         self.frame();
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+        }
+        if !self.cfg.auto_hide {
+            self.reserve();
         }
     }
 

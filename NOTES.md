@@ -215,7 +215,12 @@ Jay: "you can install a full rust" → go for the full rewrite; C# build stays u
   - Bug (Jay): opening Chrome hid dock + bar. `foreground_is_fullscreen` counted a maximized window covering the
     whole screen (no AppBar space reserved) as fullscreen. Now zoomed or captioned windows never count, and the
     rect must equal the monitor exactly.
-  - AppBar reservation does not take effect for a dock started from Claude's sandboxed shell (work area stays
-    full screen); Jay should launch the exe himself to check it.
+  - Bug (Jay): maximized Chrome sat under the bar and dock. Root cause is NOT the code: Claude's sandbox put a
+    Low Mandatory Label (plus a deny-DC ACE) on D:\Project\MacDock, inherited by rust	arget. A process started
+    from a low-labelled exe runs at low integrity even when Jay double-clicks it, and Explorer answers its
+    ABM_NEW with ERROR_ACCESS_DENIED (and %APPDATA% is read-only to it: this was the "sandbox token" gotcha too).
+    Fix: run the Rust build from `%LOCALAPPDATA%\Programs\MacDock\macdock.exe` (copy it there; a copy gets no
+    label). Verified: medium integrity, work area 0,30-1920,1002. main.rs now warns with a MessageBox when it
+    starts at low integrity. The C# bin\ folder has no label, which is why the old build never hit this.
 - Commit every finished change right away (Jay, 29 Oct and again 2 Nov).
 - Next: flyouts (battery, Wi-Fi, Control Center), tray host last, then CPU/RAM re-measure.

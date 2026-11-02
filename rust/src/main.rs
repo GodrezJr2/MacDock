@@ -197,6 +197,28 @@ impl App {
     }
 }
 
+/// Below medium integrity (a Low Mandatory Label on the exe or its folder carries over to the process).
+fn low_integrity() -> bool {
+    use windows::Win32::Security::{GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel, TOKEN_MANDATORY_LABEL, TOKEN_QUERY};
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    unsafe {
+        let mut tok = windows::Win32::Foundation::HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok).is_err() {
+            return false;
+        }
+        let mut buf = [0u8; 128];
+        let mut n = 0u32;
+        let ok = GetTokenInformation(tok, TokenIntegrityLevel, Some(buf.as_mut_ptr() as *mut _), buf.len() as u32, &mut n).is_ok();
+        let _ = windows::Win32::Foundation::CloseHandle(tok);
+        if !ok {
+            return false;
+        }
+        let label = &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+        let count = *GetSidSubAuthorityCount(label.Label.Sid) as u32;
+        *GetSidSubAuthority(label.Label.Sid, count - 1) < 0x2000
+    }
+}
+
 fn foreground_is_fullscreen() -> bool {
     unsafe {
         let fg = GetForegroundWindow();
@@ -241,6 +263,20 @@ fn main() {
     let _single = unsafe { CreateMutexW(None, true, w!("MacDock.Singleton")) };
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
         return;
+    }
+    if low_integrity() {
+        // Explorer refuses AppBars from a low-integrity process and %APPDATA% is read-only to it: this happens
+        // when the exe sits in a folder with a Low Mandatory Label (e.g. a sandboxed build folder)
+        unsafe {
+            MessageBoxW(
+                None,
+                w!("MacDock is running at low integrity, so it cannot reserve screen space or save settings.
+
+Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDock) and start it from there."),
+                w!("MacDock"),
+                MB_OK | MB_ICONWARNING,
+            );
+        }
     }
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
