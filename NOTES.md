@@ -16,6 +16,27 @@ its last build zipped at `D:\Project\_archive\MacDock-csharp-final-build.zip`. S
 - Config: `%APPDATA%\MacDock\config.json` (Pinned list of `shell:AppsFolder\<AppID>` / .lnk / .exe,
   IconSize, Magnify, HideTaskbar, MenuBar, …). Crash: `%APPDATA%\MacDock\panic.log`.
 
+## To do (pick any; suggested order)
+Untested since the port (check first if something looks off):
+- [ ] Control Center toggles: Dark Mode, Bluetooth, Power Mode; brightness slider drag
+- [ ] Wi-Fi flyout: join a network, password entry, Esc to close
+
+Features (S = small, M = medium, L = large):
+- [ ] 1. Downloads stack (M): folder item next to Trash; click fans out / grids the newest files in Downloads;
+      open or drag out. Watch the folder (ReadDirectoryChangesW) instead of polling.
+- [ ] 2. Drop a file on a dock icon to open it with that app (S): OLE drop target (IDropTarget) on the dock,
+      highlight the icon under the drag, launch the app with the file as argument / via its AUMID.
+- [ ] 3. Open animation from the icon (M): first window of a just-launched app grows out of its icon; reuse the
+      genie mesh played backwards (genie.rs).
+- [ ] 4. Recent apps section (S): last 3 unpinned apps after a divider, like macOS.
+- [ ] 5. Calendar flyout on the clock (S, M with events): month view, today highlighted; optional today's events.
+      Clock currently opens the notification center (Win+N).
+- [ ] 6. Spotlight-style search on Alt+Space (L): apps, files, settings, quick math. Search item now sends Win+S.
+- [ ] 7. MacDock settings window (M): icon size, magnify, auto-hide, tiles, badges with live preview; today only
+      config.json.
+- [ ] 8. Per-app icon override (S): right-click icon → Change Icon…, stored in config.json.
+Recommended start: 1 + 2, then 7.
+
 ## What it does (C# era, same in Rust)
 - Dock: cosine magnification from the resting layout (R = 2.9 × icon), smoothed per frame; launch bounce
   (|sin|, 0.62 s period) until a new window shows up; running dots; hover label; Trash with separator;
@@ -87,9 +108,6 @@ its last build zipped at `D:\Project\_archive\MacDock-csharp-final-build.zip`. S
 - %APPDATA%\MacDock\genie.log records each minimize/restore that could not animate and why (no snapshot,
   no dock icon, overlay busy) with the process name. Read it when Jay reports a missing animation.
 
-## Next ideas
-- Zoom-from-icon when an app opens its first window; attention bounce for flashing windows.
-- Drag files onto an icon to open with it; multi-monitor.
 ## 29 Oct 2026
 - Dock restores came back behind other apps: the restore runs after the genie, when the mouse may have
   moved over another app and taken our SetForegroundWindow right. Shell.Activate sends an empty SendInput
@@ -253,5 +271,5 @@ Jay: "you can install a full rust" → go for the full rewrite; C# build stays u
   there either; tried keeping Shell_SecondaryTrayWnd, Jay preferred it gone).
 - Repo is Rust-only since 3 Nov 2026 (Jay): C# sources removed, Rust moved from rust/ to the root; the last C#
   version is tag `csharp-final`. Build output is now target/ at the root.
-- Next: click-test CC sliders/toggles and Wi-Fi join, run the Rust build as Jay's daily driver and fix what he hits;
+- Next: see "To do" at the top. Jay daily-drives the Rust build and reports problems;
   C# build retired 3 Nov 2026.
