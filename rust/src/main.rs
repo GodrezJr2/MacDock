@@ -9,6 +9,7 @@ mod config;
 mod dock;
 mod fly_battery;
 mod fly_cc;
+mod fly_tray;
 mod fly_wifi;
 mod flyout;
 mod genie;
@@ -20,6 +21,7 @@ mod shell;
 mod sysctl;
 mod taskbar;
 mod tile;
+mod tray;
 
 use std::cell::RefCell;
 
@@ -160,10 +162,10 @@ impl App {
             menubar::Extra::Battery => Box::new(fly_battery::BatteryFly::new()),
             menubar::Extra::Wifi => Box::new(fly_wifi::WifiFly::new()),
             menubar::Extra::ControlCenter => Box::new(fly_cc::ControlCenter::new()),
+            menubar::Extra::Tray => Box::new(fly_tray::TrayFly::new()),
             other => {
                 // not ported yet: the matching Settings page
                 shell::launch(match other {
-                    menubar::Extra::Tray => "ms-settings:taskbar",
                     menubar::Extra::Wifi => "ms-settings:network-wifi",
                     _ => "ms-actioncenter:controlcenter",
                 });
