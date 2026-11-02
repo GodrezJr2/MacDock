@@ -2,3 +2,4 @@ target/
 testenv/
 .acl-recovery/
 .claude/
+NOTES.md
