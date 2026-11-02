@@ -157,3 +157,65 @@ in .NET 10 WPF. Replaces the Windhawk taskbar restyle (ClearMacDock theme looked
 - Wi-Fi SSID in Control Center masked with ffmpeg `drawbox` in the tile colour (boxblur errored, gblur left green
   chroma fringes). Check any new capture for SSID, account names and folder paths before committing.
 - Seen while recording: VS Code started via Code.exe showed as a second VS Code icon next to the pinned one. Not fixed.
+
+## Rust rewrite: comparison (2 Nov 2026)
+Jay asked whether a Rust rewrite would be lighter. Prototype in `rust/` (dock only): plain Win32 + tiny-skia
+painting straight into the layered window's DIB, frame loop paced by DwmFlush that sleeps in GetMessage.
+Has frost, magnification, launch bounce, dots, hover label, Trash, AppBar, refit on display change,
+click to launch/activate/minimize, right-click → Quit. Missing: menu bar, genie, badges, drag, icon tiles,
+taskbar hiding, auto-hide.
+- Build: `cd rust && cargo build --release` (GNU toolchain via rustup; windows crate pinned to 0.58 because
+  0.61's raw-dylib needs dlltool + an assembler on the GNU target, which failed with "dlltool.exe: CreateProcess").
+- Measured idle (C# = full app, Rust = dock only): C# 319 MB private / 323 MB WS / 0.62% CPU / 21 threads /
+  29 MB on disk + .NET runtime. Rust 9.6 MB private / 41 MB WS / 0.16% CPU / 10 threads / 0.67 MB exe.
+- Not yet checked: visuals and hover frame cost (PC was locked during the test, screenshots were black).
+
+## Rust rewrite: full port, in progress (2 Nov 2026)
+Jay: "you can install a full rust" → go for the full rewrite; C# build stays usable until Rust does everything.
+- Packaged apps (Terminal, Outlook, Settings) showed blank icons: in our process `GetImage(SIIGBF_ICONONLY)` returns
+  the generic icon and `IExtractIconW::Extract` fails with 0x80004005 (same calls work in PowerShell; not the
+  manifest, DPI, apartment, GDI+ or icon size). Fix: `shell::package_logo` takes the GetIconLocation path
+  (`...\Images\Square44x44Logo.png-100`), picks the best MRT variant in that folder (unplated targetsize first,
+  smallest ≥ wanted px) and decodes it with WIC (`gfx::image_file`). Test: `cargo test --release packaged_icons`.
+- Taskbar hiding ported (`taskbar.rs`, `--restore`, restore on quit and WM_ENDSESSION, single-instance mutex
+  `MacDock.Singleton` shared with C# so both never run together). Gotcha: sending ABM_SETSTATE on every
+  keep-hidden pass makes Explorer re-show the bar a moment later, so it stayed visible; only send it when the
+  autohide bit is missing.
+- Done since: icon tiles (`tile.rs`), config shared with C# (`config.rs`), macOS popup menus (`menu.rs`), badges
+  (`badges.rs`: "(N)" titles + Action Center toasts via winsqlite3 loaded at run time, `seen.json`), and the dock
+  split into `dock.rs` with drag to reorder / drag out to unpin, context menus (plate, Trash, app), auto-hide with
+  edge timer, attention bounce (SHELLHOOK HSHELL_FLASH), foreground hook, IsIconic click logic, game-mode poll,
+  wallpaper reload. `main.rs` is now an App that routes queued events; dock returns `Act`s (Minimize/Restore go
+  through `genie.rs`, which for now only does the window actions + MinAnimate restore).
+- Comparison 2 Nov 2026, same 1920x1080 screen, 2 runs each, 20 s idle + 10 s scripted pointer sweep over the dock
+  (`scratchpad/measure.ps1`). Rust = dock with all of the above, no menu bar/genie yet; C# = full app:
+  Rust: 0% idle CPU, 1.5% while magnifying, 9.3 MB private (flat after hover), 34 MB WS, 8 threads, ~360 handles,
+  0.8 MB exe. C#: 0.04% idle, 2.0-2.3% while magnifying, 320 MB private → 379 MB after hover, 325 MB WS,
+  26 threads, ~920 handles, 30 MB folder + .NET runtime.
+- Genie ported (`genie.rs`): own CPU scanline rasterizer for the 48-row strip mesh (bilinear, edge AA, rows split
+  over threads with `thread::scope`), only the mesh bbox is drawn and pushed (`Surface::present_part`, ULW with
+  a source point). Mouse LL hook on its own thread (atomics + PostMessage), arms on HTMINBUTTON press and shows
+  the pre-drawn overlay from the hook on release. Snapshots: GDI HALFTONE ≤1024 px on a worker, persisted as PNG
+  (WIC, `gfx::save_png`) in the same `%LOCALAPPDATA%\MacDock\snaps` format as C#, lazy load on restore.
+  Verified with frame grabs: minimize event (SC_MINIMIZE), dock click, caption min button (charmap), restore,
+  restore after dock restart from disk.
+  - Crash found and fixed: `yc.clamp(top, bot - 1e-6)` panics when the mesh is fully collapsed (top == bot, last
+    minimize frame). A panic hook now writes `%APPDATA%\MacDock\panic.log` (and restores taskbar/MinAnimate).
+  - Testing gotcha: processes started from Claude's sandboxed shell get a restricted token and can't write
+    `%APPDATA%`/`%LOCALAPPDATA%` (Access denied, even via WMI / unsandboxed). `scratchpad/run.sh` now starts the
+    dock with APPDATA/LOCALAPPDATA pointed at `rust/testenv/` (gitignored). Side effect: per-user installs (Chrome,
+    VS Code) show blank icons there; not a real bug.
+- Menu bar ported (`menubar.rs`): one layered window across the top with acrylic (SetWindowCompositionAttribute via
+  GetProcAddress), AppBar ABE_TOP, logo/app/File/Edit/View/Window/Help menus through `menu::popup` (shortcuts sent
+  to the last foreground app), status items (tray ^, battery via GetSystemPowerStatus, Wi-Fi via WinRT
+  NetworkInformation, search Win+S, Control Center glyph, clock Win+N), 1 s tick, network every 5 s, 400 ms
+  debounced refit on display change. Flyouts not ported yet: their buttons open the matching ms-settings page.
+  - Bug (Jay's screenshot): garbled text. The bar drew each frame onto the old surface with SourceOver, so old app
+    names and clock digits piled up. Fix: copy with `BlendMode::Source`.
+  - Bug (Jay): opening Chrome hid dock + bar. `foreground_is_fullscreen` counted a maximized window covering the
+    whole screen (no AppBar space reserved) as fullscreen. Now zoomed or captioned windows never count, and the
+    rect must equal the monitor exactly.
+  - AppBar reservation does not take effect for a dock started from Claude's sandboxed shell (work area stays
+    full screen); Jay should launch the exe himself to check it.
+- Commit every finished change right away (Jay, 29 Oct and again 2 Nov).
+- Next: flyouts (battery, Wi-Fi, Control Center), tray host last, then CPU/RAM re-measure.
