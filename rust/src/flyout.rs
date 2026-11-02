@@ -266,7 +266,7 @@ impl Ui<'_> {
 
 /// One extra's body.
 pub trait Content {
-    /// Panel width in DIPs (outside the shadow margin).
+    /// Window width in DIPs, the 13 px shadow margin on both sides included (as Flyout.cs).
     fn width(&self) -> f32;
     /// Panel padding (left/right, top/bottom).
     fn padding(&self) -> (f32, f32) {
@@ -499,7 +499,7 @@ impl Flyout {
     }
 
     pub fn render(&mut self) {
-        let w = self.content.width();
+        let w = self.content.width() - 2.0 * MARGIN; // the width includes the shadow margin, as in Flyout.cs
         let (padx, pady) = self.content.padding();
         let s = self.dpi;
         // measure pass: draw into a scratch pixmap sized for the tallest panel, keep the height
@@ -546,7 +546,7 @@ impl Flyout {
 
         // right-align under the anchor, inside the screen
         let win_w = pw as i32;
-        let x = (self.right_px + (MARGIN * s) as i32 - win_w).clamp((8.0 * s) as i32 - (MARGIN * s) as i32, self.screen_w_px - win_w + (MARGIN * s) as i32 - (4.0 * s) as i32);
+        let x = (self.right_px + (MARGIN * s) as i32 - win_w).min(self.screen_w_px - win_w - (4.0 * s) as i32).max((8.0 * s) as i32);
         let y = self.top_px - (7.0 * s) as i32;
         self.pos = (x, y);
         self.content.placed(&self.spots, (x + (ox * s) as i32, y + (oy * s) as i32), s);

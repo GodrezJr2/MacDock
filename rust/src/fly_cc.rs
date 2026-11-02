@@ -197,7 +197,7 @@ impl ControlCenter {
     }
 }
 
-const SLIDER_W: f32 = 310.0 - 20.0;
+const SLIDER_W: f32 = 330.0 - 26.0 - 20.0 - 20.0;
 
 impl Content for ControlCenter {
     fn width(&self) -> f32 {
