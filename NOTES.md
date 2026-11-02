@@ -170,7 +170,7 @@ taskbar hiding, auto-hide.
   29 MB on disk + .NET runtime. Rust 9.6 MB private / 41 MB WS / 0.16% CPU / 10 threads / 0.67 MB exe.
 - Not yet checked: visuals and hover frame cost (PC was locked during the test, screenshots were black).
 
-## Rust rewrite: full port, in progress (2 Nov 2026)
+## Rust rewrite: full port (2-3 Nov 2026)
 Jay: "you can install a full rust" → go for the full rewrite; C# build stays usable until Rust does everything.
 - Packaged apps (Terminal, Outlook, Settings) showed blank icons: in our process `GetImage(SIIGBF_ICONONLY)` returns
   the generic icon and `IExtractIconW::Extract` fails with 0x80004005 (same calls work in PowerShell; not the
@@ -226,7 +226,23 @@ Jay: "you can install a full rust" → go for the full rewrite; C# build stays u
 - Flyout framework (rust/src/flyout.rs): one activatable layered popup, immediate-mode `Ui` + `Content` trait;
   panels name clickable spots while drawing, so hit-testing matches the frame. Closes on Esc / deactivate.
 - Battery flyout ported (power.rs = Battery.cs + PowerMeter.cs: battery IOCTLs, EMI RAPL, NVML; fly_battery.rs).
-  Builds; visual check pending (screen locked during the session).
+  Verified on screen with live data.
+- Wi-Fi flyout (fly_wifi.rs: WinRT WiFiAdapter scan/connect on an MTA worker, password field, wheel scroll) and
+  Control Center (fly_cc.rs + sysctl.rs: Core Audio volume, WMI brightness, Bluetooth Radio, dark mode registry +
+  ImmersiveColorSet broadcast, powrprof overlay scheme, GSMTC now playing with album art). Verified on screen;
+  slider drag / toggles / Wi-Fi join not click-tested yet.
+- Flyout bug: the old flyout's WM_ACTIVATE(deactivate) arrived after the new one opened and closed it. Events now
+  carry the flyout hwnd and main.rs drops ones from a flyout that is closing.
+- Flyout width: Content::width() includes the 13 px shadow margin on both sides, as Flyout.cs (panels were 26 px
+  too wide).
+- Tray host ported without ManagedShell (tray.rs + fly_tray.rs): our topmost Shell_TrayWnd exists only while the
+  ^ flyout is open (TaskbarCreated broadcast on start and stop), WM_COPYDATA 1 = SHELLTRAYDATA (NOTIFYICONDATA32
+  offsets in tray.rs), 3 = Shell_NotifyIconGetRect, everything else forwarded to Explorer's tray. HICON → alpha by
+  drawing on black and white. Verified: 15 icons fill live, hover shows tooltip (or app name), right click opens
+  the app's menu (Discord), after close only Explorer's Shell_TrayWnd remains.
+- Re-measured 3 Nov 2026, full Rust app (dock + menu bar + genie + flyouts), same method: 0% idle CPU, 1.65% while
+  magnifying, 12.9 MB private (flat), 44.5 MB WS, 11 threads, 435 handles, 1.1 MB exe. C# was 320-379 MB private.
 - Colour gotcha: surfaces are BGRA, tiny-skia writes RGBA, so colours go in as (b, g, r). flyout::rgba() swaps;
   menubar battery fill was wrong (fixed).
-- Next: check battery flyout on screen, then Wi-Fi, Control Center, tray host last, then CPU/RAM re-measure.
+- Next: click-test CC sliders/toggles and Wi-Fi join, run the Rust build as Jay's daily driver and fix what he hits;
+  then retire the C# build (startup shortcut → Rust exe).
