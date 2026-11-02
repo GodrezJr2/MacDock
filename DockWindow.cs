@@ -36,7 +36,7 @@ class DockWindow : Window
     AppBar? appBar;
     Genie? genie;
     double dpi = 1;
-    readonly double screenW = SystemParameters.PrimaryScreenWidth, screenH = SystemParameters.PrimaryScreenHeight;
+    double screenW = SystemParameters.PrimaryScreenWidth, screenH = SystemParameters.PrimaryScreenHeight; // primary screen in DIPs, refreshed on display changes
 
     // like macOS: the dock grows to the screen edges, then its icons shrink so everything still fits
     double B => Math.Min(cfg.IconSize, fitB);
@@ -224,6 +224,7 @@ class DockWindow : Window
         appBar = new AppBar(hwnd, ABE_BOTTOM);
         if (!cfg.AutoHide) ReserveSpace();
         HwndSource.FromHwnd(hwnd).AddHook(WndProc);
+        displayTimer.Tick += (_, _) => ApplyDisplay();
         // HSHELL_FLASH arrives when an app flashes its taskbar button (FlashWindowEx) asking for attention
         shellHookMsg = RegisterWindowMessageW("SHELLHOOK");
         RegisterShellHookWindow(hwnd);
@@ -241,9 +242,38 @@ class DockWindow : Window
             else if ((int)w == ABN_FULLSCREENAPP) App.Fullscreen(l != IntPtr.Zero);
         }
         else if (msg == shellHookMsg && (int)w == HSHELL_FLASH) WantsAttention(l);
+        else if (msg == WM_DISPLAYCHANGE || msg == WM_DPICHANGED) DisplayChanged();
         return IntPtr.Zero;
     }
     uint shellHookMsg;
+
+    // ---------------------------------------------------------------- display changes
+
+    /// <summary>
+    /// Plugging or unplugging a monitor (or changing resolution or scale) sends a burst of messages while Windows
+    /// shuffles windows around, so wait for it to settle and then fit the dock to the primary screen again.
+    /// </summary>
+    readonly DispatcherTimer displayTimer = new() { Interval = TimeSpan.FromMilliseconds(400) };
+    void DisplayChanged()
+    {
+        displayTimer.Stop();
+        displayTimer.Start();
+    }
+
+    void ApplyDisplay()
+    {
+        displayTimer.Stop();
+        (screenW, screenH, dpi) = PrimaryScreen();
+        double w = Math.Min(Width, screenW);
+        PlaceWindow(hwnd, (screenW - w) / 2, screenH - Height, w, Height, dpi);
+        fitB = double.MaxValue; // refit from scratch: the screen may be narrower or wider now
+        FitIcons();
+        if (!cfg.AutoHide) ReserveSpace();
+        FitWidth();
+        LoadWallpaper();      // the frost slice is mapped to the screen's aspect ratio
+        genie?.SetDpi(dpi);
+        Wake();
+    }
 
     void ReserveSpace() => appBar?.Register((int)Math.Round((PlateH + BottomGap * 2) * dpi), (int)Math.Round(screenW * dpi), (int)Math.Round(screenH * dpi));
 
@@ -687,9 +717,10 @@ class DockWindow : Window
     void FitWidth()
     {
         double w = Math.Min(screenW, items.Count * (B * cfg.Magnify + Gap) + PadX * 2 + 2 * Gap + 320);
-        if (Math.Abs(w - Width) < 1) return;
+        double left = (screenW - w) / 2;
+        if (Math.Abs(w - Width) < 1 && Math.Abs(left - Left) < 1) return;
         Width = w;
-        Left = (screenW - w) / 2;
+        Left = left;
     }
 
     // ---------------------------------------------------------------- input

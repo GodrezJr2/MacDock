@@ -280,7 +280,7 @@ class Genie
 
     readonly GenieWindow overlay = new();
     readonly Func<IntPtr, Rect?> iconRect;
-    readonly double dpi;
+    double dpi;
     readonly Dictionary<IntPtr, Snap> snaps = new();
     readonly WinEventProc proc;
     readonly List<IntPtr> hooks = new();
@@ -309,6 +309,9 @@ class Genie
         mouseProc = OnMouse;
         timer.Tick += (_, _) => Capture(GetForegroundWindow());
     }
+
+    /// <summary>The dock's DPI after a display change, so icon targets are converted to the right pixels.</summary>
+    public void SetDpi(double d) => dpi = d;
 
     public void Start()
     {

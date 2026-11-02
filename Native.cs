@@ -47,6 +47,27 @@ static class Native
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowW(string? cls, string? title);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowExW(IntPtr parent, IntPtr after, string? cls, string? title);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern uint RegisterWindowMessageW(string s);
+    [DllImport("user32.dll")] static extern int GetSystemMetrics(int i);
+    [DllImport("user32.dll")] static extern IntPtr MonitorFromPoint(POINT p, uint flags);
+    [DllImport("shcore.dll")] static extern int GetDpiForMonitor(IntPtr mon, int type, out uint dpiX, out uint dpiY);
+
+    public const int WM_DISPLAYCHANGE = 0x7E, WM_DPICHANGED = 0x2E0;
+
+    /// <summary>
+    /// The primary screen as it is now: size in DIPs and its DPI scale. Read fresh every time, because plugging
+    /// or unplugging a monitor changes both (SystemParameters.PrimaryScreen* can lag behind).
+    /// </summary>
+    public static (double W, double H, double Dpi) PrimaryScreen()
+    {
+        int pw = GetSystemMetrics(0), ph = GetSystemMetrics(1); // physical px under PerMonitorV2
+        var mon = MonitorFromPoint(new POINT(), 1);             // MONITOR_DEFAULTTOPRIMARY
+        double dpi = GetDpiForMonitor(mon, 0, out uint dx, out _) == 0 && dx > 0 ? dx / 96.0 : 1;
+        return (pw / dpi, ph / dpi, dpi);
+    }
+
+    /// <summary>Move a window in physical px, so it lands on the primary screen whatever DPI WPF thinks it has.</summary>
+    public static void PlaceWindow(IntPtr h, double x, double y, double w, double hgt, double dpi) =>
+        SetWindowPos(h, IntPtr.Zero, (int)Math.Round(x * dpi), (int)Math.Round(y * dpi), (int)Math.Round(w * dpi), (int)Math.Round(hgt * dpi), SWP_NOZORDER | SWP_NOACTIVATE);
     [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
     // INPUT with a MOUSEINPUT body (the largest union member, so the size matches the native struct)
     [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint Type; public int Dx, Dy; public uint MouseData, Flags, Time; public IntPtr Extra; }

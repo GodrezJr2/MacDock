@@ -27,7 +27,7 @@ class MenuBarWindow : Window
     [DllImport("powrprof.dll")] static extern bool SetSuspendState(bool hibernate, bool force, bool disableWake);
 
     const double H = 30;
-    readonly double screenW = SystemParameters.PrimaryScreenWidth, screenH = SystemParameters.PrimaryScreenHeight;
+    double screenW = SystemParameters.PrimaryScreenWidth, screenH = SystemParameters.PrimaryScreenHeight; // primary screen in DIPs, refreshed on display changes
     readonly WinEventProc fgProc;
     IntPtr hook, hwnd;
     AppBar? appBar;
@@ -120,6 +120,7 @@ class MenuBarWindow : Window
         appBar = new AppBar(hwnd, ABE_TOP);
         appBar.Register((int)Math.Round(H * dpi), (int)Math.Round(screenW * dpi), (int)Math.Round(screenH * dpi));
         HwndSource.FromHwnd(hwnd).AddHook(WndProc);
+        displayTimer.Tick += (_, _) => ApplyDisplay();
         hook = SetWinEventHook(3, 3, IntPtr.Zero, fgProc, 0, 0, 0); // EVENT_SYSTEM_FOREGROUND, out of context
         OnForeground(IntPtr.Zero, 3, GetForegroundWindow(), 0, 0, 0, 0);
     }
@@ -131,7 +132,23 @@ class MenuBarWindow : Window
             if ((int)w == ABN_POSCHANGED) appBar.Reposition((int)Math.Round(screenW * dpi), (int)Math.Round(screenH * dpi));
             else if ((int)w == ABN_FULLSCREENAPP) App.Fullscreen(l != IntPtr.Zero);
         }
+        else if (msg == WM_DISPLAYCHANGE || msg == WM_DPICHANGED) { displayTimer.Stop(); displayTimer.Start(); }
         return IntPtr.Zero;
+    }
+
+    /// <summary>
+    /// A monitor came or went (or resolution/scale changed): once Windows settles, stretch the bar across the
+    /// primary screen again and reserve its strip at the new DPI.
+    /// </summary>
+    readonly DispatcherTimer displayTimer = new() { Interval = TimeSpan.FromMilliseconds(400) };
+
+    void ApplyDisplay()
+    {
+        displayTimer.Stop();
+        flyout?.Close();
+        (screenW, screenH, dpi) = PrimaryScreen();
+        PlaceWindow(hwnd, 0, 0, screenW, H, dpi);
+        appBar?.Register((int)Math.Round(H * dpi), (int)Math.Round(screenW * dpi), (int)Math.Round(screenH * dpi));
     }
 
     public void Shutdown()
