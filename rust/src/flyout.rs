@@ -196,6 +196,20 @@ impl Ui<'_> {
         hov
     }
 
+    /// An image drawn into (x, y, w, h), clipped to the rounded box `clip` (x, y, w, h) with radius r.
+    pub fn image_rounded(&mut self, img: &Pixmap, x: f32, y: f32, w: f32, h: f32, clip: (f32, f32, f32, f32), r: f32) {
+        let s = self.s;
+        let Some(mut mask) = tiny_skia::Mask::new(self.pm.width(), self.pm.height()) else { return };
+        if let Some(p) = gfx::rrect((self.ox + clip.0) * s, (self.oy + clip.1) * s, clip.2 * s, clip.3 * s, r * s) {
+            mask.fill_path(&p, FillRule::Winding, true, Transform::identity());
+        }
+        let sx = w * s / img.width() as f32;
+        let sy = h * s / img.height() as f32;
+        let tf = Transform::from_row(sx, 0.0, 0.0, sy, (self.ox + x) * s, (self.oy + y) * s);
+        let paint = PixmapPaint { quality: tiny_skia::FilterQuality::Bicubic, ..Default::default() };
+        self.pm.draw_pixmap(0, 0, img.as_ref(), &paint, tf, Some(&mask));
+    }
+
     pub fn divider(&mut self, y: f32) {
         let w = self.w;
         self.fill(0.0, y, w, 1.0, 0.0, white(0x1A));

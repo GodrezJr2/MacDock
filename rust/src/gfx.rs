@@ -304,6 +304,23 @@ pub fn image_file(path: &str, max_px: u32) -> Option<Pixmap> {
         let f: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
         let wp = wide(path);
         let dec = f.CreateDecoderFromFilename(PCWSTR(wp.as_ptr()), None, GENERIC_READ, WICDecodeMetadataCacheOnDemand).ok()?;
+        decode(&f, &dec, max_px)
+    }
+}
+
+/// Decode an encoded image held in memory (album art).
+pub fn image_bytes(bytes: &[u8], max_px: u32) -> Option<Pixmap> {
+    unsafe {
+        let f: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
+        let st = f.CreateStream().ok()?;
+        st.InitializeFromMemory(bytes).ok()?;
+        let dec = f.CreateDecoderFromStream(&st, std::ptr::null(), WICDecodeMetadataCacheOnDemand).ok()?;
+        decode(&f, &dec, max_px)
+    }
+}
+
+unsafe fn decode(f: &IWICImagingFactory, dec: &IWICBitmapDecoder, max_px: u32) -> Option<Pixmap> {
+    {
         let frame = dec.GetFrame(0).ok()?;
         let (mut w, mut h) = (0u32, 0u32);
         frame.GetSize(&mut w, &mut h).ok()?;
