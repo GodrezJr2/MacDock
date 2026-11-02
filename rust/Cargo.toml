@@ -39,6 +39,10 @@ features = [
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Foundation",
+    "Foundation_Collections",
+    "Devices_WiFi",
+    "Devices_Radios",
+    "Security_Credentials",
     "Networking_Connectivity",
 ]
 

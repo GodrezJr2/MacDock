@@ -17,6 +17,7 @@ use crate::{push, Ev};
 pub const MARGIN: f32 = 13.0; // shadow room around the panel
 const PANEL_FILL: (u8, u8, u8, u8) = (0x1C, 0x1C, 0x1F, 0xF2);
 pub const ACCENT: (u8, u8, u8) = (0x0A, 0x84, 0xFF);
+pub const ACCENT4: (u8, u8, u8, u8) = (0x0A, 0x84, 0xFF, 0xFF);
 const WM_MOUSELEAVE: u32 = 0x02A3;
 pub const WM_FLY_DATA: u32 = WM_APP + 30;
 const TIMER_TICK: usize = 1;
@@ -184,6 +185,15 @@ impl Ui<'_> {
         let tf = Transform::from_row(sx, 0.0, 0.0, sy, (self.ox + x) * self.s, (self.oy + y) * self.s);
         let paint = PixmapPaint { quality: tiny_skia::FilterQuality::Bicubic, ..Default::default() };
         self.pm.draw_pixmap(0, 0, img.as_ref(), &paint, tf, None);
+    }
+
+    /// A row that lights up under the mouse (macOS menu bar extra item); returns whether it is hovered.
+    pub fn row(&mut self, id: u32, x: f32, y: f32, w: f32, h: f32) -> bool {
+        let hov = self.hit(id, x, y, w, h);
+        if hov {
+            self.fill(x, y, w, h, 8.0, white(0x1C));
+        }
+        hov
     }
 
     pub fn divider(&mut self, y: f32) {

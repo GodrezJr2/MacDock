@@ -8,6 +8,7 @@ mod badges;
 mod config;
 mod dock;
 mod fly_battery;
+mod fly_wifi;
 mod flyout;
 mod genie;
 mod gfx;
@@ -154,6 +155,7 @@ impl App {
         }
         let content: Box<dyn flyout::Content> = match kind {
             menubar::Extra::Battery => Box::new(fly_battery::BatteryFly::new()),
+            menubar::Extra::Wifi => Box::new(fly_wifi::WifiFly::new()),
             other => {
                 // not ported yet: the matching Settings page
                 shell::launch(match other {
