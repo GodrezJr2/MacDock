@@ -547,6 +547,10 @@ impl MenuBar {
         self.slots.iter().find(|s| s.item == item).map(|s| (self.px(s.x), self.px(s.x + s.w)))
     }
 
+    pub fn dpi(&self) -> f64 {
+        self.dpi
+    }
+
     pub fn bottom_px(&self) -> i32 {
         self.px(H)
     }
@@ -979,7 +983,7 @@ pub fn draw_battery(pm: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, pct: u8, pl
     if fill_w > 0.0 {
         if let Some(p) = gfx::rrect(x + inset, y + inset, fill_w, ih, ir) {
             let mut paint = Paint::default();
-            paint.set_color_rgba8(cr, cg, cb, 255);
+            paint.set_color_rgba8(cb, cg, cr, 255);
             paint.anti_alias = true;
             pm.fill_path(&p, &paint, FillRule::Winding, Transform::identity(), None);
         }

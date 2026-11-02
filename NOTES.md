@@ -223,4 +223,10 @@ Jay: "you can install a full rust" → go for the full rewrite; C# build stays u
     label). Verified: medium integrity, work area 0,30-1920,1002. main.rs now warns with a MessageBox when it
     starts at low integrity. The C# bin\ folder has no label, which is why the old build never hit this.
 - Commit every finished change right away (Jay, 29 Oct and again 2 Nov).
-- Next: flyouts (battery, Wi-Fi, Control Center), tray host last, then CPU/RAM re-measure.
+- Flyout framework (rust/src/flyout.rs): one activatable layered popup, immediate-mode `Ui` + `Content` trait;
+  panels name clickable spots while drawing, so hit-testing matches the frame. Closes on Esc / deactivate.
+- Battery flyout ported (power.rs = Battery.cs + PowerMeter.cs: battery IOCTLs, EMI RAPL, NVML; fly_battery.rs).
+  Builds; visual check pending (screen locked during the session).
+- Colour gotcha: surfaces are BGRA, tiny-skia writes RGBA, so colours go in as (b, g, r). flyout::rgba() swaps;
+  menubar battery fill was wrong (fixed).
+- Next: check battery flyout on screen, then Wi-Fi, Control Center, tray host last, then CPU/RAM re-measure.

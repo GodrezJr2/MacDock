@@ -7,10 +7,13 @@
 mod badges;
 mod config;
 mod dock;
+mod fly_battery;
+mod flyout;
 mod genie;
 mod gfx;
 mod menu;
 mod menubar;
+mod power;
 mod shell;
 mod taskbar;
 mod tile;
@@ -33,6 +36,7 @@ pub enum Ev {
     Dock(DockEv),
     Genie(genie::GenieEv),
     Bar(menubar::BarEv),
+    Fly(flyout::FlyEv),
     Foreground(isize),
     MinimizeStart(isize),
     MoveSizeEnd(isize),
@@ -77,6 +81,7 @@ struct App {
     dock: Dock,
     genie: Option<genie::Genie>,
     bar: Option<menubar::MenuBar>,
+    fly: Option<flyout::Flyout>,
     fullscreen: bool,
 }
 
@@ -131,6 +136,39 @@ impl App {
         }
     }
 
+    fn close_flyout(&mut self) {
+        if let Some(mut f) = self.fly.take() {
+            f.close();
+        }
+        if let Some(b) = self.bar.as_mut() {
+            b.set_open_extra(None);
+        }
+    }
+
+    /// Open a menu bar extra under the item ending at `right_px`, or close it if it is the one open.
+    fn toggle_flyout(&mut self, kind: menubar::Extra, right_px: i32) {
+        let same = self.fly.as_ref().is_some_and(|f| f.kind == kind);
+        self.close_flyout();
+        if same {
+            return;
+        }
+        let content: Box<dyn flyout::Content> = match kind {
+            menubar::Extra::Battery => Box::new(fly_battery::BatteryFly::new()),
+            other => {
+                // not ported yet: the matching Settings page
+                shell::launch(match other {
+                    menubar::Extra::Tray => "ms-settings:taskbar",
+                    menubar::Extra::Wifi => "ms-settings:network-wifi",
+                    _ => "ms-actioncenter:controlcenter",
+                });
+                return;
+            }
+        };
+        let Some(b) = self.bar.as_mut() else { return };
+        b.set_open_extra(Some(kind));
+        self.fly = Some(flyout::Flyout::open(kind, content, right_px, b.bottom_px(), b.dpi()));
+    }
+
     fn handle(&mut self, e: Ev) -> bool {
         match e {
             Ev::Dock(de) => {
@@ -175,16 +213,22 @@ impl App {
                         self.dock.set_auto_hide(on);
                     }
                     Some(menubar::BarAct::Fullscreen(on)) => self.set_fullscreen(on),
-                    Some(menubar::BarAct::Flyout(kind, _, _)) => {
-                        // flyouts not ported yet: open the matching Settings page
-                        shell::launch(match kind {
-                            menubar::Extra::Tray => "ms-settings:taskbar",
-                            menubar::Extra::Battery => "ms-settings:batterysaver",
-                            menubar::Extra::Wifi => "ms-settings:network-wifi",
-                            menubar::Extra::ControlCenter => "ms-actioncenter:controlcenter",
-                        });
-                    }
+                    Some(menubar::BarAct::Flyout(kind, _, r)) => self.toggle_flyout(kind, r),
                     None => {}
+                }
+            }
+            Ev::Fly(fe) => {
+                if let Some(cmd) = self.fly.as_mut().and_then(|f| f.handle(fe)) {
+                    self.close_flyout();
+                    match cmd {
+                        flyout::Cmd::Launch(t) => shell::launch(&t),
+                        flyout::Cmd::OpenWifi => {
+                            if let Some((_, r)) = self.bar.as_ref().and_then(|b| b.extra_span(menubar::Extra::Wifi)) {
+                                self.toggle_flyout(menubar::Extra::Wifi, r);
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
             Ev::Genie(ge) => {
@@ -289,7 +333,7 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
     let hwnd = dock::create_window();
     let genie = cfg.genie.then(genie::Genie::new);
     let bar = cfg.menu_bar.then(|| menubar::MenuBar::new(menubar::create_window(), cfg.tray_icons));
-    let mut app = App { dock: Dock::new(hwnd, cfg), genie, bar, fullscreen: false };
+    let mut app = App { dock: Dock::new(hwnd, cfg), genie, bar, fly: None, fullscreen: false };
     if let Some(b) = app.bar.as_mut() {
         b.start(); // reserve the top strip before the dock measures the work area
     }
