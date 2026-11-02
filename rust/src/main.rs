@@ -37,7 +37,8 @@ pub enum Ev {
     Dock(DockEv),
     Genie(genie::GenieEv),
     Bar(menubar::BarEv),
-    Fly(flyout::FlyEv),
+    /// the flyout window it came from (a closing one still sends a deactivate)
+    Fly(isize, flyout::FlyEv),
     Foreground(isize),
     MinimizeStart(isize),
     MoveSizeEnd(isize),
@@ -219,8 +220,8 @@ impl App {
                     None => {}
                 }
             }
-            Ev::Fly(fe) => {
-                if let Some(cmd) = self.fly.as_mut().and_then(|f| f.handle(fe)) {
+            Ev::Fly(h, fe) => {
+                if let Some(cmd) = self.fly.as_mut().filter(|f| f.hwnd.0 as isize == h).and_then(|f| f.handle(fe)) {
                     self.close_flyout();
                     match cmd {
                         flyout::Cmd::Launch(t) => shell::launch(&t),

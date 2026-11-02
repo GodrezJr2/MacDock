@@ -296,28 +296,28 @@ pub trait Content {
 unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let (x, y) = ((lp.0 & 0xFFFF) as i16 as i32, ((lp.0 >> 16) & 0xFFFF) as i16 as i32);
     match msg {
-        WM_MOUSEMOVE => push(Ev::Fly(FlyEv::Move(x, y))),
-        WM_MOUSELEAVE => push(Ev::Fly(FlyEv::Leave)),
+        WM_MOUSEMOVE => push(Ev::Fly(h.0 as isize, FlyEv::Move(x, y))),
+        WM_MOUSELEAVE => push(Ev::Fly(h.0 as isize, FlyEv::Leave)),
         WM_LBUTTONDOWN => {
             let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(h);
-            push(Ev::Fly(FlyEv::Down(x, y)));
+            push(Ev::Fly(h.0 as isize, FlyEv::Down(x, y)));
         }
         WM_LBUTTONUP => {
             let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
-            push(Ev::Fly(FlyEv::Up(x, y)));
+            push(Ev::Fly(h.0 as isize, FlyEv::Up(x, y)));
         }
-        WM_RBUTTONUP => push(Ev::Fly(FlyEv::RightUp(x, y))),
-        WM_MOUSEWHEEL => push(Ev::Fly(FlyEv::Wheel(((wp.0 >> 16) & 0xFFFF) as i16 as i32))),
+        WM_RBUTTONUP => push(Ev::Fly(h.0 as isize, FlyEv::RightUp(x, y))),
+        WM_MOUSEWHEEL => push(Ev::Fly(h.0 as isize, FlyEv::Wheel(((wp.0 >> 16) & 0xFFFF) as i16 as i32))),
         WM_CHAR => {
             if let Some(c) = char::from_u32(wp.0 as u32) {
-                push(Ev::Fly(FlyEv::Char(c)));
+                push(Ev::Fly(h.0 as isize, FlyEv::Char(c)));
             }
             return LRESULT(0);
         }
-        WM_KEYDOWN => push(Ev::Fly(FlyEv::Key(wp.0 as u32))),
-        WM_ACTIVATE if (wp.0 & 0xFFFF) == 0 => push(Ev::Fly(FlyEv::Deactivated)),
-        WM_TIMER => push(Ev::Fly(FlyEv::Tick)),
-        WM_FLY_DATA => push(Ev::Fly(FlyEv::Data)),
+        WM_KEYDOWN => push(Ev::Fly(h.0 as isize, FlyEv::Key(wp.0 as u32))),
+        WM_ACTIVATE if (wp.0 & 0xFFFF) == 0 => push(Ev::Fly(h.0 as isize, FlyEv::Deactivated)),
+        WM_TIMER => push(Ev::Fly(h.0 as isize, FlyEv::Tick)),
+        WM_FLY_DATA => push(Ev::Fly(h.0 as isize, FlyEv::Data)),
         _ => {}
     }
     DefWindowProcW(h, msg, wp, lp)
