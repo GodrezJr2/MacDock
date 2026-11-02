@@ -64,8 +64,13 @@ pub fn hide() {
             let mut d = data(main, state | ABS_AUTOHIDE);
             SHAppBarMessage(ABM_SETSTATE, &mut d);
         }
-        for b in bars() {
-            let _ = ShowWindow(b, SW_HIDE);
+        // only the main screen's bar: MacDock lives there. The other screens keep their taskbar (autohide is one
+        // setting for all of them, so it slides up from the bottom edge there).
+        let _ = ShowWindow(main, SW_HIDE);
+        for b in bars().into_iter().filter(|&b| b != main) {
+            if !IsWindowVisible(b).as_bool() {
+                let _ = ShowWindow(b, windows::Win32::UI::WindowsAndMessaging::SW_SHOWNA);
+            }
         }
     }
     HIDDEN.set(true);
@@ -73,7 +78,7 @@ pub fn hide() {
 
 /// Explorer re-shows the taskbar after restarts or display changes.
 pub fn keep_hidden() {
-    if HIDDEN.get() && bars().into_iter().any(|b| unsafe { IsWindowVisible(b) }.as_bool()) {
+    if HIDDEN.get() && main_bar().is_some_and(|b| unsafe { IsWindowVisible(b) }.as_bool()) {
         hide();
     }
 }

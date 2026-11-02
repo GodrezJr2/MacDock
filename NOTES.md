@@ -244,5 +244,7 @@ Jay: "you can install a full rust" → go for the full rewrite; C# build stays u
   magnifying, 12.9 MB private (flat), 44.5 MB WS, 11 threads, 435 handles, 1.1 MB exe. C# was 320-379 MB private.
 - Colour gotcha: surfaces are BGRA, tiny-skia writes RGBA, so colours go in as (b, g, r). flyout::rgba() swaps;
   menubar battery fill was wrong (fixed).
+- Multi-monitor (Jay, 3 Nov): MacDock stays on the main screen only; other screens keep the Windows taskbar
+  (taskbar.rs hides only Shell_TrayWnd). Autohide is one setting for all taskbars, so there it slides up on hover.
 - Next: click-test CC sliders/toggles and Wi-Fi join, run the Rust build as Jay's daily driver and fix what he hits;
   then retire the C# build (startup shortcut → Rust exe).
