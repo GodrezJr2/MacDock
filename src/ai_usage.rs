@@ -66,11 +66,35 @@ impl Provider {
     }
 }
 
+/// One agent session (a Claude Code conversation with its subagents, or a Codex thread).
+#[derive(Clone, Debug, Default)]
+pub struct Session {
+    pub provider: &'static str,
+    /// the agent's own title, else the project folder
+    pub title: String,
+    pub project: String,
+    pub model: Option<String>,
+    pub branch: Option<String>,
+    pub last: i64,
+    pub tok5: u64,
+    pub tok30: u64,
+    /// tokens over the last 7 days
+    pub total: u64,
+}
+
+impl Session {
+    pub fn rate5(&self) -> f64 {
+        self.tok5 as f64 / 300.0
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Summary {
     pub now: i64,
     pub claude: Option<Provider>,
     pub codex: Option<Provider>,
+    /// sessions with tokens in the last 30 minutes, newest first
+    pub sessions: Vec<Session>,
 }
 
 impl Summary {
@@ -145,10 +169,10 @@ fn on_battery() -> bool {
 
 impl Summary {
     /// What the menu bar shows changes only with these.
-    fn key(&self) -> (u64, u64, u64, i64) {
+    fn key(&self) -> (u64, u64, u64, i64, usize) {
         let pct = self.worst_pct().map(|p| (p * 10.0) as u64).unwrap_or(u64::MAX);
         let today: u64 = self.providers().map(|p| p.today).sum();
-        (self.rate5().round() as u64, pct, today, self.now / 60)
+        (self.rate5().round() as u64, pct, today, self.now / 60, self.sessions.len())
     }
 }
 
@@ -212,8 +236,36 @@ struct RlSample {
     resets_at: i64,
 }
 
+#[derive(Default)]
+struct SessState {
+    title: Option<String>,
+    /// the user renamed it (custom-title beats ai-title)
+    custom: bool,
+    cwd: Option<String>,
+    model: Option<String>,
+    branch: Option<String>,
+    /// (ts, tokens) of the last 30 minutes
+    recent: Vec<(i64, u64)>,
+    /// (ts, tokens) for the 7-day total
+    total: Vec<(i64, u64)>,
+    last: i64,
+}
+
+impl SessState {
+    fn add(&mut self, ts: i64, tok: u64) {
+        self.recent.push((ts, tok));
+        self.total.push((ts, tok));
+        self.last = self.last.max(ts);
+    }
+}
+
 struct State {
     home: PathBuf,
+    /// key "c:<sessionId>" (Claude) / "x:<thread id>" (Codex)
+    sessions: HashMap<String, SessState>,
+    /// Codex file -> its thread id (from the file's session_meta line)
+    codex_ids: HashMap<PathBuf, String>,
+    codex_titles: HashMap<String, String>,
     claude_limit: Option<u64>,
     tails: HashMap<PathBuf, Tail>,
     claude: Vec<(i64, u64)>,
@@ -232,6 +284,9 @@ impl State {
         let home = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default();
         State {
             home,
+            sessions: HashMap::new(),
+            codex_ids: HashMap::new(),
+            codex_titles: HashMap::new(),
             claude_limit,
             tails: HashMap::new(),
             claude: Vec::new(),
@@ -262,6 +317,7 @@ impl State {
         for f in files.drain(..) {
             self.read(&f, false);
         }
+        self.read_codex_titles(&codex_dir.with_file_name("session_index.jsonl"));
 
         let cut = now - KEEP_SECS;
         self.claude.retain(|e| e.0 >= cut);
@@ -276,6 +332,29 @@ impl State {
 
         let off = utc_offset();
         let mut s = Summary { now, ..Default::default() };
+        self.sessions.retain(|_, st| st.last >= cut || st.last == 0);
+        for (key, st) in self.sessions.iter_mut() {
+            st.recent.retain(|e| e.0 >= now - 1800);
+            st.total.retain(|e| e.0 >= cut);
+            if st.recent.is_empty() {
+                continue;
+            }
+            let codex = key.starts_with("x:");
+            let project = st.cwd.as_deref().map(folder_name).unwrap_or_default();
+            let title = if codex { self.codex_titles.get(&key[2..]).cloned() } else { st.title.clone() };
+            s.sessions.push(Session {
+                provider: if codex { "Codex" } else { "Claude Code" },
+                title: title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| if project.is_empty() { "Session".into() } else { project.clone() }),
+                project,
+                model: st.model.clone(),
+                branch: st.branch.clone(),
+                last: st.last,
+                tok5: st.recent.iter().filter(|e| e.0 >= now - 300).map(|e| e.1).sum(),
+                tok30: st.recent.iter().map(|e| e.1).sum(),
+                total: st.total.iter().map(|e| e.1).sum(),
+            });
+        }
+        s.sessions.sort_by(|a, b| b.last.cmp(&a.last));
         if self.have_claude && !self.claude.is_empty() {
             let mut p = provider("Claude Code", &self.claude, now, off);
             p.block = current_block(&self.claude, now);
@@ -333,6 +412,20 @@ impl State {
     }
 
     fn claude_line(&mut self, s: &str) {
+        if s.contains("\"type\":\"ai-title\"") || s.contains("\"type\":\"custom-title\"") {
+            if let Ok(v) = serde_json::from_str::<Value>(s) {
+                let custom = v["type"] == "custom-title";
+                let t = if custom { v["customTitle"].as_str() } else { v["aiTitle"].as_str() };
+                if let (Some(id), Some(t)) = (v["sessionId"].as_str(), t) {
+                    let st = self.sessions.entry(format!("c:{id}")).or_default();
+                    if custom || !st.custom {
+                        st.title = Some(t.to_string());
+                        st.custom |= custom;
+                    }
+                }
+            }
+            return;
+        }
         if !s.contains("\"type\":\"assistant\"") || !s.contains("\"usage\"") {
             return;
         }
@@ -356,10 +449,48 @@ impl State {
         let tok = g("input_tokens") + g("cache_creation_input_tokens") + g("output_tokens");
         if tok > 0 {
             self.claude.push((ts, tok));
+            if let Some(id) = v["sessionId"].as_str() {
+                let st = self.sessions.entry(format!("c:{id}")).or_default();
+                st.add(ts, tok);
+                // subagent lines carry the parent's session id: keep the main conversation's cwd / model
+                if v["isSidechain"] != true || st.cwd.is_none() {
+                    if let Some(c) = v["cwd"].as_str() {
+                        st.cwd = Some(c.to_string());
+                    }
+                    if let Some(md) = m["model"].as_str().filter(|md| !md.starts_with('<')) {
+                        st.model = Some(md.to_string());
+                    }
+                    st.branch = v["gitBranch"].as_str().filter(|b| !b.is_empty() && *b != "HEAD").map(String::from);
+                }
+            }
         }
     }
 
     fn codex_line(&mut self, s: &str, path: &Path) {
+        if s.contains("\"type\":\"session_meta\"") || s.contains("\"type\":\"turn_context\"") {
+            if let Ok(v) = serde_json::from_str::<Value>(s) {
+                let p = &v["payload"];
+                if v["type"] == "session_meta" {
+                    if let Some(id) = p["id"].as_str() {
+                        self.codex_ids.insert(path.to_path_buf(), id.to_string());
+                        let st = self.sessions.entry(format!("x:{id}")).or_default();
+                        st.cwd = p["cwd"].as_str().map(String::from);
+                        st.branch = p["git"]["branch"].as_str().map(String::from);
+                    }
+                } else if v["type"] == "turn_context" {
+                    if let Some(id) = self.codex_ids.get(path) {
+                        let st = self.sessions.entry(format!("x:{id}")).or_default();
+                        if let Some(md) = p["model"].as_str() {
+                            st.model = Some(md.to_string());
+                        }
+                        if let Some(c) = p["cwd"].as_str() {
+                            st.cwd = Some(c.to_string());
+                        }
+                    }
+                }
+            }
+            return;
+        }
         if !s.contains("\"token_count\"") {
             return;
         }
@@ -378,6 +509,9 @@ impl State {
                 let tok = g("input_tokens").saturating_sub(g("cached_input_tokens")) + g("output_tokens");
                 if tok > 0 {
                     self.codex.push((ts, tok));
+                    if let Some(id) = self.codex_ids.get(path) {
+                        self.sessions.entry(format!("x:{id}")).or_default().add(ts, tok);
+                    }
                 }
             }
         }
@@ -398,6 +532,52 @@ impl State {
             }
         }
     }
+}
+
+impl State {
+    /// ~/.codex/session_index.jsonl: {"id", "thread_name", "updated_at"} per line, appended on rename.
+    fn read_codex_titles(&mut self, path: &Path) {
+        let Ok(mut f) = std::fs::File::open(path) else { return };
+        let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+        let tail = self.tails.entry(path.to_path_buf()).or_default();
+        if len < tail.offset {
+            tail.offset = 0;
+        }
+        if len == tail.offset || f.seek(SeekFrom::Start(tail.offset)).is_err() {
+            return;
+        }
+        let mut buf = String::new();
+        if (&mut f).take(len - tail.offset).read_to_string(&mut buf).is_err() {
+            return;
+        }
+        let done = buf.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        tail.offset += done as u64;
+        for line in buf[..done].lines() {
+            if let Ok(v) = serde_json::from_str::<Value>(line) {
+                if let (Some(id), Some(t)) = (v["id"].as_str(), v["thread_name"].as_str()) {
+                    self.codex_titles.insert(id.to_string(), t.to_string());
+                }
+            }
+        }
+    }
+}
+
+/// Last component of a path ("D:\\Project\\MacDock" -> "MacDock").
+fn folder_name(p: &str) -> String {
+    let t = p.trim_end_matches(['\\', '/']);
+    t.rsplit(['\\', '/']).next().unwrap_or(t).to_string()
+}
+
+/// "claude-opus-5-5" -> "Opus 5.5", "claude-sonnet-4-5-20250929" -> "Sonnet 4.5"; others unchanged.
+pub fn model_name(m: &str) -> String {
+    let Some(rest) = m.strip_prefix("claude-") else { return m.to_string() };
+    let parts: Vec<&str> = rest.split('-').filter(|p| !(p.len() == 8 && p.bytes().all(|b| b.is_ascii_digit()))).collect();
+    let Some((name, ver)) = parts.split_first() else { return m.to_string() };
+    let mut n = name.to_string();
+    if let Some(c) = n.get_mut(0..1) {
+        c.make_ascii_uppercase();
+    }
+    if ver.is_empty() { n } else { format!("{n} {}", ver.join(".")) }
 }
 
 /// *.jsonl under `dir` modified since `since`.
@@ -525,6 +705,14 @@ mod tests {
         assert_eq!(parse_iso("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(parse_iso("2026-11-03T12:59:55.662Z"), Some(1793710795));
         assert_eq!(parse_iso("2026-11-03T19:59:55+07:00"), Some(1793710795));
+    }
+
+    #[test]
+    fn names() {
+        assert_eq!(model_name("claude-opus-5-5"), "Opus 5.5");
+        assert_eq!(model_name("claude-sonnet-4-5-20250929"), "Sonnet 4.5");
+        assert_eq!(model_name("gpt-5.5-codex"), "gpt-5.5-codex");
+        assert_eq!(folder_name("D:\\Project\\MacDock\\"), "MacDock");
     }
 
     #[test]

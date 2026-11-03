@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use crate::ai_usage::{self, compact, span, Limit, Provider, Summary};
+use crate::ai_usage::{self, compact, model_name, span, Limit, Provider, Session, Summary};
 use crate::flyout::{white, Cmd, Content, Ui};
 
 pub const CLAUDE: (u8, u8, u8) = (0xE8, 0x8A, 0x5E);
@@ -132,6 +132,58 @@ impl AiFly {
         y + card_h
     }
 
+    fn sessions(&self, ui: &mut Ui, mut y: f32, list: &[Session], now: i64) -> f32 {
+        const MAX: usize = 4;
+        let w = ui.w;
+        let busy = list.iter().filter(|s| s.tok5 > 0).count();
+        ui.text(0.0, y, "Sessions", 12.0, 600, white(0xD0), 0.0);
+        let head = if busy > 0 { format!("{busy} working  ·  {} in 30 min", list.len()) } else { format!("{} in 30 min", list.len()) };
+        let hw = ui.text_w(&head, 11.0, 400);
+        ui.text(w - hw, y + 1.0, &head, 11.0, 400, white(0x80), 0.0);
+        y += ui.line_h(12.0, 600) + 6.0;
+        let (t_h, s_h) = (ui.line_h(12.5, 600), ui.line_h(10.5, 400));
+        let row_h = 7.0 + t_h + 1.0 + s_h + 7.0;
+        for (i, se) in list.iter().take(MAX).enumerate() {
+            let tint = if se.provider == "Codex" { CODEX } else { CLAUDE };
+            ui.fill(0.0, y, w, row_h, 9.0, white(if i % 2 == 0 { 0x0E } else { 0x09 }));
+            let cy = y + 7.0;
+            // dot: provider colour, a halo while it burned tokens in the last 5 minutes
+            let dx = 12.0;
+            let dy = cy + t_h / 2.0;
+            if se.tok5 > 0 {
+                ui.circle(dx, dy, 6.5, a(tint, 0x40));
+            }
+            ui.circle(dx, dy, 4.0, a(tint, if se.tok5 > 0 { 255 } else { 0x90 }));
+            let (rt, rc) = if se.tok5 > 0 {
+                (format!("{} tok/s", rate(se.rate5())), white(0xF2))
+            } else {
+                (format!("idle {}", span(now - se.last)), white(0x70))
+            };
+            let rw = ui.text_w(&rt, 12.0, 600);
+            ui.text(w - 10.0 - rw, cy, &rt, 12.0, 600, rc, 0.0);
+            ui.text(24.0, cy, &se.title, 12.5, 600, white(0xEE), w - 24.0 - rw - 20.0);
+            let mut sub = vec![];
+            if !se.project.is_empty() && se.project != se.title {
+                sub.push(se.project.clone());
+            }
+            if let Some(m) = &se.model {
+                sub.push(model_name(m));
+            }
+            if let Some(b) = &se.branch {
+                sub.push(b.clone());
+            }
+            sub.push(format!("{} tok", compact(se.total as f64)));
+            ui.text(24.0, cy + t_h + 1.0, &sub.join("  ·  "), 10.5, 400, white(0x80), w - 34.0);
+            y += row_h + 4.0;
+        }
+        if list.len() > MAX {
+            let more = format!("+{} more", list.len() - MAX);
+            ui.text(24.0, y, &more, 10.5, 400, white(0x70), 0.0);
+            y += ui.line_h(10.5, 400) + 2.0;
+        }
+        y - 4.0
+    }
+
     fn limit(&self, ui: &mut Ui, x0: f32, mut cy: f32, iw: f32, l: &Limit, now: i64) -> f32 {
         let lab_h = ui.line_h(11.0, 500);
         let sub_h = ui.line_h(10.5, 400);
@@ -247,6 +299,11 @@ impl Content for AiFly {
         ui.text(w - nw, y, "now", 10.5, 400, white(0x66), 0.0);
         y += lh + 12.0;
 
+        // sessions with tokens in the last 30 minutes
+        if !s.sessions.is_empty() {
+            y = self.sessions(ui, y, &s.sessions, now) + 12.0;
+        }
+
         // one card per provider
         let mut any = false;
         if let Some(p) = &s.claude {
@@ -316,7 +373,16 @@ mod tests {
             ],
             plan: Some("plus".into()), hourly: hourly.map(|h| h / 3),
         };
-        let mut f = AiFly { sum: Some(Arc::new(Summary { now, claude: Some(claude), codex: Some(codex) })), gen: 0 };
+        let se = |provider, title: &str, project: &str, model: Option<&str>, last, tok5, total| Session {
+            provider, title: title.into(), project: project.into(), model: model.map(String::from),
+            branch: Some("master".into()), last, tok5, tok30: tok5 * 3, total,
+        };
+        let sessions = vec![
+            se("Claude Code", "MacDock AI usage menu bar", "MacDock", Some("claude-opus-5-5"), now - 5, 300_000, 4_100_000),
+            se("Claude Code", "Lintasi driver GPS report", "armada", Some("claude-sonnet-5-5"), now - 40, 120_000, 900_000),
+            se("Codex", "Fix flaky routing tests", "RouteBench", Some("gpt-5.5-codex"), now - 900, 0, 55_000),
+        ];
+        let mut f = AiFly { sum: Some(Arc::new(Summary { now, claude: Some(claude), codex: Some(codex), sessions })), gen: 0 };
         save(&mut f, "ai_busy");
     }
 }

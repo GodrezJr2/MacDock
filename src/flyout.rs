@@ -504,7 +504,7 @@ impl Flyout {
         let s = self.dpi;
         // measure pass: draw into a scratch pixmap sized for the tallest panel, keep the height
         let cw = w - 2.0 * padx;
-        let max_h = 900.0;
+        let max_h = 1000.0; // fits a 1080p screen at 100% under the bar
         let (pw, ph_max) = (((w + 2.0 * MARGIN) * s).ceil() as u32, ((max_h + 2.0 * MARGIN) * s).ceil() as u32);
         let mut pm = Pixmap::new(pw, ph_max).unwrap();
         let (ox, oy) = (MARGIN + padx, MARGIN + pady);

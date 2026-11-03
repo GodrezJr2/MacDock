@@ -81,7 +81,8 @@ notification-area icons (Discord, Steam, …).
 - Battery, Wi-Fi, search, Control Center and the clock (which opens the notification center)
 - **AI usage** for Claude Code and Codex: a ring with the limit closest to running out and the live
   burn rate in tok/s. Its flyout shows tok/s over 5 and 30 minutes, the last 24 hours, each limit with the
-  points used per 5 / 30 minutes, and when the current pace would hit it. Read from the agents' local logs
+  points used per 5 / 30 minutes, when the current pace would hit it, and every session that burned
+  tokens in the last 30 minutes (title, project, model, branch, its own tok/s). Read from the agents' local logs
   (`~/.claude/projects`, `~/.codex/sessions`); nothing is sent anywhere. Codex reports its own limits;
   Claude Code does not, so its percentage needs `ClaudeLimit5h`.
 
