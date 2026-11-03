@@ -355,13 +355,38 @@ pub fn save_png(path: &str, w: u32, h: u32, bgra: &[u8]) -> bool {
             let frame = frame.ok_or_else(windows::core::Error::empty)?;
             frame.Initialize(None)?;
             frame.SetSize(w, h)?;
-            let mut fmt = GUID_WICPixelFormat32bppBGR;
+            // PNG has no 32bppBGR: asking for it makes the encoder pick 24 bpp, and our 4-byte pixels would
+            // then be read as 3-byte ones (colour stripes). BGRA it takes as is; the encoder may still change
+            // the format, so check what it settled on.
+            let mut fmt = GUID_WICPixelFormat32bppBGRA;
             frame.SetPixelFormat(&mut fmt)?;
+            if fmt != GUID_WICPixelFormat32bppBGRA {
+                return Err(windows::core::Error::empty());
+            }
             frame.WritePixels(h, w * 4, bgra)?;
             frame.Commit()?;
             enc.Commit()?;
             Ok(())
         };
         run().is_ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// A snapshot written to disk must come back with the same pixels (it used to come back striped).
+    #[test]
+    fn png_roundtrip() {
+        let (w, h) = (37u32, 11u32);
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        for (i, p) in px.chunks_mut(4).enumerate() {
+            p.copy_from_slice(&[(i * 7) as u8, (i * 3) as u8, (i * 11) as u8, 255]);
+        }
+        let path = format!(r"{}\target\png_roundtrip.png", env!("CARGO_MANIFEST_DIR"));
+        assert!(super::save_png(&path, w, h, &px));
+        let back = super::image_file(&path, 4096).expect("decode");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!((back.width(), back.height()), (w, h));
+        assert_eq!(back.data(), &px[..]);
     }
 }

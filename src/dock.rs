@@ -264,6 +264,7 @@ pub struct Dock {
     items: Vec<Item>,
     icons: HashMap<String, (String, Option<Rc<Pixmap>>)>, // name + icon per item key, kept across app restarts
     surface: Option<Surface>,
+    drawn: Vec<u64>, // everything the last rendered frame depended on; same again = skip the frame
     frost: Option<Pixmap>,
     label: Option<(String, Pixmap)>,
     label_alpha: f64,
@@ -322,7 +323,7 @@ impl Dock {
         let now = Instant::now();
         Dock {
             hwnd, cfg, shell: Shell::default(), dpi, screen_w, screen_h, fit_b: f64::MAX,
-            win_w: 1.0, win_h: 1.0, items: Vec::new(), icons: HashMap::new(), surface: None, frost: None,
+            win_w: 1.0, win_h: 1.0, items: Vec::new(), icons: HashMap::new(), surface: None, drawn: Vec::new(), frost: None,
             label: None, label_alpha: 0.0, label_at: (0.0, 0.0, 0.0, 0.0), hovered: None, plate_left: 0.0,
             plate_w: 0.0, sep_x: 0.0, clock: now, last_t: 0.0, awake: false, hidden: false,
             sig: String::new(), refreshes: 0, appbar: false,
@@ -466,6 +467,7 @@ impl Dock {
     // -------------------------------------------------------------- display changes
 
     fn apply_display(&mut self) {
+        self.drawn.clear();
         (self.screen_w, self.screen_h, self.dpi) = primary_screen();
         self.fit_b = f64::MAX;
         self.fit_icons();
@@ -494,11 +496,13 @@ impl Dock {
     fn load_frost(&mut self) {
         let fh = (96.0 * self.screen_h / self.screen_w).round().max(1.0) as u32;
         self.frost = gfx::wallpaper(96, fh);
+        self.drawn.clear();
         self.wake();
     }
 
     pub fn set_fullscreen_hidden(&mut self, on: bool) {
         self.hidden = on;
+        self.drawn.clear();
         unsafe {
             let _ = ShowWindow(self.hwnd, if on { SW_HIDE } else { SW_SHOWNOACTIVATE });
             // game mode: poll slowly until the fullscreen app goes away
@@ -582,6 +586,7 @@ impl Dock {
     }
 
     fn refresh(&mut self, initial: bool) {
+        self.drawn.clear();
         let wins = self.shell.app_windows();
         let old_order: Vec<String> = self.items.iter().map(|i| i.key.clone()).collect();
         let mut old: HashMap<String, Item> = self.items.drain(..).map(|i| (i.key.clone(), i)).collect();
@@ -1170,6 +1175,28 @@ impl Dock {
         }
     }
 
+    fn frame_key(&self, plate_top: f64, plate_bottom: f64, win_x: f64, win_y: f64, slide: f64, px: (u32, u32)) -> Vec<u64> {
+        let f = |v: f64| v.to_bits();
+        let mut k = vec![
+            px.0 as u64, px.1 as u64, f(win_x), f(win_y), f(slide), f(plate_top), f(plate_bottom), f(self.plate_left),
+            f(self.plate_w), f(self.sep_x), f(self.label_alpha), f(self.label_at.0), f(self.label_at.1),
+            self.hovered.map_or(u64::MAX, |h| h as u64),
+            self.label.as_ref().map_or(0, |l| l.1.data().as_ptr() as u64),
+            self.frost.as_ref().map_or(0, |p| p.data().as_ptr() as u64),
+            self.dragging as u64 | (self.drag_out as u64) << 1, f(self.drag_x),
+        ];
+        for it in &self.items {
+            let pressed = self.pressed.as_deref() == Some(it.key.as_str());
+            k.extend([
+                f(it.x), f(it.size), f(it.presence), f(it.dot), f(it.bounce_t),
+                it.attention_bounce as u64 | (pressed as u64) << 1 | (it.badge as u64) << 2,
+                it.icon.as_ref().map_or(0, |i| Rc::as_ptr(i) as u64),
+                it.badge_text.as_ref().map_or(0, |t| t.1.data().as_ptr() as u64),
+            ]);
+        }
+        k
+    }
+
     fn width(&self, scale: impl Fn(&Item) -> f64) -> f64 {
         let (b, gap) = (self.b(), self.gap());
         let mut w = 0.0;
@@ -1187,6 +1214,7 @@ impl Dock {
         let (pw, ph) = ((self.win_w * dpi).round() as u32, (self.win_h * dpi).round() as u32);
         if self.surface.as_ref().map(|s| (s.w, s.h)) != Some((pw, ph)) {
             self.surface = Surface::new(pw.max(1), ph.max(1));
+            self.drawn.clear();
         }
         // the label text is rasterized by GDI at the real pixel size, once per name
         if let Some(i) = self.hovered {
@@ -1209,6 +1237,14 @@ impl Dock {
         let (win_x, win_y) = (self.win_x(), self.win_y());
         let slide = self.slide();
         let pressed_key = self.pressed.clone();
+
+        // Re-rendering the plate costs ~10 ms of CPU on battery; when nothing it depends on has changed
+        // (pointer resting on the dock, or the dock awake only because something else animates), skip it.
+        let key = self.frame_key(plate_top, plate_bottom, win_x, win_y, slide, (pw, ph));
+        if !self.drawn.is_empty() && key == self.drawn {
+            return;
+        }
+        self.drawn = key;
         let Some(surface) = self.surface.as_mut() else { return };
         let mut pm = surface.pixmap();
         pm.fill(Color::TRANSPARENT);

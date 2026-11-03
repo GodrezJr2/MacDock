@@ -13,6 +13,7 @@ mod fly_tray;
 mod fly_wifi;
 mod flyout;
 mod genie;
+mod genie_gpu;
 mod gfx;
 mod menu;
 mod menubar;
@@ -384,13 +385,17 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
                 }
             }
             if app.awake() {
+                let t0 = std::time::Instant::now();
                 if app.dock.awake {
                     app.dock.frame();
                 }
+                let t1 = std::time::Instant::now();
                 if let Some(g) = app.genie.as_mut() {
                     g.frame();
                 }
+                let t2 = std::time::Instant::now();
                 let _ = DwmFlush(); // pace to the compositor, one frame per refresh
+                genie::loop_times((t1 - t0).as_secs_f64() * 1e3, t2.elapsed().as_secs_f64() * 1e3);
             }
         }
         for h in hooks {

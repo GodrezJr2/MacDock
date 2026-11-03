@@ -17,10 +17,11 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use crate::genie_gpu::Gpu;
 use crate::gfx::Surface;
 use crate::{push, shell, Ev};
 
-const ROWS: usize = 48;
+pub(crate) const ROWS: usize = 48;
 const MAX_SNAPS: usize = 8; // windows still on screen
 const MAX_MINIMIZED: usize = 6; // in memory; older ones are read back from disk when needed
 const TIMER_CAPTURE: usize = 1;
@@ -151,79 +152,121 @@ fn shape(win: R, icon: R, p: f64) -> Vec<(f64, f64, f64)> {
 }
 
 /// Rasterize the strip mesh into `dst` (premultiplied BGRA, `stride` px per row), whose top-left pixel sits at
-/// screen (`ox`, `oy`). Scanline by scanline: find the strip, interpolate its edges, sample bilinearly.
+/// screen (`ox`, `oy`). Scanline by scanline: find the strip, interpolate its edges, sample bilinearly in
+/// fixed point (two channels per u32 lane pair). Lines go out in small blocks that threads pull from a shared
+/// counter, so fast and slow cores (P/E, or parked cores on battery) finish together.
 fn raster(dst: &mut [u8], stride: usize, ox: f64, oy: f64, w: usize, h: usize, rows: &[(f64, f64, f64)], tex: &Pixmap) {
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
-    let per = h.div_ceil(threads).max(16);
+    const BLOCK: usize = 24;
+    let blocks = h.div_ceil(BLOCK);
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16).min(blocks).max(1);
     let (tw, th) = (tex.width() as usize, tex.height() as usize);
-    let td = tex.data();
-    std::thread::scope(|s| {
-        for (ci, chunk) in dst.chunks_mut(stride * 4 * per).enumerate() {
-            s.spawn(move || {
-                let y0 = ci * per;
-                let mut seg = 0usize;
-                for ly in 0..chunk.len().div_ceil(stride * 4).min(h.saturating_sub(y0)) {
-                    let line = &mut chunk[ly * stride * 4..ly * stride * 4 + w * 4];
-                    line.fill(0);
-                    let yc = oy + (y0 + ly) as f64 + 0.5;
-                    // vertical coverage at the mesh's top and bottom edges
-                    let (top, bot) = (rows[0].2, rows[ROWS].2);
-                    let vc = ((yc - top + 0.5).clamp(0.0, 1.0)) * ((bot - yc + 0.5).clamp(0.0, 1.0));
-                    if vc <= 0.0 || bot - top < 1e-3 {
-                        continue; // also: fully collapsed into the icon's edge, nothing left to draw
-                    }
-                    let yy = yc.clamp(top, bot - 1e-6);
-                    while seg + 1 < ROWS && rows[seg + 1].2 <= yy {
-                        seg += 1;
-                    }
-                    while seg > 0 && rows[seg].2 > yy {
-                        seg -= 1;
-                    }
-                    let (a, b) = (rows[seg], rows[seg + 1]);
-                    let span = b.2 - a.2;
-                    if span <= 1e-6 {
-                        continue;
-                    }
-                    let t = ((yy - a.2) / span).clamp(0.0, 1.0);
-                    let l = a.0 + (b.0 - a.0) * t;
-                    let r = a.1 + (b.1 - a.1) * t;
-                    if r - l < 0.01 {
-                        continue;
-                    }
-                    let v = (seg as f64 + t) / ROWS as f64;
-                    let sy = (v * th as f64 - 0.5).clamp(0.0, (th - 1) as f64);
-                    let (y0t, fy) = (sy as usize, sy.fract());
-                    let y1t = (y0t + 1).min(th - 1);
-                    let x_from = ((l - ox - 1.0).floor().max(0.0)) as usize;
-                    let x_to = ((r - ox + 1.0).ceil().max(0.0) as usize).min(w);
-                    let inv = 1.0 / (r - l);
-                    for x in x_from..x_to {
-                        let xc = ox + x as f64 + 0.5;
-                        let cov = (xc - l + 0.5).clamp(0.0, 1.0) * (r - xc + 0.5).clamp(0.0, 1.0) * vc;
-                        if cov <= 0.0 {
-                            continue;
-                        }
-                        let u = ((xc - l) * inv).clamp(0.0, 1.0);
-                        let sx = (u * tw as f64 - 0.5).clamp(0.0, (tw - 1) as f64);
-                        let (x0t, fx) = (sx as usize, sx.fract());
-                        let x1t = (x0t + 1).min(tw - 1);
-                        let px = |xx: usize, yy: usize| {
-                            let i = (yy * tw + xx) * 4;
-                            [td[i] as f64, td[i + 1] as f64, td[i + 2] as f64]
-                        };
-                        let (p00, p10, p01, p11) = (px(x0t, y0t), px(x1t, y0t), px(x0t, y1t), px(x1t, y1t));
-                        let o = x * 4;
-                        for c in 0..3 {
-                            let top = p00[c] + (p10[c] - p00[c]) * fx;
-                            let btm = p01[c] + (p11[c] - p01[c]) * fx;
-                            line[o + c] = ((top + (btm - top) * fy) * cov + 0.5) as u8;
-                        }
-                        line[o + 3] = (255.0 * cov + 0.5) as u8;
-                    }
-                }
-            });
+    let td: &[u32] = bytemuck_u32(tex.data());
+    let base = dst.as_mut_ptr() as usize;
+    let len = dst.len();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let work = || loop {
+        let b = next.fetch_add(1, Ordering::Relaxed);
+        if b >= blocks {
+            return;
         }
+        let mut seg = 0usize;
+        for ly in b * BLOCK..((b + 1) * BLOCK).min(h) {
+            let off = ly * stride * 4;
+            if off + w * 4 > len {
+                return;
+            }
+            // SAFETY: every line belongs to exactly one block, and blocks are handed out once
+            let line = unsafe { std::slice::from_raw_parts_mut((base + off) as *mut u32, w) };
+            line.fill(0);
+            let yc = oy + ly as f64 + 0.5;
+            let (top, bot) = (rows[0].2, rows[ROWS].2);
+            let vc = ((yc - top + 0.5).clamp(0.0, 1.0)) * ((bot - yc + 0.5).clamp(0.0, 1.0));
+            if vc <= 0.0 || bot - top < 1e-3 {
+                continue; // also: fully collapsed into the icon's edge, nothing left to draw
+            }
+            let yy = yc.clamp(top, bot - 1e-6);
+            while seg + 1 < ROWS && rows[seg + 1].2 <= yy {
+                seg += 1;
+            }
+            while seg > 0 && rows[seg].2 > yy {
+                seg -= 1;
+            }
+            let (a, b2) = (rows[seg], rows[seg + 1]);
+            let span = b2.2 - a.2;
+            if span <= 1e-6 {
+                continue;
+            }
+            let t = ((yy - a.2) / span).clamp(0.0, 1.0);
+            let l = a.0 + (b2.0 - a.0) * t;
+            let r = a.1 + (b2.1 - a.1) * t;
+            if r - l < 0.01 {
+                continue;
+            }
+            let v = (seg as f64 + t) / ROWS as f64;
+            let sy = (v * th as f64 - 0.5).clamp(0.0, (th - 1) as f64);
+            let y0t = sy as usize;
+            let fy = (sy.fract() * 256.0) as u32;
+            let y1t = (y0t + 1).min(th - 1);
+            let (row0, row1) = (&td[y0t * tw..y0t * tw + tw], &td[y1t * tw..y1t * tw + tw]);
+            let x_from = ((l - ox - 1.0).floor().max(0.0)) as usize;
+            let x_to = ((r - ox + 1.0).ceil().max(0.0) as usize).min(w);
+            // texture x as a linear function of the output x, 16.16 fixed point
+            let ds = tw as f64 / (r - l);
+            let s0 = ((ox + x_from as f64 + 0.5 - l) * ds - 0.5) * 65536.0;
+            let (s0, ds) = (s0 as i64, (ds * 65536.0) as i64);
+            let smax = ((tw - 1) as i64) << 16;
+            let vc8 = (vc * 256.0 + 0.5) as u32;
+            // interior pixels are fully covered horizontally; only the edge pixels need the slow path
+            let in_from = (l - ox + 0.5).ceil().max(0.0) as usize;
+            let in_to = ((r - ox - 0.5).floor().max(0.0) as usize).min(w);
+            for x in x_from..x_to {
+                let cov8 = if x >= in_from && x < in_to {
+                    vc8
+                } else {
+                    let xc = ox + x as f64 + 0.5;
+                    let c = (xc - l + 0.5).clamp(0.0, 1.0) * (r - xc + 0.5).clamp(0.0, 1.0) * vc;
+                    (c * 256.0 + 0.5) as u32
+                };
+                if cov8 == 0 {
+                    continue;
+                }
+                let sx = (s0 + (x - x_from) as i64 * ds).clamp(0, smax);
+                let x0t = (sx >> 16) as usize;
+                let fx = ((sx >> 8) & 0xFF) as u32;
+                let x1t = (x0t + 1).min(tw - 1);
+                let top = lerp2(row0[x0t], row0[x1t], fx);
+                let btm = lerp2(row1[x0t], row1[x1t], fx);
+                let mut c = lerp2(top, btm, fy) & 0x00FF_FFFF;
+                if cov8 < 256 {
+                    let rb = ((c & 0x00FF_00FF) * cov8 >> 8) & 0x00FF_00FF;
+                    let g = ((c & 0x0000_FF00) * cov8 >> 8) & 0x0000_FF00;
+                    c = rb | g;
+                }
+                line[x] = c | (cov8.min(255) << 24);
+            }
+        }
+    };
+    std::thread::scope(|s| {
+        for _ in 1..threads {
+            s.spawn(&work);
+        }
+        work();
     });
+}
+
+/// Blend two BGRA pixels, f in 0..=256 towards `b`, two channels per masked lane.
+#[inline(always)]
+fn lerp2(a: u32, b: u32, f: u32) -> u32 {
+    let g = 256 - f;
+    let rb = ((a & 0x00FF_00FF) * g + (b & 0x00FF_00FF) * f) >> 8 & 0x00FF_00FF;
+    let ag = ((a >> 8) & 0x00FF_00FF) * g + ((b >> 8) & 0x00FF_00FF) * f & 0xFF00_FF00;
+    rb | ag
+}
+
+fn bytemuck_u32(b: &[u8]) -> &[u32] {
+    // tiny-skia pixmaps are 4-byte aligned RGBA/BGRA rows
+    assert!(b.as_ptr() as usize % 4 == 0 && b.len() % 4 == 0);
+    unsafe { std::slice::from_raw_parts(b.as_ptr() as *const u32, b.len() / 4) }
 }
 
 // ------------------------------------------------------------------ snapshots
@@ -328,6 +371,23 @@ fn log(s: &str) {
     }
 }
 
+thread_local! {
+    static LOOP: std::cell::Cell<(f64, f64, u32)> = const { std::cell::Cell::new((0.0, 0.0, 0)) };
+}
+
+/// Main loop timings (dock frame ms, DwmFlush ms), summed while an animation runs.
+pub fn loop_times(dock: f64, flush: f64) {
+    LOOP.with(|c| {
+        let (d, f, n) = c.get();
+        c.set((d + dock, f + flush, n + 1));
+    });
+}
+
+fn on_battery() -> bool {
+    let mut ps = windows::Win32::System::Power::SYSTEM_POWER_STATUS::default();
+    unsafe { windows::Win32::System::Power::GetSystemPowerStatus(&mut ps).is_ok() && ps.ACLineStatus == 0 }
+}
+
 fn describe(h: HWND) -> String {
     let pid = shell::window_pid(h);
     format!("pid {pid} ({:?})", h.0)
@@ -338,6 +398,7 @@ fn describe(h: HWND) -> String {
 // posts to the overlay, except on release over an armed minimize button: then it shows the overlay at once.
 
 static OVERLAY: AtomicIsize = AtomicIsize::new(0);
+static SHOW_ON_UP: AtomicIsize = AtomicIsize::new(0); // the overlay window holding the armed frame
 static ARMED_FOR: AtomicIsize = AtomicIsize::new(0);
 static ARM_X: AtomicI32 = AtomicI32::new(0);
 static ARM_Y: AtomicI32 = AtomicI32::new(0);
@@ -370,7 +431,7 @@ unsafe extern "system" fn mouse_proc(code: i32, w: WPARAM, l: LPARAM) -> LRESULT
                 // instead of waiting for the (asynchronous) minimize event
                 let near = (ms.pt.x - ARM_X.load(Ordering::Relaxed)).abs() < 12 && (ms.pt.y - ARM_Y.load(Ordering::Relaxed)).abs() < 12;
                 if near && holds_capture(hwnd_of(armed)) {
-                    let _ = ShowWindowAsync(ov, SW_SHOWNOACTIVATE);
+                    let _ = ShowWindowAsync(hwnd_of(SHOW_ON_UP.load(Ordering::Relaxed)), SW_SHOWNOACTIVATE);
                 }
                 let _ = PostMessageW(ov, WM_HOOK_UP, WPARAM(0), LPARAM(0));
             }
@@ -448,6 +509,18 @@ struct Anim {
     started: Then,
     done: Then,
     finished: Option<Instant>,
+    stats: Stats,
+}
+
+/// Frame timing of one animation, written to genie.log when it ends.
+#[derive(Default)]
+struct Stats {
+    last: Option<Instant>,
+    frames: u32,
+    gap_sum: f64,
+    gap_max: f64,
+    raster: f64,
+    present: f64,
 }
 
 pub struct Genie {
@@ -457,7 +530,10 @@ pub struct Genie {
     pending: Vec<(Instant, isize)>,
     anim: Option<Anim>,
     armed: Option<(isize, Arc<Pixmap>, R)>,
-    surface: Option<(Surface, R)>, // pixels and where they map on screen
+    surface: Option<(Surface, R)>, // CPU path: pixels and where they map on screen
+    gpu: Option<Gpu>,
+    gpu_area: Option<R>, // GPU path: where the overlay sits on screen
+    gpu_tried: bool,
     original_min_animate: Option<bool>,
     paused: bool,
     stores: u32,
@@ -469,7 +545,7 @@ impl Genie {
         OVERLAY.store(hwnd.0 as isize, Ordering::Relaxed);
         Genie {
             hwnd, snaps: HashMap::new(), capture: None, pending: Vec::new(), anim: None, armed: None, surface: None,
-            original_min_animate: None, paused: false, stores: 0,
+            gpu: None, gpu_area: None, gpu_tried: false, original_min_animate: None, paused: false, stores: 0,
         }
     }
 
@@ -511,6 +587,9 @@ impl Genie {
                 self.disarm();
                 self.snaps.retain(|&k, _| IsIconic(hwnd_of(k)).as_bool());
                 self.surface = None;
+                self.gpu = None; // no GPU memory held while a game runs
+                self.gpu_area = None;
+                self.gpu_tried = false;
             } else {
                 start_mouse_hook();
                 SetTimer(self.hwnd, TIMER_CAPTURE, 6000, None);
@@ -661,6 +740,28 @@ impl Genie {
 
     /// Make sure the surface covers `area` (screen pixels).
     fn ensure_surface(&mut self, area: R) {
+        if !self.gpu_tried {
+            self.gpu_tried = true;
+            match Gpu::new() {
+                Ok(g) => self.gpu = Some(g),
+                Err(e) => log(&format!("GPU genie unavailable, using the CPU: {e}")),
+            }
+        }
+        if let Some(g) = self.gpu.as_mut() {
+            if let Some(r) = &self.gpu_area {
+                if r.x <= area.x && r.y <= area.y && r.right() >= area.right() && r.bottom() >= area.bottom() {
+                    return;
+                }
+            }
+            let a = R { x: area.x.floor(), y: area.y.floor(), w: area.w.ceil() + 2.0, h: area.h.ceil() + 2.0 };
+            match g.set_area(a.x as i32, a.y as i32, a.w as u32, a.h as u32) {
+                Ok(()) => {
+                    self.gpu_area = Some(a);
+                    return;
+                }
+                Err(e) => self.gpu_failed(&e),
+            }
+        }
         if let Some((_, r)) = &self.surface {
             if r.x <= area.x && r.y <= area.y && r.right() >= area.right() && r.bottom() >= area.bottom() {
                 return;
@@ -671,9 +772,37 @@ impl Genie {
     }
 
     /// Render the mesh at progress p and push only its bounding box to the overlay.
-    fn draw(&mut self, img: &Pixmap, win: R, icon: R, p: f64) {
+    /// The GPU path broke (device lost, driver reset…): continue on the CPU from here on.
+    fn gpu_failed(&mut self, e: &windows::core::Error) {
+        log(&format!("GPU genie failed, falling back to the CPU: {e}"));
+        let visible = self.gpu.as_ref().is_some_and(|g| unsafe { IsWindowVisible(g.hwnd).as_bool() });
+        self.gpu = None;
+        if let Some(a) = self.gpu_area.take() {
+            self.surface = Surface::new(a.w as u32, a.h as u32).map(|s| (s, a));
+        }
+        if visible {
+            unsafe {
+                let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+            }
+        }
+    }
+
+    /// The window that shows the animation: the GPU overlay when that path works, else the layered one.
+    fn overlay(&self) -> HWND {
+        self.gpu.as_ref().map_or(self.hwnd, |g| g.hwnd)
+    }
+
+    /// Returns (raster ms, present ms); on the GPU path both are CPU time spent submitting.
+    fn draw(&mut self, img: &Arc<Pixmap>, win: R, icon: R, p: f64) -> (f64, f64) {
         let rows = shape(win, icon, p);
-        let Some((sf, area)) = self.surface.as_mut() else { return };
+        if let (Some(g), Some(a)) = (self.gpu.as_mut(), self.gpu_area) {
+            let t0 = Instant::now();
+            match g.draw(img, &rows, (a.x, a.y)) {
+                Ok(()) => return (0.0, t0.elapsed().as_secs_f64() * 1e3),
+                Err(e) => self.gpu_failed(&e),
+            }
+        }
+        let Some((sf, area)) = self.surface.as_mut() else { return (0.0, 0.0) };
         let (mut l, mut r) = (f64::MAX, f64::MIN);
         for &(a, b, _) in &rows {
             l = l.min(a);
@@ -689,15 +818,22 @@ impl Genie {
         let stride = sf.w as usize;
         let start = (y0 as usize * stride + x0 as usize) * 4;
         let bytes = sf.bytes();
+        let t0 = Instant::now();
         if start < bytes.len() {
             raster(&mut bytes[start..], stride, area.x + x0 as f64, area.y + y0 as f64, bw as usize, bh as usize, &rows, img);
         }
+        let t1 = Instant::now();
         sf.present_part(self.hwnd, ((area.x as i32) + x0, (area.y as i32) + y0), (x0, y0), bw, bh);
+        ((t1 - t0).as_secs_f64() * 1e3, t1.elapsed().as_secs_f64() * 1e3)
     }
 
     fn hide_overlay(&mut self) {
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
+            if let Some(g) = self.gpu.as_mut() {
+                let _ = ShowWindow(g.hwnd, SW_HIDE);
+                g.release_texture();
+            }
         }
         self.surface = None;
     }
@@ -727,6 +863,7 @@ impl Genie {
             self.armed = Some((h.0 as isize, img, rect));
             ARM_X.store(x, Ordering::Relaxed);
             ARM_Y.store(y, Ordering::Relaxed);
+            SHOW_ON_UP.store(self.overlay().0 as isize, Ordering::Relaxed);
             ARMED_FOR.store(h.0 as isize, Ordering::Relaxed);
         }
     }
@@ -749,11 +886,11 @@ impl Genie {
         self.ensure_surface(win.union(&icon));
         self.draw(&img, win, icon, if restore { 1.0 } else { 0.0 });
         unsafe {
-            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+            let _ = ShowWindow(self.overlay(), SW_SHOWNOACTIVATE);
         }
         self.anim = Some(Anim {
             img, win, icon, restore, duration: if restore { 0.5 } else { 0.56 }, frame: if prepared { 2 } else { 0 },
-            start: Instant::now(), started, done, finished: None,
+            start: Instant::now(), started, done, finished: None, stats: Stats::default(),
         });
         true
     }
@@ -773,16 +910,40 @@ impl Genie {
         }
         a.frame += 1;
         if a.frame == 3 {
+            LOOP.with(|c| c.set((0.0, 0.0, 0)));
             std::mem::replace(&mut a.started, Then::Nothing).run();
             a.start = Instant::now();
         }
         let t = if a.frame < 3 { 0.0 } else { (a.start.elapsed().as_secs_f64() / a.duration).min(1.0) };
         let p = if a.restore { 1.0 - t } else { t };
         let img = a.img.clone();
-        self.draw(&img, a.win, a.icon, p);
+        let (rt, pt) = self.draw(&img, a.win, a.icon, p);
+        if a.frame > 3 {
+            let st = &mut a.stats;
+            let now = Instant::now();
+            if let Some(l) = st.last {
+                let g = (now - l).as_secs_f64() * 1e3;
+                st.frames += 1;
+                st.gap_sum += g;
+                st.gap_max = st.gap_max.max(g);
+            }
+            st.last = Some(now);
+            st.raster += rt;
+            st.present += pt;
+        }
         if t >= 1.0 {
             std::mem::replace(&mut a.done, Then::Nothing).run();
             a.finished = Some(Instant::now());
+            let st = &a.stats;
+            if st.frames > 0 {
+                let n = st.frames as f64;
+                let avg = st.gap_sum / n;
+                log(&format!(
+                    "{} {:.0}x{:.0}: {} frames, interval avg {avg:.1} ms max {:.1} ms, raster {:.2} ms, present {:.2} ms, dock {:.2} ms, flush {:.2} ms, on battery {}",
+                    if a.restore { "restore" } else { "minimize" }, a.win.w, a.win.h, st.frames, st.gap_max,
+                    st.raster / (n + 1.0), st.present / (n + 1.0), LOOP.with(|c| { let (d, _, k) = c.get(); d / k.max(1) as f64 }), LOOP.with(|c| { let (_, f, k) = c.get(); f / k.max(1) as f64 }), on_battery()
+                ));
+            }
         }
         self.anim = Some(a);
     }
@@ -882,7 +1043,106 @@ impl Genie {
             GenieEv::Up => unsafe {
                 SetTimer(self.hwnd, TIMER_DISARM, 220, None);
             },
-            GenieEv::Display => self.surface = None,
+            GenieEv::Display => {
+                self.surface = None;
+                self.gpu = None; // the adapter may have changed with the displays
+                self.gpu_area = None;
+                self.gpu_tried = false;
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+
+    /// cargo test --release genie_bench -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn genie_bench() {
+        let tex = Pixmap::new(1024, 640).unwrap();
+        let win = R { x: 200.0, y: 100.0, w: 1800.0, h: 1100.0 };
+        let icon = R { x: 1200.0, y: 1500.0, w: 64.0, h: 64.0 };
+        let area = win.union(&icon);
+        let (w, h) = (area.w as usize + 2, area.h as usize + 2);
+        let mut buf = vec![0u8; w * h * 4];
+        let frames = 60;
+        let mut worst = 0.0f64;
+        let t0 = Instant::now();
+        for f in 0..frames {
+            let p = f as f64 / (frames - 1) as f64;
+            let rows = shape(win, icon, p);
+            let s = Instant::now();
+            raster(&mut buf, w, area.x, area.y, w, h, &rows, &tex);
+            worst = worst.max(s.elapsed().as_secs_f64() * 1000.0);
+        }
+        let avg = t0.elapsed().as_secs_f64() * 1000.0 / frames as f64;
+        println!("raster avg {avg:.2} ms, worst {worst:.2} ms");
+    }
+
+    /// Puts a GPU genie frame (p = 0.35) on screen for a moment and saves a screen grab of it.
+    /// cargo test --release gpu_shot -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn gpu_shot() {
+        let mut tex = Pixmap::new(512, 320).unwrap();
+        for (i, px) in tex.data_mut().chunks_mut(4).enumerate() {
+            let (x, y) = (i % 512, i / 512);
+            let check = ((x / 32 + y / 32) % 2) as u8 * 120;
+            px.copy_from_slice(&[(x / 2) as u8, check + 60, (y * 255 / 320) as u8, 255]);
+        }
+        let img = Arc::new(match std::env::var("SNAP") {
+            Ok(f) => unsafe {
+                let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+                crate::gfx::image_file(&f, 4096).unwrap()
+            },
+            Err(_) => tex,
+        });
+        let win = R { x: 0.0, y: 29.0, w: 2560.0, h: 1473.0 };
+        let icon = R { x: 1100.0, y: 1500.0, w: 80.0, h: 80.0 };
+        let area = win.union(&icon);
+        let mut g = Gpu::new().expect("gpu");
+        g.set_area(area.x as i32, area.y as i32, area.w as u32 + 2, area.h as u32 + 2).unwrap();
+        let t = Instant::now();
+        let mut n = 0;
+        while t.elapsed() < Duration::from_millis(400) {
+            g.draw(&img, &shape(win, icon, 0.35), (area.x, area.y)).unwrap();
+            unsafe {
+                let _ = ShowWindow(g.hwnd, SW_SHOWNOACTIVATE);
+                let _ = windows::Win32::Graphics::Dwm::DwmFlush();
+            }
+            n += 1;
+        }
+        println!("{n} frames in 400 ms");
+        let rc = RECT { left: area.x as i32, top: area.y as i32, right: area.right() as i32, bottom: area.bottom() as i32 };
+        let shot = grab(rc).unwrap();
+        let out = std::env::var("SHOT").unwrap_or("gpu_shot.png".into());
+        std::fs::write(&out, shot.data()).unwrap();
+        println!("{}x{}", shot.width(), shot.height());
+        println!("saved {out}");
+    }
+
+    /// At p = 0 the mesh is the window itself: output must match the texture scaled 1:1.
+    #[test]
+    fn identity_matches_texture() {
+        let mut tex = Pixmap::new(64, 32).unwrap();
+        for (i, px) in tex.data_mut().chunks_mut(4).enumerate() {
+            px.copy_from_slice(&[(i % 64 * 4) as u8, (i / 64 * 8) as u8, 77, 255]);
+        }
+        let win = R { x: 10.0, y: 20.0, w: 64.0, h: 32.0 };
+        let icon = R { x: 30.0, y: 200.0, w: 16.0, h: 16.0 };
+        let rows = shape(win, icon, 0.0);
+        let (w, h) = (100usize, 80usize);
+        let mut buf = vec![0u8; w * h * 4];
+        raster(&mut buf, w, 0.0, 0.0, w, h, &rows, &tex);
+        for (x, y) in [(10usize, 20usize), (40, 30), (73, 51), (20, 45)] {
+            let o = (y * w + x) * 4;
+            let t = ((y - 20) * 64 + (x - 10)) * 4;
+            for c in 0..4 {
+                assert!((buf[o + c] as i32 - tex.data()[t + c] as i32).abs() <= 1, "({x},{y}) c{c}: {} vs {}", buf[o + c], tex.data()[t + c]);
+            }
+        }
+        assert_eq!(&buf[(19 * w + 40) * 4..(19 * w + 40) * 4 + 4], &[0, 0, 0, 0]);
     }
 }
