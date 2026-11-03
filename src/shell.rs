@@ -450,6 +450,19 @@ pub fn run_hidden(exe: &str, args: &str) {
     }
 }
 
+/// File name of a process's exe ("SnippingTool.exe"), uncached.
+pub fn exe_name(pid: u32) -> Option<String> {
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 1024];
+        let mut n = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut n).is_ok();
+        let _ = CloseHandle(h);
+        let path = from_wide(&buf[..n as usize]);
+        ok.then(|| path.rsplit('\\').next().unwrap_or(&path).to_string())
+    }
+}
+
 pub fn window_pid(h: HWND) -> u32 {
     let mut pid = 0u32;
     unsafe { GetWindowThreadProcessId(h, Some(&mut pid)) };

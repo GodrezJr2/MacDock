@@ -274,6 +274,18 @@ fn foreground_is_fullscreen() -> bool {
         if fg.0.is_null() || shell::window_pid(fg) == std::process::id() {
             return false;
         }
+        // screenshot / screen tool overlays cover the screen for a moment; hiding for them made dock and bar
+        // blink away on every Win+Shift+S. Tool windows (no taskbar button) are never a game either.
+        if GetWindowLongPtrW(fg, GWL_EXSTYLE) & WS_EX_TOOLWINDOW.0 as isize != 0 {
+            return false;
+        }
+        const OVERLAYS: [&str; 9] = [
+            "ScreenClippingHost.exe", "SnippingTool.exe", "ScreenSketch.exe", "ShareX.exe", "Lightshot.exe",
+            "Greenshot.exe", "PowerToys.ScreenRuler.exe", "PowerToys.PowerOCR.exe", "PowerToys.ColorPickerUI.exe",
+        ];
+        if shell::exe_name(shell::window_pid(fg)).is_some_and(|n| OVERLAYS.iter().any(|o| shell::eq_ic(o, &n))) {
+            return false;
+        }
         let mut cls = [0u16; 64];
         let n = GetClassNameW(fg, &mut cls) as usize;
         let cls = String::from_utf16_lossy(&cls[..n]);
