@@ -8,6 +8,7 @@ mod badges;
 mod config;
 mod dock;
 mod ai_usage;
+mod claude_oauth;
 mod fly_ai;
 mod fly_battery;
 mod fly_cc;
@@ -351,7 +352,7 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
     let genie = cfg.genie.then(genie::Genie::new);
     let bar = cfg.menu_bar.then(|| menubar::MenuBar::new(menubar::create_window(), cfg.tray_icons, cfg.ai_usage));
     if cfg.menu_bar && cfg.ai_usage {
-        ai_usage::start(cfg.claude_limit_5h, || {});
+        ai_usage::start(cfg.claude_limit_5h, cfg.claude_usage_oauth, || {});
     }
     let mut app = App { dock: Dock::new(hwnd, cfg), genie, bar, fly: None, fullscreen: false };
     if let Some(b) = app.bar.as_mut() {

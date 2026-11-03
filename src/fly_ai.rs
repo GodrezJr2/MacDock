@@ -78,7 +78,8 @@ impl AiFly {
         let lab_h = ui.line_h(11.0, 500);
         let sub_h = ui.line_h(10.5, 400);
         let val_h = ui.line_h(16.0, 600);
-        let limits_h: f32 = if p.limits.is_empty() {
+        let note_h = if p.note.is_some() { lab_h + 6.0 } else { 0.0 };
+        let limits_h: f32 = note_h + if p.limits.is_empty() {
             if p.block.is_some() { lab_h + 6.0 } else { 0.0 }
         } else {
             p.limits.iter().map(|l| lab_h + 5.0 + 5.0 + 6.0 + sub_h + if l.d30 > 0.0 { sub_h } else { 0.0 } + 10.0).sum()
@@ -103,6 +104,10 @@ impl AiFly {
         cy += title_h + 10.0;
 
         // limits
+        if let Some(n) = &p.note {
+            ui.text(x0, cy, &format!("Limits: {n}"), 11.0, 500, a(AMBER, 255), iw);
+            cy += lab_h + 6.0;
+        }
         if p.limits.is_empty() {
             if let Some((start, tok)) = p.block {
                 let t = format!("5-hour block  ·  {} tokens  ·  ends in {}", compact(tok as f64), span(start + 5 * 3600 - now));
@@ -321,9 +326,11 @@ impl Content for AiFly {
         // note
         y += 2.0;
         let note = if s.claude.as_ref().is_some_and(|p| p.limits.is_empty()) {
-            "Read from local logs only. Claude Code logs no limit: set ClaudeLimit5h (tokens per 5 h) in config.json to see a percentage."
+            "Read from local logs. Claude Code logs no limit: turn on ClaudeUsageOAuth in config.json for its real 5-hour and weekly limits, or set ClaudeLimit5h for an estimate."
+        } else if s.claude.as_ref().is_some_and(|p| p.limits.iter().any(|l| l.label == "Weekly")) {
+            "Tokens from local logs. Claude limits from Anthropic's usage endpoint (your Claude Code login), Codex limits from its own reports."
         } else {
-            "Read from local logs only. Codex limits are its own server reports; Claude's percentage uses ClaudeLimit5h."
+            "Read from local logs. Codex limits are its own server reports; Claude's percentage is estimated from ClaudeLimit5h."
         };
         y += ui.text_wrap(0.0, y, note, 10.5, 400, white(0x66), w);
         y += 6.0;
@@ -347,7 +354,7 @@ mod tests {
     #[test]
     #[ignore] // SNAP_DIR=<folder> cargo test --release ai_snap -- --ignored
     fn ai_snap() {
-        crate::ai_usage::start(None, || {});
+        crate::ai_usage::start(None, true, || {});
         let t = std::time::Instant::now();
         while crate::ai_usage::summary().is_none() && t.elapsed().as_secs() < 20 {
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -362,8 +369,11 @@ mod tests {
         let claude = Provider {
             name: "Claude Code", last: now - 20, tok5: 420_000, tok30: 1_900_000, today: 8_300_000,
             block: Some((now - 7200, 3_100_000)),
-            limits: vec![Limit { label: "5-hour".into(), used: 78.0, resets_at: now + 3 * 3600, d5: 4.2, d30: 19.0 }],
-            plan: None, hourly,
+            limits: vec![
+                Limit { label: "5-hour".into(), used: 78.0, resets_at: now + 3 * 3600, d5: 4.2, d30: 19.0 },
+                Limit { label: "Weekly".into(), used: 65.0, resets_at: now + 3 * 86400, d5: 0.3, d30: 2.0 },
+            ],
+            plan: None, note: None, hourly,
         };
         let codex = Provider {
             name: "Codex", last: now - 900, tok5: 0, tok30: 55_000, today: 410_000, block: None,
@@ -371,7 +381,7 @@ mod tests {
                 Limit { label: "5-hour".into(), used: 34.0, resets_at: now + 4000, d5: 0.0, d30: 3.0 },
                 Limit { label: "Weekly".into(), used: 12.0, resets_at: now + 4 * 86400, d5: 0.0, d30: 0.5 },
             ],
-            plan: Some("plus".into()), hourly: hourly.map(|h| h / 3),
+            plan: Some("plus".into()), note: None, hourly: hourly.map(|h| h / 3),
         };
         let se = |provider, title: &str, project: &str, model: Option<&str>, last, tok5, total| Session {
             provider, title: title.into(), project: project.into(), model: model.map(String::from),

@@ -83,8 +83,10 @@ notification-area icons (Discord, Steam, …).
   burn rate in tok/s. Its flyout shows tok/s over 5 and 30 minutes, the last 24 hours, each limit with the
   points used per 5 / 30 minutes, when the current pace would hit it, and every session that burned
   tokens in the last 30 minutes (title, project, model, branch, its own tok/s). Read from the agents' local logs
-  (`~/.claude/projects`, `~/.codex/sessions`); nothing is sent anywhere. Codex reports its own limits;
-  Claude Code does not, so its percentage needs `ClaudeLimit5h`.
+  (`~/.claude/projects`, `~/.codex/sessions`); by default nothing is sent anywhere. Codex reports its own limits.
+  Claude Code logs none: turn on `ClaudeUsageOAuth` to read its real 5-hour and weekly limits from Anthropic
+  with Claude Code's own login (every 2 minutes, only to api.anthropic.com; MacDock never refreshes the token),
+  or set `ClaudeLimit5h` for an estimate from local tokens.
 
 ### It stays out of the way
 
@@ -130,6 +132,7 @@ Settings live in `%APPDATA%\MacDock\config.json`, created on first run.
 | `TrayIcons` | `true` | Host notification-area icons behind the `^` item |
 | `HideTaskbar` | `true` | Hide the Windows taskbar while MacDock runs |
 | `AiUsage` | `true` | Claude Code / Codex usage item in the menu bar (shown once either has logs) |
+| `ClaudeUsageOAuth` | `false` | Read Claude's real 5-hour / weekly limits from `api.anthropic.com/api/oauth/usage` with the login in `~/.claude/.credentials.json` |
 | `ClaudeLimit5h` | `null` | Tokens per 5-hour Claude block that count as 100% (input + cache writes + output) |
 
 A crash writes `%APPDATA%\MacDock\panic.log` and still puts the taskbar back.

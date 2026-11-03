@@ -49,6 +49,8 @@ pub struct Provider {
     pub block: Option<(i64, u64)>,
     pub limits: Vec<Limit>,
     pub plan: Option<String>,
+    /// why the limits are missing (Claude usage endpoint errors)
+    pub note: Option<String>,
     /// tokens per hour, oldest first, the last entry is the current hour
     pub hourly: [u64; 24],
 }
@@ -132,9 +134,10 @@ pub fn set_paused(on: bool) {
     PAUSED.store(on, Ordering::Relaxed);
 }
 
-/// Start the worker once. `claude_limit` = tokens per 5 h block, for a Claude percentage.
+/// Start the worker once. `claude_limit` = tokens per 5 h block, for an estimated Claude percentage;
+/// `claude_oauth` = ask Anthropic for the real limits (claude_oauth.rs).
 /// `notify` is called after each publish that changed something.
-pub fn start(claude_limit: Option<u64>, notify: impl Fn() + Send + 'static) {
+pub fn start(claude_limit: Option<u64>, claude_oauth: bool, notify: impl Fn() + Send + 'static) {
     if STARTED.set(()).is_err() {
         return;
     }
@@ -142,6 +145,7 @@ pub fn start(claude_limit: Option<u64>, notify: impl Fn() + Send + 'static) {
         .name("ai-usage".into())
         .spawn(move || {
             let mut st = State::new(claude_limit);
+            st.oauth = claude_oauth;
             let mut last_key = None;
             loop {
                 if !PAUSED.load(Ordering::Relaxed) {
@@ -226,11 +230,14 @@ struct Tail {
     offset: u64,
 }
 
-/// A rate-limit report from Codex.
+/// A rate-limit report (Codex's own, or Claude's usage endpoint).
 #[derive(Clone, Copy)]
 struct RlSample {
     ts: i64,
-    secondary: bool,
+    /// which window of that provider (0 = primary / 5-hour, 1 = secondary / weekly, …)
+    slot: u8,
+    /// fixed label, else one from window_min
+    label: &'static str,
     used: f64,
     window_min: i64,
     resets_at: i64,
@@ -267,6 +274,10 @@ struct State {
     codex_ids: HashMap<PathBuf, String>,
     codex_titles: HashMap<String, String>,
     claude_limit: Option<u64>,
+    oauth: bool,
+    oauth_next: i64,
+    oauth_err: Option<String>,
+    claude_rl: Vec<RlSample>,
     tails: HashMap<PathBuf, Tail>,
     claude: Vec<(i64, u64)>,
     claude_ids: HashSet<String>,
@@ -288,6 +299,10 @@ impl State {
             codex_ids: HashMap::new(),
             codex_titles: HashMap::new(),
             claude_limit,
+            oauth: false,
+            oauth_next: 0,
+            oauth_err: None,
+            claude_rl: Vec::new(),
             tails: HashMap::new(),
             claude: Vec::new(),
             claude_ids: HashSet::new(),
@@ -355,10 +370,29 @@ impl State {
             });
         }
         s.sessions.sort_by(|a, b| b.last.cmp(&a.last));
+        if self.oauth && now >= self.oauth_next {
+            match crate::claude_oauth::fetch(&self.home, now) {
+                Ok(ws) => {
+                    for (i, w) in ws.iter().enumerate() {
+                        self.claude_rl.push(RlSample { ts: now, slot: i as u8, label: w.label, used: w.used, window_min: w.window_min, resets_at: w.resets_at });
+                    }
+                    self.oauth_err = None;
+                    self.oauth_next = now + 120;
+                }
+                Err(e) => {
+                    self.oauth_err = Some(e);
+                    self.oauth_next = now + 600;
+                }
+            }
+            self.claude_rl.retain(|e| e.ts >= cut);
+        }
         if self.have_claude && !self.claude.is_empty() {
             let mut p = provider("Claude Code", &self.claude, now, off);
             p.block = current_block(&self.claude, now);
-            if let (Some(lim), Some((start, tok))) = (self.claude_limit.filter(|l| *l > 0), p.block) {
+            p.note = if self.oauth { self.oauth_err.clone() } else { None };
+            if self.oauth && !self.claude_rl.is_empty() {
+                p.limits = rl_limits(&self.claude_rl, now);
+            } else if let (Some(lim), Some((start, tok))) = (self.claude_limit.filter(|l| *l > 0), p.block) {
                 let pct = |t: u64| t as f64 * 100.0 / lim as f64;
                 p.limits.push(Limit { label: "5-hour".into(), used: pct(tok), resets_at: start + BLOCK_SECS, d5: pct(p.tok5), d30: pct(p.tok30) });
             }
@@ -366,7 +400,7 @@ impl State {
         }
         if self.have_codex && (!self.codex.is_empty() || !self.rl.is_empty()) {
             let mut p = provider("Codex", &self.codex, now, off);
-            p.limits = codex_limits(&self.rl, now);
+            p.limits = rl_limits(&self.rl, now);
             p.plan = self.codex_plan.clone();
             s.codex = Some(p);
         }
@@ -519,12 +553,13 @@ impl State {
         if let Some(plan) = rl["plan_type"].as_str() {
             self.codex_plan = Some(plan.to_string());
         }
-        for (key, secondary) in [("primary", false), ("secondary", true)] {
+        for (key, slot) in [("primary", 0), ("secondary", 1)] {
             let w = &rl[key];
             if let Some(used) = w["used_percent"].as_f64() {
                 self.rl.push(RlSample {
                     ts,
-                    secondary,
+                    slot,
+                    label: "",
                     used,
                     window_min: w["window_minutes"].as_i64().unwrap_or(0),
                     resets_at: w["resets_at"].as_i64().unwrap_or(0),
@@ -641,26 +676,29 @@ fn window_label(min: i64) -> String {
 }
 
 /// Latest report per window, plus how many points it moved in the last 5 / 30 minutes.
-fn codex_limits(rl: &[RlSample], now: i64) -> Vec<Limit> {
+fn rl_limits(rl: &[RlSample], now: i64) -> Vec<Limit> {
+    // the same window can report a reset time a few seconds apart between calls
+    let same = |a: i64, b: i64| a == 0 || b == 0 || (a - b).abs() < 120;
     let mut out = Vec::new();
-    for secondary in [false, true] {
-        let s: Vec<&RlSample> = rl.iter().filter(|r| r.secondary == secondary).collect();
+    for slot in 0..8u8 {
+        let s: Vec<&RlSample> = rl.iter().filter(|r| r.slot == slot).collect();
         let Some(last) = s.last() else { continue };
+        let label = if last.label.is_empty() { window_label(last.window_min) } else { last.label.to_string() };
         if last.resets_at > 0 && last.resets_at <= now {
-            // the window rolled over since Codex last reported: it starts from zero
-            out.push(Limit { label: window_label(last.window_min), used: 0.0, resets_at: 0, d5: 0.0, d30: 0.0 });
+            // the window rolled over since the last report: it starts from zero
+            out.push(Limit { label, used: 0.0, resets_at: 0, d5: 0.0, d30: 0.0 });
             continue;
         }
         // value at `t`: newest report at or before t in the same window (a reset in between counts from 0)
         let at = |t: i64| -> f64 {
             match s.iter().rev().find(|r| r.ts <= t) {
-                Some(r) if r.resets_at == last.resets_at || r.resets_at == 0 => r.used,
+                Some(r) if same(r.resets_at, last.resets_at) => r.used,
                 Some(_) => 0.0,
-                None => s.first().filter(|r| r.resets_at == last.resets_at).map(|r| r.used).unwrap_or(0.0),
+                None => s.first().filter(|r| same(r.resets_at, last.resets_at)).map(|r| r.used).unwrap_or(0.0),
             }
         };
         let d = |secs: i64| (last.used - at(now - secs)).max(0.0);
-        out.push(Limit { label: window_label(last.window_min), used: last.used, resets_at: last.resets_at, d5: d(300), d30: d(1800) });
+        out.push(Limit { label, used: last.used, resets_at: last.resets_at, d5: d(300), d30: d(1800) });
     }
     out
 }
@@ -727,9 +765,9 @@ mod tests {
 
     #[test]
     fn codex_deltas() {
-        let r = |ts, used| RlSample { ts, secondary: false, used, window_min: 300, resets_at: 100_000 };
+        let r = |ts, used| RlSample { ts, slot: 0, label: "", used, window_min: 300, resets_at: 100_000 };
         let rl = [r(1000, 10.0), r(2000, 14.0), r(2700, 15.0), r(2900, 17.0)];
-        let l = codex_limits(&rl, 3000);
+        let l = rl_limits(&rl, 3000);
         assert_eq!(l.len(), 1);
         assert_eq!(l[0].used, 17.0);
         assert_eq!(l[0].d5, 2.0); // at 2700 it was 15
