@@ -79,6 +79,11 @@ notification-area icons (Discord, Steam, …).
   shortcuts (Ctrl+S, Ctrl+Z, …) to that app
 - System menu with Automatically Hide Dock and Quit MacDock
 - Battery, Wi-Fi, search, Control Center and the clock (which opens the notification center)
+- **AI usage** for Claude Code and Codex: a ring with the limit closest to running out and the live
+  burn rate in tok/s. Its flyout shows tok/s over 5 and 30 minutes, the last 24 hours, each limit with the
+  points used per 5 / 30 minutes, and when the current pace would hit it. Read from the agents' local logs
+  (`~/.claude/projects`, `~/.codex/sessions`); nothing is sent anywhere. Codex reports its own limits;
+  Claude Code does not, so its percentage needs `ClaudeLimit5h`.
 
 ### It stays out of the way
 
@@ -123,6 +128,8 @@ Settings live in `%APPDATA%\MacDock\config.json`, created on first run.
 | `MenuBar` | `true` | Show the menu bar |
 | `TrayIcons` | `true` | Host notification-area icons behind the `^` item |
 | `HideTaskbar` | `true` | Hide the Windows taskbar while MacDock runs |
+| `AiUsage` | `true` | Claude Code / Codex usage item in the menu bar (shown once either has logs) |
+| `ClaudeLimit5h` | `null` | Tokens per 5-hour Claude block that count as 100% (input + cache writes + output) |
 
 A crash writes `%APPDATA%\MacDock\panic.log` and still puts the taskbar back.
 

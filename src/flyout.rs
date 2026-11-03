@@ -561,3 +561,31 @@ impl Flyout {
         }
     }
 }
+
+/// Test aid: paint a panel the way `Flyout::render` does, on a dark backdrop, and return (w, h, BGRA).
+#[cfg(test)]
+pub fn snapshot(content: &mut dyn Content, s: f32) -> (u32, u32, Vec<u8>) {
+    let w = content.width() - 2.0 * MARGIN;
+    let (padx, pady) = content.padding();
+    let cw = w - 2.0 * padx;
+    let pw = ((w + 2.0 * MARGIN) * s).ceil() as u32;
+    let mut spots = Vec::new();
+    let mut scratch = Pixmap::new(pw, (1200.0 * s) as u32).unwrap();
+    let ch = {
+        let mut ui = Ui { pm: &mut scratch, s, ox: MARGIN + padx, oy: MARGIN + pady, mouse: None, pressed: None, spots: &mut spots, w: cw };
+        content.draw(&mut ui)
+    };
+    let panel_h = ch + 2.0 * pady;
+    let ph = ((panel_h + 2.0 * MARGIN) * s).ceil() as u32;
+    let mut pm = Pixmap::new(pw, ph).unwrap();
+    pm.fill(Color::from_rgba8(0x40, 0x30, 0x28, 255));
+    if let Some(path) = gfx::rrect(MARGIN * s, MARGIN * s, w * s, panel_h * s, 16.0 * s) {
+        let mut paint = Paint::default();
+        paint.set_color(rgba(PANEL_FILL));
+        paint.anti_alias = true;
+        pm.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+    }
+    let mut ui = Ui { pm: &mut pm, s, ox: MARGIN + padx, oy: MARGIN + pady, mouse: None, pressed: None, spots: &mut spots, w: cw };
+    content.draw(&mut ui);
+    (pw, ph, pm.data().to_vec())
+}

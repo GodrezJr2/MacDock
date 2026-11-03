@@ -17,6 +17,10 @@ pub struct Config {
     pub badges: bool,
     /// Host the notification-area icons behind a ^ item in the menu bar.
     pub tray_icons: bool,
+    /// Claude Code / Codex token burn and limits in the menu bar, read from their local logs.
+    pub ai_usage: bool,
+    /// Tokens per 5-hour Claude block that count as 100% (Claude Code logs no limit itself). None = no %.
+    pub claude_limit_5h: Option<u64>,
     /// Keys we don't know (written by a newer build) survive a save.
     extra: Map<String, Value>,
 }
@@ -53,6 +57,8 @@ impl Default for Config {
             auto_hide: false,
             badges: true,
             tray_icons: true,
+            ai_usage: true,
+            claude_limit_5h: None,
             extra: Map::new(),
         }
     }
@@ -77,6 +83,8 @@ impl Config {
         b("AutoHide", &mut c.auto_hide);
         b("Badges", &mut c.badges);
         b("TrayIcons", &mut c.tray_icons);
+        b("AiUsage", &mut c.ai_usage);
+        c.claude_limit_5h = v.remove("ClaudeLimit5h").and_then(|x| x.as_u64()).filter(|x| *x > 0);
         if let Some(Value::Array(p)) = v.remove("Pinned") {
             c.pinned = p.iter().filter_map(|s| s.as_str().map(String::from)).collect();
         }
@@ -103,6 +111,8 @@ impl Config {
             "AutoHide": self.auto_hide,
             "Badges": self.badges,
             "TrayIcons": self.tray_icons,
+            "AiUsage": self.ai_usage,
+            "ClaudeLimit5h": self.claude_limit_5h,
         });
         if let Value::Object(f) = fields {
             m.extend(f);

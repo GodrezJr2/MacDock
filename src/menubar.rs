@@ -61,6 +61,7 @@ pub enum BarAct {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Extra {
     Tray,
+    Ai,
     Battery,
     Wifi,
     ControlCenter,
@@ -72,6 +73,7 @@ enum Item {
     App,
     Menu(&'static str),
     Chevron,
+    Ai,
     Battery,
     Net,
     Search,
@@ -280,6 +282,11 @@ pub struct MenuBar {
     appbar: bool,
     hidden: bool,
     tray: bool,
+    ai: bool,
+    ai_gen: u64,
+    ai_label: String,
+    ai_pct: Option<f64>,
+    ai_live: bool,
     surface: Option<Surface>,
     slots: Vec<Slot>,
     hover: Option<usize>,
@@ -297,12 +304,13 @@ pub struct MenuBar {
 }
 
 impl MenuBar {
-    pub fn new(hwnd: HWND, tray: bool) -> MenuBar {
+    pub fn new(hwnd: HWND, tray: bool, ai: bool) -> MenuBar {
         let (sw, sh, dpi) = crate::dock::primary_screen();
         let b = power();
         let n = read_net();
         MenuBar {
             hwnd, shell: Shell::default(), dpi, screen_w: sw, screen_h: sh, appbar: false, hidden: false, tray,
+            ai, ai_gen: u64::MAX, ai_label: String::new(), ai_pct: None, ai_live: false,
             surface: None, slots: Vec::new(), hover: None, open: None, target: HWND::default(),
             app_name: "File Explorer".into(), names: HashMap::new(), clock: clock_text(), battery: b, net: n,
             ticks: 0, tracking: false, dirty: true, auto_hide_dock: false,
@@ -454,12 +462,39 @@ impl MenuBar {
             self.battery = b;
             self.dirty = true;
         }
+        if self.ai {
+            self.read_ai();
+        }
         if all || self.ticks % 5 == 1 {
             let n = read_net();
             if n != self.net {
                 self.net = n;
                 self.dirty = true;
             }
+        }
+    }
+
+    /// Pick up a new AI usage summary: ring = the limit closest to running out, text = burn rate while busy.
+    fn read_ai(&mut self) {
+        let g = crate::ai_usage::generation();
+        if g == self.ai_gen {
+            return;
+        }
+        self.ai_gen = g;
+        let Some(s) = crate::ai_usage::summary() else { return };
+        let r = s.rate5();
+        let pct = s.worst_pct();
+        let label = if r > 0.0 {
+            format!("{}/s", crate::ai_usage::compact(r))
+        } else {
+            pct.map(|p| format!("{p:.0}%")).unwrap_or_default()
+        };
+        let live = s.providers().next().is_some();
+        if label != self.ai_label || pct != self.ai_pct || live != self.ai_live {
+            self.ai_label = label;
+            self.ai_pct = pct;
+            self.ai_live = live;
+            self.dirty = true;
         }
     }
 
@@ -526,7 +561,7 @@ impl MenuBar {
     pub fn set_open_extra(&mut self, e: Option<Extra>) {
         let want = e.and_then(|e| {
             self.slots.iter().position(|s| {
-                matches!((s.item, e), (Item::Chevron, Extra::Tray) | (Item::Battery, Extra::Battery) | (Item::Net, Extra::Wifi) | (Item::Cc, Extra::ControlCenter))
+                matches!((s.item, e), (Item::Chevron, Extra::Tray) | (Item::Ai, Extra::Ai) | (Item::Battery, Extra::Battery) | (Item::Net, Extra::Wifi) | (Item::Cc, Extra::ControlCenter))
             })
         });
         if want != self.open {
@@ -540,6 +575,7 @@ impl MenuBar {
     pub fn extra_span(&self, e: Extra) -> Option<(i32, i32)> {
         let item = match e {
             Extra::Tray => Item::Chevron,
+            Extra::Ai => Item::Ai,
             Extra::Battery => Item::Battery,
             Extra::Wifi => Item::Net,
             Extra::ControlCenter => Item::Cc,
@@ -566,6 +602,7 @@ impl MenuBar {
         match s.item {
             Item::Logo | Item::App | Item::Menu(_) => return self.show_menu(i),
             Item::Chevron => return Some(BarAct::Flyout(Extra::Tray, l, r)),
+            Item::Ai => return Some(BarAct::Flyout(Extra::Ai, l, r)),
             Item::Battery => return Some(BarAct::Flyout(Extra::Battery, l, r)),
             Item::Net => return Some(BarAct::Flyout(Extra::Wifi, l, r)),
             Item::Cc => return Some(BarAct::Flyout(Extra::ControlCenter, l, r)),
@@ -766,6 +803,7 @@ impl MenuBar {
             Item::App => self.text_w(&self.app_name, self.font(700)),
             Item::Menu(m) => self.text_w(m, self.font(500)),
             Item::Chevron => self.text_w("\u{E70E}", self.glyph_font(11.0)),
+            Item::Ai => 14.0 + if self.ai_label.is_empty() { 0.0 } else { 5.0 + self.text_w(&self.ai_label, self.font(400)) },
             Item::Battery => self.text_w(&self.battery_text(), self.font(400)) + 6.0 + 26.0,
             Item::Net => 17.0,
             Item::Search => self.text_w("\u{E721}", self.glyph_font(GLYPH_PX)),
@@ -785,6 +823,9 @@ impl MenuBar {
         let mut right = vec![];
         if self.tray {
             right.push(Item::Chevron);
+        }
+        if self.ai && self.ai_live {
+            right.push(Item::Ai);
         }
         if self.battery.is_some() {
             right.push(Item::Battery);
@@ -831,6 +872,12 @@ impl MenuBar {
                 Item::App => self.draw_text(&mut pm, &self.app_name, self.font(700), cx, mid),
                 Item::Menu(m) => self.draw_text(&mut pm, m, self.font(500), cx, mid),
                 Item::Chevron => self.draw_text(&mut pm, "\u{E70E}", self.glyph_font(11.0), cx, mid),
+                Item::Ai => {
+                    draw_ai_ring(&mut pm, cx + 7.0 * dpi, mid, 6.0 * dpi, dpi, self.ai_pct, self.ai_label.ends_with("/s"));
+                    if !self.ai_label.is_empty() {
+                        self.draw_text(&mut pm, &self.ai_label, self.font(400), cx + 19.0 * dpi, mid);
+                    }
+                }
                 Item::Battery => {
                     let t = self.battery_text();
                     self.draw_text(&mut pm, &t, self.font(400), cx, mid);
@@ -951,6 +998,42 @@ pub fn draw_wifi(pm: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, bars: u8, off:
     let dot = (h * 0.12).max(1.2);
     if let Some(c) = PathBuilder::from_circle(cx, cy - dot, dot) {
         pm.fill_path(&c, &white(if !off && bars >= 1 { 255 } else { 0x4D }), FillRule::Winding, Transform::identity(), None);
+    }
+}
+
+/// AI usage: a ring filled to the worst limit's percentage (colour by level), a dot in the middle while tokens burn.
+fn draw_ai_ring(pm: &mut Pixmap, cx: f32, cy: f32, r: f32, dpi: f32, pct: Option<f64>, live: bool) {
+    let sw = 1.9 * dpi;
+    let ring = |pm: &mut Pixmap, from: f32, to: f32, paint: &Paint| {
+        let mut pb = PathBuilder::new();
+        let n = ((to - from) / 0.12).ceil().max(2.0) as usize;
+        for i in 0..=n {
+            let t = from + (to - from) * i as f32 / n as f32;
+            let (x, y) = (cx + r * t.sin(), cy - r * t.cos());
+            if i == 0 {
+                pb.move_to(x, y);
+            } else {
+                pb.line_to(x, y);
+            }
+        }
+        if let Some(p) = pb.finish() {
+            let st = Stroke { width: sw, line_cap: tiny_skia::LineCap::Round, ..Default::default() };
+            pm.stroke_path(&p, paint, &st, Transform::identity(), None);
+        }
+    };
+    let tau = std::f32::consts::TAU;
+    ring(pm, 0.0, tau, &white(0x55));
+    if let Some(p) = pct.filter(|p| *p > 0.0) {
+        let (r_, g, b) = crate::fly_ai::level(p);
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(b, g, r_, 255); // surfaces are BGRA
+        paint.anti_alias = true;
+        ring(pm, 0.0, tau * (p.min(100.0) / 100.0) as f32, &paint);
+    }
+    if live {
+        if let Some(c) = PathBuilder::from_circle(cx, cy, 2.2 * dpi) {
+            pm.fill_path(&c, &white(0xF0), FillRule::Winding, Transform::identity(), None);
+        }
     }
 }
 

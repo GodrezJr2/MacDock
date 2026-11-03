@@ -7,6 +7,8 @@
 mod badges;
 mod config;
 mod dock;
+mod ai_usage;
+mod fly_ai;
 mod fly_battery;
 mod fly_cc;
 mod fly_tray;
@@ -137,6 +139,7 @@ impl App {
             if let Some(g) = self.genie.as_mut() {
                 g.pause(on); // game mode: nothing of ours in the input path
             }
+            ai_usage::set_paused(on);
             if let Some(b) = self.bar.as_mut() {
                 b.set_hidden(on);
             }
@@ -164,14 +167,7 @@ impl App {
             menubar::Extra::Wifi => Box::new(fly_wifi::WifiFly::new()),
             menubar::Extra::ControlCenter => Box::new(fly_cc::ControlCenter::new()),
             menubar::Extra::Tray => Box::new(fly_tray::TrayFly::new()),
-            other => {
-                // not ported yet: the matching Settings page
-                shell::launch(match other {
-                    menubar::Extra::Wifi => "ms-settings:network-wifi",
-                    _ => "ms-actioncenter:controlcenter",
-                });
-                return;
-            }
+            menubar::Extra::Ai => Box::new(fly_ai::AiFly::new()),
         };
         let Some(b) = self.bar.as_mut() else { return };
         b.set_open_extra(Some(kind));
@@ -341,7 +337,10 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
     }
     let hwnd = dock::create_window();
     let genie = cfg.genie.then(genie::Genie::new);
-    let bar = cfg.menu_bar.then(|| menubar::MenuBar::new(menubar::create_window(), cfg.tray_icons));
+    let bar = cfg.menu_bar.then(|| menubar::MenuBar::new(menubar::create_window(), cfg.tray_icons, cfg.ai_usage));
+    if cfg.menu_bar && cfg.ai_usage {
+        ai_usage::start(cfg.claude_limit_5h, || {});
+    }
     let mut app = App { dock: Dock::new(hwnd, cfg), genie, bar, fly: None, fullscreen: false };
     if let Some(b) = app.bar.as_mut() {
         b.start(); // reserve the top strip before the dock measures the work area
