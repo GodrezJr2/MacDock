@@ -49,10 +49,8 @@ pub fn minimize_all(wins: &[HWND]) {
 }
 
 pub fn restore_all(front: HWND, minimized: &[HWND]) {
-    unsafe {
-        for &w in minimized.iter().rev() {
-            let _ = ShowWindow(w, SW_RESTORE);
-        }
+    for &w in minimized.iter().rev() {
+        shell::restore(w);
     }
     shell::activate(front);
 }

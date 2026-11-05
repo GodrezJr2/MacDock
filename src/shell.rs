@@ -373,11 +373,24 @@ pub fn minimize(h: HWND) {
     }
 }
 
-pub fn activate(h: HWND) {
+/// Un-minimizes a window. ShowWindow is refused (ERROR_ACCESS_DENIED) for an elevated window,
+/// e.g. an Administrator PowerShell, because UIPI blocks a medium-integrity dock from it,
+/// but WM_SYSCOMMAND passes through, so that is the fallback.
+pub fn restore(h: HWND) {
     unsafe {
-        if IsIconic(h).as_bool() {
-            let _ = ShowWindow(h, SW_RESTORE);
+        if !IsIconic(h).as_bool() {
+            return;
         }
+        let _ = ShowWindow(h, SW_RESTORE);
+        if IsIconic(h).as_bool() {
+            let _ = PostMessageW(h, WM_SYSCOMMAND, windows::Win32::Foundation::WPARAM(SC_RESTORE as usize), LPARAM(0));
+        }
+    }
+}
+
+pub fn activate(h: HWND) {
+    restore(h);
+    unsafe {
         if SetForegroundWindow(h).as_bool() {
             let _ = BringWindowToTop(h);
             return;
