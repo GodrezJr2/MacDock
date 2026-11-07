@@ -65,6 +65,8 @@ pub struct ControlCenter {
     st: Arc<Mutex<State>>,
     dark: bool,
     power: usize,
+    /// Energy Saver holds the system at Efficiency over `power`
+    saver: bool,
     /// slider values while dragging (the worker's reads must not fight the mouse)
     drag: Option<(u32, f32)>,
     bright_job: Job<u8>,
@@ -124,7 +126,7 @@ impl ControlCenter {
     pub fn new() -> ControlCenter {
         let st = State { wifi_on: true, wifi_sub: wifi_sub(true), bt: None, ..Default::default() };
         ControlCenter {
-            hwnd: 0, st: Arc::new(Mutex::new(st)), dark: sysctl::dark(), power: sysctl::power_mode(), drag: None,
+            hwnd: 0, st: Arc::new(Mutex::new(st)), dark: sysctl::dark(), power: sysctl::power_mode(), saver: sysctl::power_saver(), drag: None,
             bright_job: Arc::new(Mutex::new((None, false))), vol_job: Arc::new(Mutex::new((None, false))),
         }
     }
@@ -211,6 +213,9 @@ impl Content for ControlCenter {
     }
     fn opened(&mut self, hwnd: isize) {
         self.hwnd = hwnd;
+        self.dark = sysctl::dark();
+        self.power = sysctl::power_mode();
+        self.saver = sysctl::power_saver();
         self.work(|st| {
             let on = fly_wifi::is_on();
             {
@@ -289,6 +294,7 @@ impl Content for ControlCenter {
                 self.power = (sysctl::power_mode() + 1) % 3;
                 sysctl::set_power_mode(self.power);
                 self.power = sysctl::power_mode();
+                self.saver = sysctl::power_saver();
             }
             ID_POWER_TEXT => return Cmd::Launch("ms-settings:powersleep".into()),
             ID_PREV | ID_PLAY | ID_NEXT => self.media_cmd(id),
@@ -321,11 +327,13 @@ impl Content for ControlCenter {
         tile(ui, rx, 0.0, col, th);
         toggle(ui, rx + 10.0, 10.0, col - 20.0, '\u{E708}', "Dark Mode", if self.dark { "On" } else { "Off" }, self.dark, ID_DARK, ID_DARK);
         tile(ui, rx, th + 8.0, col, th);
+        let mode = sysctl::POWER_MODES[self.power].0;
+        let power_sub = if self.saver { format!("{mode} · Saver") } else { mode.to_string() };
         let pg = match self.power {
             0 => '\u{EC0A}',
             _ => '\u{E945}',
         };
-        toggle(ui, rx + 10.0, th + 8.0 + 10.0, col - 20.0, pg, "Power Mode", sysctl::POWER_MODES[self.power].0, self.power != 1, ID_POWER_DOT, ID_POWER_TEXT);
+        toggle(ui, rx + 10.0, th + 8.0 + 10.0, col - 20.0, pg, "Power Mode", &power_sub, self.power != 1 || self.saver, ID_POWER_DOT, ID_POWER_TEXT);
         let mut y = right_h + 8.0;
 
         // display and sound

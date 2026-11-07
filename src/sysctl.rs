@@ -161,14 +161,24 @@ fn powrprof(name: &[u8]) -> Option<unsafe extern "system" fn() -> isize> {
     }
 }
 
-pub fn power_mode() -> usize {
-    let Some(f) = powrprof(b"PowerGetEffectiveOverlayScheme\0") else { return 1 };
-    let f: GetOverlay = unsafe { std::mem::transmute(f) };
+fn overlay(name: &[u8]) -> Option<usize> {
+    let f: GetOverlay = unsafe { std::mem::transmute(powrprof(name)?) };
     let mut g = GUID::zeroed();
     if unsafe { f(&mut g) } != 0 {
-        return 1;
+        return None;
     }
-    POWER_MODES.iter().position(|m| m.1 == g).unwrap_or(1)
+    POWER_MODES.iter().position(|m| m.1 == g)
+}
+
+/// The mode the user picked (Settings › Power mode). Not the effective one: Energy Saver forces the effective
+/// overlay to Efficiency, which made the tile show Efficiency and a click look like it did nothing.
+pub fn power_mode() -> usize {
+    overlay(b"PowerGetActualOverlayScheme\0").unwrap_or(1)
+}
+
+/// Energy Saver (or battery saver) is holding the system at Efficiency over the user's pick.
+pub fn power_saver() -> bool {
+    overlay(b"PowerGetEffectiveOverlayScheme\0") == Some(0) && power_mode() != 0
 }
 
 pub fn set_power_mode(i: usize) {
