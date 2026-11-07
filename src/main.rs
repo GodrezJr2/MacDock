@@ -293,9 +293,10 @@ fn foreground_is_fullscreen() -> bool {
         if ["Progman", "WorkerW", "Shell_TrayWnd"].contains(&cls.as_str()) {
             return false;
         }
-        // a maximized window (or anything with a title bar) is not fullscreen, even when it covers the whole
-        // screen because no AppBar space is reserved; a fullscreen app sits exactly on the monitor without one
-        if IsZoomed(fg).as_bool() || GetWindowLongPtrW(fg, GWL_STYLE) & WS_CAPTION.0 as isize == WS_CAPTION.0 as isize {
+        // anything with a title bar is not fullscreen, even when it covers the whole screen because no AppBar
+        // space is reserved; a fullscreen app sits exactly on the monitor without one. Not IsZoomed: Chrome and
+        // Edge keep WS_MAXIMIZE when a maximized window goes fullscreen (F11, YouTube), only the caption goes.
+        if GetWindowLongPtrW(fg, GWL_STYLE) & WS_CAPTION.0 as isize == WS_CAPTION.0 as isize {
             return false;
         }
         let mut r = RECT::default();
