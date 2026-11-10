@@ -98,14 +98,22 @@ notification-area icons (Discord, Steam, …).
 
 ## Install
 
-You need Windows 11 and [Rust](https://rustup.rs) (stable, MSVC or GNU toolchain).
+You need Windows 11 and Rust. Follow these steps in order:
 
-```powershell
-git clone https://github.com/GodrezJr2/MacDock.git
-cd MacDock
-cargo build --release
-.\target\release\macdock.exe
-```
+1. Install Rust from [rustup.rs](https://rustup.rs) (run `rustup-init.exe`, accept the defaults).
+2. Switch to the GNU toolchain, so you don't need Visual Studio Build Tools:
+   ```powershell
+   rustup default stable-x86_64-pc-windows-gnu
+   ```
+3. Open a new terminal, then build and run:
+   ```powershell
+   git clone https://github.com/GodrezJr2/MacDock.git
+   cd MacDock
+   cargo build --release
+   .\target\release\macdock.exe
+   ```
+
+The first build takes a few minutes because it compiles the dependencies.
 
 The result is one ~1 MB exe with no runtime to install; copy it wherever you like.
 
