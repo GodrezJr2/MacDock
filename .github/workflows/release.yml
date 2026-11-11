@@ -1,0 +1,52 @@
+# Pushing a tag like v0.1.1 builds macdock.exe and publishes it as a GitHub release.
+# Release notes come from the annotated tag message (git tag -a v0.1.1 -m "...").
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same toolchain as the README: GNU target, no Visual Studio Build Tools, no vcruntime140.dll dependency.
+      - name: Install Rust (GNU)
+        shell: pwsh
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+          rustup default stable-x86_64-pc-windows-gnu
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check tag matches Cargo.toml version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart('v')
+          $ver = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ($tag -ne $ver) { throw "Tag v$tag does not match Cargo.toml version $ver" }
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash target\release\macdock.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  macdock.exe" | Out-File -Encoding ascii target\release\macdock.exe.sha256
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release create $tag `
+            target\release\macdock.exe target\release\macdock.exe.sha256 `
+            --title "MacDock $($tag.TrimStart('v'))" `
+            --notes-from-tag
