@@ -272,6 +272,21 @@ impl Gpu {
     pub fn release_texture(&mut self) {
         self.tex = None;
     }
+
+    /// Shrink the swap chain and drop the MSAA target once an animation is over. Both are sized to the
+    /// animated window (a maximized one costs ~100 MB on an iGPU, where video memory is system RAM), and
+    /// rebuilding them on the next animation takes a few milliseconds.
+    pub fn release_buffers(&mut self) {
+        unsafe {
+            self.ctx.OMSetRenderTargets(None, None);
+            self.msaa = None;
+            self.ctx.ClearState();
+            self.ctx.Flush();
+            if self.swap.ResizeBuffers(0, 1, 1, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG(0)).is_ok() {
+                self.size = (1, 1);
+            }
+        }
+    }
 }
 
 impl Drop for Gpu {

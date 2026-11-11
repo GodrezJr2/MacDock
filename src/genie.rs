@@ -831,8 +831,10 @@ impl Genie {
             if let Some(g) = self.gpu.as_mut() {
                 let _ = ShowWindow(g.hwnd, SW_HIDE);
                 g.release_texture();
+                g.release_buffers();
             }
         }
+        self.gpu_area = None; // set_area rebuilds the buffers for the next animation
         self.surface = None;
     }
 
