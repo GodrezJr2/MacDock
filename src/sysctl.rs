@@ -75,7 +75,39 @@ pub fn brightness() -> Option<u8> {
     }
 }
 
+/// Sets the built-in panel through the video port's \\.\LCD device. WMI's WmiSetBrightness answers
+/// WBEM_E_ACCESS_DENIED from a plain (non-.NET) COM client even with an impersonate blanket, so it is
+/// only the fallback.
+fn set_brightness_ioctl(pct: u8) -> bool {
+    use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE};
+    use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
+    use windows::Win32::System::IO::DeviceIoControl;
+    const IOCTL_VIDEO_SET_DISPLAY_BRIGHTNESS: u32 = 0x0023_049C;
+    // DISPLAY_BRIGHTNESS: ucDisplayPolicy (AC | DC), ucACBrightness, ucDCBrightness
+    let p = pct.min(100);
+    let buf = [3u8, p, p];
+    unsafe {
+        let Ok(h) = CreateFileW(
+            w!("\\\\.\\LCD"),
+            (GENERIC_READ | GENERIC_WRITE).0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAGS_AND_ATTRIBUTES(0),
+            None,
+        ) else {
+            return false;
+        };
+        let ok = DeviceIoControl(h, IOCTL_VIDEO_SET_DISPLAY_BRIGHTNESS, Some(buf.as_ptr().cast()), buf.len() as u32, None, 0, None, None).is_ok();
+        let _ = CloseHandle(h);
+        ok
+    }
+}
+
 pub fn set_brightness(pct: u8) {
+    if set_brightness_ioctl(pct) {
+        return;
+    }
     let run = || -> Option<()> {
         let svc = wmi()?;
         let inst = first(&svc, "SELECT * FROM WmiMonitorBrightnessMethods")?;
@@ -89,7 +121,8 @@ pub fn set_brightness(pct: u8) {
             let mut sig = None;
             class.GetMethod(w!("WmiSetBrightness"), 0, &mut sig, std::ptr::null_mut()).ok()?;
             let params = sig?.SpawnInstance(0).ok()?;
-            params.Put(w!("Timeout"), 0, &VARIANT::from(1u32), 0).ok()?;
+            // WMI carries CIM uint32 as VT_I4; a VT_UI4 fails Put with WBEM_E_TYPE_MISMATCH
+            params.Put(w!("Timeout"), 0, &VARIANT::from(1i32), 0).ok()?;
             params.Put(w!("Brightness"), 0, &VARIANT::from(pct.min(100)), 0).ok()?;
             svc.ExecMethod(&path, &BSTR::from("WmiSetBrightness"), WBEM_GENERIC_FLAG_TYPE(0), None, &params, None, None).ok()?;
         }
