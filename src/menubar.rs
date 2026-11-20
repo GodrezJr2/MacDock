@@ -75,6 +75,7 @@ pub enum Extra {
     Battery,
     Wifi,
     ControlCenter,
+    Calendar,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -552,7 +553,7 @@ impl MenuBar {
     pub fn set_open_extra(&mut self, e: Option<Extra>) {
         let want = e.and_then(|e| {
             self.slots.iter().position(|s| {
-                matches!((s.item, e), (Item::Chevron, Extra::Tray) | (Item::Ai, Extra::Ai) | (Item::Battery, Extra::Battery) | (Item::Net, Extra::Wifi) | (Item::Cc, Extra::ControlCenter))
+                matches!((s.item, e), (Item::Chevron, Extra::Tray) | (Item::Ai, Extra::Ai) | (Item::Battery, Extra::Battery) | (Item::Net, Extra::Wifi) | (Item::Cc, Extra::ControlCenter) | (Item::Clock, Extra::Calendar))
             })
         });
         if want != self.open {
@@ -570,6 +571,7 @@ impl MenuBar {
             Extra::Battery => Item::Battery,
             Extra::Wifi => Item::Net,
             Extra::ControlCenter => Item::Cc,
+            Extra::Calendar => Item::Clock,
         };
         self.slots.iter().find(|s| s.item == item).map(|s| (self.px(s.x), self.px(s.x + s.w)))
     }
@@ -598,7 +600,7 @@ impl MenuBar {
             Item::Net => return Some(BarAct::Flyout(Extra::Wifi, l, r)),
             Item::Cc => return Some(BarAct::Flyout(Extra::ControlCenter, l, r)),
             Item::Search => key(&[VK_LWIN, b'S']),
-            Item::Clock => key(&[VK_LWIN, b'N']),
+            Item::Clock => return Some(BarAct::Flyout(Extra::Calendar, l, r)),
         }
         None
     }

@@ -12,6 +12,7 @@ mod ai_usage;
 mod claude_oauth;
 mod fly_ai;
 mod fly_battery;
+mod fly_cal;
 mod fly_cc;
 mod fly_tray;
 mod fly_wifi;
@@ -170,6 +171,7 @@ impl App {
             menubar::Extra::ControlCenter => Box::new(fly_cc::ControlCenter::new()),
             menubar::Extra::Tray => Box::new(fly_tray::TrayFly::new()),
             menubar::Extra::Ai => Box::new(fly_ai::AiFly::new()),
+            menubar::Extra::Calendar => Box::new(fly_cal::CalFly::new()),
         };
         let Some(b) = self.bar.as_mut() else { return };
         b.set_open_extra(Some(kind));
