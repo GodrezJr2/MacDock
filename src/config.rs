@@ -25,6 +25,12 @@ pub struct Config {
     pub claude_usage_oauth: bool,
     /// Dock item key → image or exe the user picked as its icon (right-click → Change Icon…).
     pub icon_overrides: Map<String, Value>,
+    /// Up to 3 apps that ran unpinned and quit, newest first, shown after a divider like macOS
+    /// ({Key, Launch, Exe, Aumid, Name}).
+    pub recent: Vec<Value>,
+    pub show_recents: bool,
+    /// A Downloads folder item before the Trash; click lists the newest files.
+    pub downloads_stack: bool,
     /// Keys we don't know (written by a newer build) survive a save.
     extra: Map<String, Value>,
 }
@@ -65,6 +71,9 @@ impl Default for Config {
             claude_limit_5h: None,
             claude_usage_oauth: false,
             icon_overrides: Map::new(),
+            recent: Vec::new(),
+            show_recents: true,
+            downloads_stack: true,
             extra: Map::new(),
         }
     }
@@ -91,6 +100,11 @@ impl Config {
         b("TrayIcons", &mut c.tray_icons);
         b("AiUsage", &mut c.ai_usage);
         b("ClaudeUsageOAuth", &mut c.claude_usage_oauth);
+        b("ShowRecents", &mut c.show_recents);
+        b("DownloadsStack", &mut c.downloads_stack);
+        if let Some(Value::Array(r)) = v.remove("Recent") {
+            c.recent = r.into_iter().filter(|x| x.get("Key").and_then(|k| k.as_str()).is_some()).collect();
+        }
         c.claude_limit_5h = v.remove("ClaudeLimit5h").and_then(|x| x.as_u64()).filter(|x| *x > 0);
         if let Some(Value::Object(o)) = v.remove("IconOverrides") {
             c.icon_overrides = o;
@@ -106,6 +120,11 @@ impl Config {
         }
         c.extra = v;
         c
+    }
+
+    /// A string setting this build has no field for (read-only, kept as it is on save).
+    pub fn extra_str(&self, key: &str) -> Option<String> {
+        self.extra.get(key).and_then(|v| v.as_str()).map(String::from)
     }
 
     pub fn save(&self) {
@@ -125,6 +144,9 @@ impl Config {
             "ClaudeLimit5h": self.claude_limit_5h,
             "ClaudeUsageOAuth": self.claude_usage_oauth,
             "IconOverrides": self.icon_overrides,
+            "Recent": self.recent,
+            "ShowRecents": self.show_recents,
+            "DownloadsStack": self.downloads_stack,
         });
         if let Value::Object(f) = fields {
             m.extend(f);

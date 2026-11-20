@@ -163,6 +163,8 @@ struct Item {
     aumid: Option<String>,
     exe: Option<String>,
     trash: bool,
+    stack: bool,       // the Downloads stack
+    sep_before: bool,  // a divider goes before this item
     icon: Option<Rc<Pixmap>>,
     wins: Vec<AppWindow>,
     // animation state, DIPs
@@ -186,7 +188,7 @@ struct Item {
 impl Item {
     fn new(key: String, name: String, icon: Option<Rc<Pixmap>>, presence: f64) -> Item {
         Item {
-            key, name, launch: None, aumid: None, exe: None, trash: false, icon, wins: Vec::new(),
+            key, name, launch: None, aumid: None, exe: None, trash: false, stack: false, sep_before: false, icon, wins: Vec::new(),
             scale: 1.0, presence, leaving: false, x: 0.0, size: 0.0, bounce_t: 0.0,
             launching: false, launch_started: Instant::now(), wins_at_launch: 0,
             attention: false, attention_bounce: false, attention_started: Instant::now(),
@@ -272,7 +274,8 @@ pub struct Dock {
     hovered: Option<usize>,
     plate_left: f64,
     plate_w: f64,
-    sep_x: f64,
+    seps: Vec<f64>,
+    running_now: HashMap<String, serde_json::Value>, // unpinned apps running at the last refresh
     clock: Instant,
     last_t: f64,
     pub awake: bool,
@@ -325,7 +328,7 @@ impl Dock {
             hwnd, cfg, shell: Shell::default(), dpi, screen_w, screen_h, fit_b: f64::MAX,
             win_w: 1.0, win_h: 1.0, items: Vec::new(), icons: HashMap::new(), surface: None, drawn: Vec::new(), frost: None,
             label: None, label_alpha: 0.0, label_at: (0.0, 0.0, 0.0, 0.0), hovered: None, plate_left: 0.0,
-            plate_w: 0.0, sep_x: 0.0, clock: now, last_t: 0.0, awake: false, hidden: false,
+            plate_w: 0.0, seps: Vec::new(), running_now: HashMap::new(), clock: now, last_t: 0.0, awake: false, hidden: false,
             sig: String::new(), refreshes: 0, appbar: false,
             hide: 0.0, peek_until: now, last_near: now,
             pressed: None, press_pt: (0.0, 0.0), dragging: false, drag_out: false, drag_x: 0.0,
@@ -483,6 +486,8 @@ impl Dock {
             let it = &self.items[i];
             let icon = if it.trash {
                 shell::icon(TRASH, px).map(Rc::new)
+            } else if it.stack {
+                downloads_dir().and_then(|d| shell::icon(&d, px)).map(Rc::new)
             } else {
                 it.launch.clone().and_then(|src| self.app_icon(&it.key, &src, it.exe.clone().as_deref()))
             };
@@ -615,6 +620,56 @@ impl Dock {
             next.push(it);
         }
         let pinned_n = next.len();
+
+        // recent apps: an unpinned app that was running and is gone joins the front of the list
+        let mut cur: HashMap<String, serde_json::Value> = HashMap::new();
+        for w in &wins {
+            if next.iter().any(|i| i.owns(w)) {
+                continue;
+            }
+            let id = w.aumid.clone().or(w.exe.clone()).unwrap_or_else(|| w.pid.to_string());
+            let key = format!("run:{}", id.to_lowercase());
+            if cur.contains_key(&key) {
+                continue;
+            }
+            let rec = self.running_now.remove(&key).unwrap_or_else(|| {
+                let launch = match (&w.aumid, &w.exe) {
+                    (Some(a), _) => Some(format!("shell:AppsFolder\\{a}")),
+                    (None, Some(e)) => Some(e.clone()),
+                    _ => None,
+                };
+                serde_json::json!({
+                    "Key": key, "Launch": launch, "Exe": w.exe, "Aumid": w.aumid,
+                    "Name": shell::friendly_name(w.exe.as_deref(), w.aumid.as_deref(), &w.title),
+                })
+            });
+            cur.insert(key, rec);
+        }
+        let quit: Vec<serde_json::Value> = self.running_now.drain().map(|(_, r)| r).filter(|r| r["Launch"].is_string()).collect();
+        self.running_now = cur;
+        let pinned_l: Vec<String> = self.cfg.pinned.iter().map(|p| p.to_lowercase()).collect();
+        let before = self.cfg.recent.clone();
+        for r in quit {
+            self.cfg.recent.retain(|x| x["Key"] != r["Key"]);
+            self.cfg.recent.insert(0, r);
+        }
+        self.cfg.recent.retain(|x| !x["Launch"].as_str().is_some_and(|l| pinned_l.contains(&l.to_lowercase())));
+        self.cfg.recent.truncate(3);
+        if self.cfg.recent != before {
+            self.cfg.save();
+        }
+        if self.cfg.show_recents {
+            for r in self.cfg.recent.clone() {
+                let Some(key) = r["Key"].as_str().map(String::from) else { continue };
+                if next.iter().any(|i| i.key == key) {
+                    continue;
+                }
+                let mut it = old.remove(&key).unwrap_or_else(|| self.recent_item(&r));
+                it.wins.clear();
+                next.push(it);
+            }
+        }
+
         for w in wins {
             if let Some(owner) = next.iter_mut().find(|i| i.owns(&w)) {
                 owner.wins.push(w);
@@ -645,7 +700,29 @@ impl Dock {
                 self.wake();
             }
         }
+        if self.cfg.downloads_stack {
+            let dl = self.cfg.extra_str("DownloadsFolder").filter(|d| std::path::Path::new(d).is_dir()).or_else(downloads_dir);
+            if let Some(dir) = dl {
+                let mut d = old.remove("downloads").unwrap_or_else(|| {
+                    let mut d = Item::new("downloads".into(), "Downloads".into(), shell::icon(&dir, self.icon_px()).map(Rc::new), 1.0);
+                    d.stack = true;
+                    d
+                });
+                d.launch = Some(dir);
+                next.push(d);
+            }
+        }
+        // dividers: after the pinned apps (before recent / running ones) and before Downloads + Trash
+        let tail = next.len();
         next.push(trash);
+        for it in &mut next {
+            it.sep_before = false;
+        }
+        if pinned_n > 0 && pinned_n < tail {
+            next[pinned_n].sep_before = true;
+        }
+        let first_tail = if tail > 0 && next[tail - 1].stack { tail - 1 } else { tail };
+        next[first_tail].sep_before = true;
 
         for it in &mut next {
             it.leaving = false;
@@ -750,7 +827,7 @@ impl Dock {
         let fg = unsafe { GetForegroundWindow() };
         let mut changed = false;
         for it in &mut self.items {
-            if it.trash {
+            if it.trash || it.stack {
                 continue;
             }
             let mut n = it.wins.iter().map(|w| badges::from_title(&w.title)).max().unwrap_or(0);
@@ -784,7 +861,7 @@ impl Dock {
         let pid = shell::window_pid(h);
         let (exe, aumid) = self.shell.process_info(pid);
         let probe = AppWindow { hwnd: h, pid, exe, aumid, title: String::new() };
-        let Some(it) = self.items.iter_mut().find(|i| !i.leaving && !i.trash && (i.wins.iter().any(|x| x.hwnd == h) || i.owns(&probe))) else { return };
+        let Some(it) = self.items.iter_mut().find(|i| !i.leaving && !i.trash && !i.stack && (i.wins.iter().any(|x| x.hwnd == h) || i.owns(&probe))) else { return };
         if it.attention {
             return;
         }
@@ -891,6 +968,11 @@ impl Dock {
             shell::launch(TRASH);
             return None;
         }
+        if it.stack {
+            self.downloads_menu(i);
+            return None;
+        }
+        let it = &mut self.items[i];
         if !it.running() {
             let l = it.launch.clone()?;
             shell::launch(&l);
@@ -964,6 +1046,10 @@ impl Dock {
             QuitApp,
             ChangeIcon,
             ResetIcon,
+            HideStack,
+            ForgetRecent,
+            ToggleRecents,
+            ToggleStack,
         }
         let mut entries: Vec<Entry> = Vec::new();
         let mut acts: Vec<Option<Do>> = Vec::new();
@@ -976,6 +1062,9 @@ impl Dock {
             None => {
                 // the plate between icons (the divider on macOS): dock settings
                 add(Entry::item(if self.cfg.auto_hide { "Turn Hiding Off" } else { "Turn Hiding On" }), Some(Do::Hide));
+                add(Entry::Sep, None);
+                add(Entry::item("Show Recent Apps").checked(self.cfg.show_recents), Some(Do::ToggleRecents));
+                add(Entry::item("Show Downloads Stack").checked(self.cfg.downloads_stack), Some(Do::ToggleStack));
                 if !self.cfg.menu_bar {
                     add(Entry::Sep, None);
                     add(Entry::item("Quit MacDock"), Some(Do::QuitDock));
@@ -984,7 +1073,10 @@ impl Dock {
             }
             Some(i) => {
                 let it = &self.items[i];
-                if it.trash {
+                if it.stack {
+                    add(Entry::item("Open Downloads"), Some(Do::Launch));
+                    add(Entry::item("Remove from Dock"), Some(Do::HideStack));
+                } else if it.trash {
                     add(Entry::item("Open"), Some(Do::OpenTrash));
                     add(Entry::item("Empty Recycle Bin"), Some(Do::EmptyTrash));
                 } else {
@@ -997,6 +1089,9 @@ impl Dock {
                     }
                     if it.launch.is_some() {
                         add(Entry::item(if it.running() { "New Window" } else { "Open" }), Some(Do::Launch));
+                    }
+                    if !it.pinned() && !it.running() && self.cfg.recent.iter().any(|r| r["Key"] == it.key.as_str()) {
+                        add(Entry::item("Remove from Recents"), Some(Do::ForgetRecent));
                     }
                     if it.pinned() {
                         add(Entry::item("Remove from Dock"), Some(Do::Unpin));
@@ -1065,6 +1160,28 @@ impl Dock {
                     self.reload_icon(i);
                 }
             }
+            Do::ToggleRecents => {
+                self.cfg.show_recents = !self.cfg.show_recents;
+                self.cfg.save();
+                self.refresh(false);
+            }
+            Do::ToggleStack => {
+                self.cfg.downloads_stack = !self.cfg.downloads_stack;
+                self.cfg.save();
+                self.refresh(false);
+            }
+            Do::HideStack => {
+                self.cfg.downloads_stack = false;
+                self.cfg.save();
+                self.items[i].leaving = true;
+                self.refresh(false);
+            }
+            Do::ForgetRecent => {
+                let key = self.items[i].key.clone();
+                self.cfg.recent.retain(|r| r["Key"] != key.as_str());
+                self.cfg.save();
+                self.refresh(false);
+            }
             Do::ResetIcon => {
                 let key = self.items[i].key.clone();
                 self.cfg.icon_overrides.remove(&key);
@@ -1073,6 +1190,59 @@ impl Dock {
             }
         }
         None
+    }
+
+    fn recent_item(&mut self, r: &serde_json::Value) -> Item {
+        let s = |k: &str| r[k].as_str().map(String::from);
+        let key = s("Key").unwrap_or_default();
+        let launch = s("Launch").unwrap_or_default();
+        let (name, icon) = self.icons.get(&key).cloned().unwrap_or_else(|| {
+            (s("Name").unwrap_or_default(), self.app_icon(&key, &launch, s("Exe").as_deref()))
+        });
+        self.icons.insert(key.clone(), (name.clone(), icon.clone()));
+        let mut it = Item::new(key, name, icon, 0.0);
+        it.aumid = s("Aumid");
+        it.exe = s("Exe");
+        it.launch = Some(launch);
+        it
+    }
+
+    /// The Downloads stack: its newest files in a menu above the icon (macOS "List" view); click opens one.
+    fn downloads_menu(&mut self, i: usize) {
+        let Some(dir) = self.items[i].launch.clone() else { return };
+        let mut files: Vec<(std::time::SystemTime, String, String)> = std::fs::read_dir(&dir)
+            .map(|rd| rd.flatten().filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') || name.eq_ignore_ascii_case("desktop.ini") {
+                    return None;
+                }
+                let md = e.metadata().ok()?;
+                let t = md.created().or_else(|_| md.modified()).ok()?;
+                Some((t, name, e.path().to_string_lossy().into_owned()))
+            }).collect())
+            .unwrap_or_default();
+        files.sort_by(|a, b| b.0.cmp(&a.0));
+        files.truncate(15);
+        let mut entries: Vec<Entry> = files.iter().map(|f| {
+            let t: String = if f.1.chars().count() > 44 { f.1.chars().take(43).chain(Some('…')).collect() } else { f.1.clone() };
+            Entry::item(t)
+        }).collect();
+        if entries.is_empty() {
+            entries.push(Entry::item("No files").enabled(false));
+        }
+        entries.push(Entry::Sep);
+        entries.push(Entry::item("Open in Explorer"));
+        let it = &self.items[i];
+        let top = self.win_y() + self.win_h - BOTTOM_GAP - PAD - it.size + self.slide() - 6.0;
+        let anchor = Anchor::Above(((self.win_x() + it.x + it.size / 2.0) * self.dpi).round() as i32, (top * self.dpi).round() as i32);
+        let n = entries.len();
+        let chosen = menu::popup(self.hwnd, &entries, anchor, self.dpi);
+        self.wake();
+        match chosen {
+            Some(c) if c == n - 1 => shell::launch(&dir),
+            Some(c) if c < files.len() => shell::launch(&files[c].2),
+            _ => {}
+        }
     }
 
     /// Fetch item `i`'s icon again (after its override changed) and redraw.
@@ -1139,7 +1309,7 @@ impl Dock {
         let mut settled = !self.dragging && self.pressed.is_none();
         let fg = unsafe { GetForegroundWindow() };
         for it in &mut self.items {
-            if it.trash {
+            if it.sep_before {
                 x += gap + 1.0;
             }
             let center = x + b * it.presence / 2.0;
@@ -1171,10 +1341,11 @@ impl Dock {
 
         // place icons left to right
         self.hovered = None;
+        self.seps.clear();
         let mut x = self.plate_left + PAD_X;
         for (idx, it) in self.items.iter_mut().enumerate() {
-            if it.trash {
-                self.sep_x = x + gap * 0.5;
+            if it.sep_before {
+                self.seps.push(x + gap * 0.5);
                 x += gap + 1.0;
             }
             let size = b * it.scale * it.presence;
@@ -1227,7 +1398,7 @@ impl Dock {
         let f = |v: f64| v.to_bits();
         let mut k = vec![
             px.0 as u64, px.1 as u64, f(win_x), f(win_y), f(slide), f(plate_top), f(plate_bottom), f(self.plate_left),
-            f(self.plate_w), f(self.sep_x), f(self.label_alpha), f(self.label_at.0), f(self.label_at.1),
+            f(self.plate_w), f(self.seps.iter().sum::<f64>() + self.seps.len() as f64 * 1e5), f(self.label_alpha), f(self.label_at.0), f(self.label_at.1),
             self.hovered.map_or(u64::MAX, |h| h as u64),
             self.label.as_ref().map_or(0, |l| l.1.data().as_ptr() as u64),
             self.frost.as_ref().map_or(0, |p| p.data().as_ptr() as u64),
@@ -1249,7 +1420,7 @@ impl Dock {
         let (b, gap) = (self.b(), self.gap());
         let mut w = 0.0;
         for it in &self.items {
-            if it.trash {
+            if it.sep_before {
                 w += gap + 1.0;
             }
             w += (b * scale(it) + gap) * it.presence;
@@ -1350,10 +1521,12 @@ impl Dock {
                 pm.stroke_path(&rim, &paint, &hair, base, None);
             }
         }
-        if let Some(r) = Rect::from_xywh(self.sep_x as f32, pt + 11.0, 1.0, phgt - 22.0) {
-            let mut paint = Paint::default();
-            paint.set_color(white(0x70));
-            pm.fill_rect(r, &paint, base, None);
+        for &sx in &self.seps {
+            if let Some(r) = Rect::from_xywh(sx as f32, pt + 11.0, 1.0, phgt - 22.0) {
+                let mut paint = Paint::default();
+                paint.set_color(white(0x70));
+                pm.fill_rect(r, &paint, base, None);
+            }
         }
 
         // the dragged icon is drawn last so it floats over its neighbours
@@ -1520,5 +1693,21 @@ impl Dock {
             DockEv::AppBar(..) => {}
         }
         None
+    }
+}
+
+/// The user's Downloads folder (FOLDERID_Downloads, so a moved folder is found too).
+fn downloads_dir() -> Option<String> {
+    use windows::Win32::UI::Shell::{FOLDERID_Downloads, SHGetKnownFolderPath, KNOWN_FOLDER_FLAG};
+    unsafe {
+        if let Ok(p) = SHGetKnownFolderPath(&FOLDERID_Downloads, KNOWN_FOLDER_FLAG(0), None) {
+            let s = p.to_string().ok();
+            windows::Win32::System::Com::CoTaskMemFree(Some(p.0 as *const std::ffi::c_void));
+            if let Some(s) = s.filter(|s| std::path::Path::new(s).is_dir()) {
+                return Some(s);
+            }
+        }
+        let s = format!("{}\\Downloads", std::env::var("USERPROFILE").ok()?);
+        std::path::Path::new(&s).is_dir().then_some(s)
     }
 }
