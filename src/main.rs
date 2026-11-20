@@ -4,6 +4,7 @@
 
 #![windows_subsystem = "windows"]
 
+mod backdrop;
 mod badges;
 mod config;
 mod dock;

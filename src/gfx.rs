@@ -390,3 +390,67 @@ mod tests {
         assert_eq!(back.data(), &px[..]);
     }
 }
+
+/// macOS 26 "Liquid Glass" body for a rounded rect at device px (`x`, `y`, `w`, `h`, corner `r`): the wallpaper
+/// (`src`, in screen px with its top-left at screen px `src_at`) seen through it, almost sharp, bent inward
+/// within `band` px of the rim like a lens, with a light specular edge brightest along the top.
+/// `origin` is the screen position of device (0, 0). Returns the layer and where it goes.
+pub fn liquid_glass(
+    src: &Pixmap, x: f32, y: f32, w: f32, h: f32, r: f32, band: f32, origin: (f32, f32), src_at: (f32, f32),
+) -> Option<(Pixmap, i32, i32)> {
+    let (x0, y0) = (x.floor() as i32, y.floor() as i32);
+    let (pw, ph) = ((x + w).ceil() as i32 - x0, (y + h).ceil() as i32 - y0);
+    if pw <= 0 || ph <= 0 {
+        return None;
+    }
+    let mut out = Pixmap::new(pw as u32, ph as u32)?;
+    let (sw, sh) = (src.width() as i32, src.height() as i32);
+    let sd = src.data();
+    let (cx, cy, hx, hy) = (x + w / 2.0, y + h / 2.0, w / 2.0 - r, h / 2.0 - r);
+    let od = out.data_mut();
+    let px_at = |sx: i32, sy: i32| -> [f32; 4] {
+        let i = ((sy.clamp(0, sh - 1) * sw + sx.clamp(0, sw - 1)) * 4) as usize;
+        [sd[i] as f32, sd[i + 1] as f32, sd[i + 2] as f32, sd[i + 3] as f32]
+    };
+    for j in 0..ph {
+        for i in 0..pw {
+            let (px, py) = (x0 as f32 + i as f32 + 0.5, y0 as f32 + j as f32 + 0.5);
+            // signed distance to the rounded rect, and the outward normal
+            let (dx, dy) = (px - cx, py - cy);
+            let (qx, qy) = (dx.abs() - hx, dy.abs() - hy);
+            let (mx, my) = (qx.max(0.0), qy.max(0.0));
+            let outer = (mx * mx + my * my).sqrt();
+            let d = outer + qx.max(qy).min(0.0) - r;
+            if d > 0.5 {
+                continue;
+            }
+            let (mut nx, mut ny) = if outer > 0.0 { (mx / outer, my / outer) } else if qx > qy { (1.0, 0.0) } else { (0.0, 1.0) };
+            nx *= dx.signum();
+            ny *= dy.signum();
+            let depth = -d; // px inside the rim
+            // lens: near the rim, look further in (the wallpaper is pulled toward the edge and stretched)
+            let e = (1.0 - depth / band).max(0.0);
+            let pull = band * 0.9 * e * e;
+            let (scx, scy) = (origin.0 + px - nx * pull - src_at.0 - 0.5, origin.1 + py - ny * pull - src_at.1 - 0.5);
+            let (fx, fy) = (scx.floor(), scy.floor());
+            let (tx, ty) = (scx - fx, scy - fy);
+            let (ix, iy) = (fx as i32, fy as i32);
+            let (a, b, c, dd) = (px_at(ix, iy), px_at(ix + 1, iy), px_at(ix, iy + 1), px_at(ix + 1, iy + 1));
+            let mut col = [0f32; 4];
+            for k in 0..4 {
+                col[k] = (a[k] * (1.0 - tx) + b[k] * tx) * (1.0 - ty) + (c[k] * (1.0 - tx) + dd[k] * tx) * ty;
+            }
+            // specular rim: light from above, a little from the left
+            let lit = (0.35 + 0.65 * (-ny * 0.85 - nx * 0.15).max(0.0)).min(1.0);
+            let s = (1.0 - depth / (band * 0.35)).max(0.0);
+            let spec = s * s * s * lit * 150.0;
+            let cov = (0.5 - d).clamp(0.0, 1.0); // anti-aliased edge
+            let o = ((j * pw + i) * 4) as usize;
+            for k in 0..3 {
+                od[o + k] = ((col[k] + spec).min(255.0) * cov) as u8;
+            }
+            od[o + 3] = (255.0 * cov) as u8;
+        }
+    }
+    Some((out, x0, y0))
+}

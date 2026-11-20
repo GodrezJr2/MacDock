@@ -27,10 +27,11 @@ use crate::menu::{self, Anchor, Entry};
 use crate::shell::{self, eq_ic, AppWindow, Shell};
 use crate::{push, taskbar, tile, Ev};
 
-const PAD: f64 = 7.0;
+// macOS: the glass above and below a tile is ~35% of the tile (tiles fill ~88% of their box)
+const PAD: f64 = 13.0;
 const BOTTOM_GAP: f64 = 6.0;
-const RADIUS: f64 = 20.0;
-const PAD_X: f64 = PAD + 1.0;
+const RADIUS: f64 = 24.0;
+const PAD_X: f64 = 8.0;
 const CB_APPBAR: u32 = WM_APP + 1;
 const TIMER_REFRESH: usize = 1;
 const TIMER_DISPLAY: usize = 2;
@@ -63,6 +64,8 @@ pub enum DockEv {
     Wallpaper,
     Flash(isize),
     AppBar(usize, isize),
+    /// something behind the plate changed (true: windows moved; false: a window drew)
+    Backdrop(bool),
 }
 
 /// What the dock wants done by the app around it.
@@ -117,6 +120,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
         }
         WM_SETTINGCHANGE if w.0 == SPI_SETDESKWALLPAPER => ev(DockEv::Wallpaper),
         CB_APPBAR => ev(DockEv::AppBar(w.0, l.0)),
+        crate::backdrop::WM_BACKDROP => ev(DockEv::Backdrop(w.0 == 1)),
         // the session is ending and we may not get another chance: put the taskbar back now
         WM_ENDSESSION if w.0 != 0 => {
             taskbar::restore(false);
@@ -268,7 +272,10 @@ pub struct Dock {
     surface: Option<Surface>,
     drawn: Vec<u64>, // everything the last rendered frame depended on; same again = skip the frame
     frost: Option<Pixmap>,
-    light_glass: bool, // the wallpaper behind the dock is bright: dark running dots, else light ones
+    glass: Option<Pixmap>, // the wallpaper at half the screen's pixels, lightly blurred: what Liquid Glass shows
+    light_glass: bool,
+    backdrop: Option<crate::backdrop::Backdrop>, // live captures of the windows behind the plate
+    backdrop_gen: u64, // the wallpaper behind the dock is bright: dark running dots, else light ones
     label: Option<(String, Pixmap)>,
     label_alpha: f64,
     label_at: (f64, f64, f64, f64),
@@ -327,7 +334,7 @@ impl Dock {
         let now = Instant::now();
         Dock {
             hwnd, cfg, shell: Shell::default(), dpi, screen_w, screen_h, fit_b: f64::MAX,
-            win_w: 1.0, win_h: 1.0, items: Vec::new(), icons: HashMap::new(), surface: None, drawn: Vec::new(), frost: None, light_glass: false,
+            win_w: 1.0, win_h: 1.0, items: Vec::new(), icons: HashMap::new(), surface: None, drawn: Vec::new(), frost: None, glass: None, light_glass: false, backdrop: crate::backdrop::Backdrop::new(hwnd), backdrop_gen: 0,
             label: None, label_alpha: 0.0, label_at: (0.0, 0.0, 0.0, 0.0), hovered: None, plate_left: 0.0,
             plate_w: 0.0, seps: Vec::new(), running_now: HashMap::new(), clock: now, last_t: 0.0, awake: false, hidden: false,
             sig: String::new(), refreshes: 0, appbar: false,
@@ -428,6 +435,14 @@ impl Dock {
         self.cfg.auto_hide
     }
 
+    /// Change a setting owned by another part of the app (the menu bar) through the dock's config, so the
+    /// dock's next save doesn't write the old value back.
+    pub fn update_config(&mut self, f: impl FnOnce(&mut Config)) -> &Config {
+        f(&mut self.cfg);
+        self.cfg.save();
+        &self.cfg
+    }
+
     pub fn set_auto_hide(&mut self, on: bool) {
         self.cfg.auto_hide = on;
         self.cfg.save();
@@ -503,6 +518,12 @@ impl Dock {
         // 240 px wide: light enough blur that the wallpaper still reads through the glass, as on macOS
         let fh = (240.0 * self.screen_h / self.screen_w).round().max(1.0) as u32;
         self.frost = gfx::wallpaper(240, fh);
+        let gw = (self.screen_w * self.dpi / 2.0).round().max(1.0) as u32;
+        let gh = (self.screen_h * self.dpi / 2.0).round().max(1.0) as u32;
+        self.glass = gfx::wallpaper(gw, gh).map(|mut p| {
+            gfx::blur(&mut p, 1.0);
+            p
+        });
         // how bright the bottom strip (behind the plate) is decides the dot colour
         if let Some(fr) = &self.frost {
             let (fw, fh) = (fr.width() as usize, fr.height() as usize);
@@ -1410,7 +1431,7 @@ impl Dock {
         let f = |v: f64| v.to_bits();
         let mut k = vec![
             px.0 as u64, px.1 as u64, f(win_x), f(win_y), f(slide), f(plate_top), f(plate_bottom), f(self.plate_left),
-            f(self.plate_w), f(self.seps.iter().sum::<f64>() + self.seps.len() as f64 * 1e5), f(self.label_alpha), f(self.label_at.0), f(self.label_at.1),
+            f(self.plate_w), self.backdrop_gen, f(self.seps.iter().sum::<f64>() + self.seps.len() as f64 * 1e5), f(self.label_alpha), f(self.label_at.0), f(self.label_at.1),
             self.hovered.map_or(u64::MAX, |h| h as u64),
             self.label.as_ref().map_or(0, |l| l.1.data().as_ptr() as u64),
             self.frost.as_ref().map_or(0, |p| p.data().as_ptr() as u64),
@@ -1497,7 +1518,43 @@ impl Dock {
                     pm.fill_path(&p, &paint, FillRule::Winding, base, None);
                 }
             }
-            if let Some(fr) = &self.frost {
+            // what is behind the plate, in screen px: the wallpaper, then every app window there, live
+            let region = windows::Win32::Foundation::RECT {
+                left: (win_x * dpi).floor() as i32,
+                top: ((win_y + plate_top) * dpi).floor() as i32,
+                right: ((win_x + self.win_w) * dpi).ceil() as i32,
+                bottom: ((win_y + plate_bottom) * dpi).ceil() as i32,
+            };
+            let behind = self.glass.as_ref().and_then(|g| {
+                let mut comp = Pixmap::new((region.right - region.left).max(1) as u32, (region.bottom - region.top).max(1) as u32)?;
+                let (sx, sy) = ((self.screen_w * dpi) as f32 / g.width() as f32, (self.screen_h * dpi) as f32 / g.height() as f32);
+                comp.draw_pixmap(
+                    0, 0, g.as_ref(), &PixmapPaint { quality: FilterQuality::Bilinear, ..Default::default() },
+                    Transform::from_scale(sx, sy).post_translate(-region.left as f32, -region.top as f32), None,
+                );
+                if let Some(b) = self.backdrop.as_mut() {
+                    if self.hidden {
+                        b.clear();
+                    } else {
+                        if region != b.region() {
+                            b.update(region);
+                        }
+                        b.draw(region, &mut comp);
+                    }
+                }
+                gfx::blur(&mut comp, 2.0 * dpi as f32);
+                Some(comp)
+            });
+            let glass = behind.as_ref().and_then(|g| {
+                let d = dpi as f32;
+                gfx::liquid_glass(
+                    g, pl * d, (pt + slide as f32) * d, pwid * d, phgt * d, RADIUS as f32 * d, 16.0 * d,
+                    ((win_x * dpi) as f32, (win_y * dpi) as f32), (region.left as f32, region.top as f32),
+                )
+            });
+            if let Some((layer, gx, gy)) = &glass {
+                pm.draw_pixmap(*gx, *gy, layer.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+            } else if let Some(fr) = &self.frost {
                 let (fx, fy) = ((self.screen_w / fr.width() as f64) as f32, (self.screen_h / fr.height() as f64) as f32);
                 let mut paint = Paint::default();
                 paint.anti_alias = true;
@@ -1514,7 +1571,7 @@ impl Dock {
                 vec![GradientStop::new(0.0, white(a)), GradientStop::new(1.0, white(b))],
                 SpreadMode::Pad, Transform::identity(),
             );
-            if let Some(g) = grad(0x24, 0x10) {
+            if let Some(g) = grad(if glass.is_some() { 0x14 } else { 0x24 }, if glass.is_some() { 0x06 } else { 0x10 }) {
                 paint.shader = g;
                 pm.fill_path(plate, &paint, FillRule::Winding, base, None);
             }
@@ -1690,6 +1747,16 @@ impl Dock {
                 }
             }
             DockEv::Wallpaper => self.load_frost(),
+            DockEv::Backdrop(layout) => {
+                if let Some(b) = self.backdrop.as_mut() {
+                    b.handled(layout);
+                    // only repaint when the strip under the plate really changed
+                    if !self.hidden && b.update(b.region()) {
+                        self.backdrop_gen += 1;
+                        self.wake();
+                    }
+                }
+            }
             DockEv::Flash(h) => self.wants_attention(HWND(h as *mut _)),
             // Windows sends a burst while monitors come and go: settle first
             DockEv::DisplayChanged => unsafe {

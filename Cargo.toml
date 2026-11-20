@@ -60,6 +60,13 @@ features = [
     "Devices_Radios",
     "Security_Credentials",
     "Networking_Connectivity",
+    "Graphics",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
 ]
 
 [profile.release]
