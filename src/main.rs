@@ -28,6 +28,7 @@ mod sysctl;
 mod taskbar;
 mod tile;
 mod tray;
+mod widgets;
 
 use std::cell::RefCell;
 
@@ -368,11 +369,15 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
     if cfg.menu_bar && cfg.ai_usage {
         ai_usage::start(cfg.claude_limit_5h, cfg.claude_usage_oauth, || {});
     }
+    let want_widgets = cfg.desktop_widgets;
     let mut app = App { dock: Dock::new(hwnd, cfg), genie, bar, fly: None, fullscreen: false };
     if let Some(b) = app.bar.as_mut() {
         b.start(); // reserve the top strip before the dock measures the work area
     }
     app.dock.start();
+    if want_widgets {
+        widgets::start(); // after the bar and dock reserved their strips, so the work area is final
+    }
     if let Some(g) = app.genie.as_mut() {
         g.start();
     }
