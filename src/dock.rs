@@ -268,6 +268,7 @@ pub struct Dock {
     surface: Option<Surface>,
     drawn: Vec<u64>, // everything the last rendered frame depended on; same again = skip the frame
     frost: Option<Pixmap>,
+    light_glass: bool, // the wallpaper behind the dock is bright: dark running dots, else light ones
     label: Option<(String, Pixmap)>,
     label_alpha: f64,
     label_at: (f64, f64, f64, f64),
@@ -326,7 +327,7 @@ impl Dock {
         let now = Instant::now();
         Dock {
             hwnd, cfg, shell: Shell::default(), dpi, screen_w, screen_h, fit_b: f64::MAX,
-            win_w: 1.0, win_h: 1.0, items: Vec::new(), icons: HashMap::new(), surface: None, drawn: Vec::new(), frost: None,
+            win_w: 1.0, win_h: 1.0, items: Vec::new(), icons: HashMap::new(), surface: None, drawn: Vec::new(), frost: None, light_glass: false,
             label: None, label_alpha: 0.0, label_at: (0.0, 0.0, 0.0, 0.0), hovered: None, plate_left: 0.0,
             plate_w: 0.0, seps: Vec::new(), running_now: HashMap::new(), clock: now, last_t: 0.0, awake: false, hidden: false,
             sig: String::new(), refreshes: 0, appbar: false,
@@ -502,6 +503,17 @@ impl Dock {
         // 240 px wide: light enough blur that the wallpaper still reads through the glass, as on macOS
         let fh = (240.0 * self.screen_h / self.screen_w).round().max(1.0) as u32;
         self.frost = gfx::wallpaper(240, fh);
+        // how bright the bottom strip (behind the plate) is decides the dot colour
+        if let Some(fr) = &self.frost {
+            let (fw, fh) = (fr.width() as usize, fr.height() as usize);
+            let rows = ((fh as f64 * 0.08).ceil() as usize).max(1);
+            let d = fr.data();
+            let mut sum = 0.0;
+            for i in ((fh - rows) * fw..fh * fw).map(|p| p * 4) {
+                sum += 0.0722 * d[i] as f64 + 0.7152 * d[i + 1] as f64 + 0.2126 * d[i + 2] as f64;
+            }
+            self.light_glass = sum / (rows * fw) as f64 / 255.0 > 0.6;
+        }
         self.drawn.clear();
         self.wake();
     }
@@ -1573,10 +1585,15 @@ impl Dock {
             }
             let a = it.dot * it.presence;
             if a > 0.01 {
-                if let Some(c) = PathBuilder::from_circle((ix + it.size / 2.0) as f32, (plate_bottom - 3.0) as f32, 2.5) {
+                // macOS: a small light dot on dark glass, a dark one on light glass
+                if let Some(c) = PathBuilder::from_circle((ix + it.size / 2.0) as f32, (plate_bottom - 3.5) as f32, 2.2) {
                     let mut paint = Paint::default();
                     paint.anti_alias = true;
-                    paint.set_color(Color::from_rgba8(0x22, 0x1C, 0x1C, (0xD0 as f64 * a) as u8));
+                    if self.light_glass {
+                        paint.set_color(Color::from_rgba8(0x22, 0x1C, 0x1C, (0xC0 as f64 * a) as u8));
+                    } else {
+                        paint.set_color(Color::from_rgba8(0xF2, 0xF2, 0xF2, (0xE0 as f64 * a) as u8));
+                    }
                     pm.fill_path(&c, &paint, FillRule::Winding, base, None);
                 }
             }
