@@ -189,6 +189,13 @@ fn confirm(owner: HWND, q: &str) -> bool {
     }
 }
 
+fn inform(owner: HWND, msg: &str) {
+    let t = shell::wide(msg);
+    unsafe {
+        MessageBoxW(owner, windows::core::PCWSTR(t.as_ptr()), w!("MacDock"), MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
+    }
+}
+
 const RUN_KEY: windows::core::PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 
 fn at_login() -> bool {
@@ -283,6 +290,7 @@ pub struct MenuBar {
     app_name: String,
     names: HashMap<u32, String>,
     clock: String,
+    update: bool, // a newer release is out: dot on the logo, item in its menu
     battery: Option<(u8, bool, bool)>,
     net: Net,
     ticks: u32,
@@ -300,7 +308,7 @@ impl MenuBar {
             hwnd, shell: Shell::default(), dpi, screen_w: sw, screen_h: sh, appbar: false, hidden: false, tray, battery_pct,
             ai, ai_gen: u64::MAX, ai_label: String::new(), ai_pct: None, ai_live: false,
             surface: None, dark_text: false, slots: Vec::new(), hover: None, open: None, target: HWND::default(),
-            app_name: "File Explorer".into(), names: HashMap::new(), clock: clock_text(), battery: b, net: n,
+            app_name: "File Explorer".into(), names: HashMap::new(), clock: clock_text(), update: false, battery: b, net: n,
             ticks: 0, tracking: false, dirty: true, auto_hide_dock: false,
         }
     }
@@ -443,6 +451,11 @@ impl MenuBar {
         let c = clock_text();
         if c != self.clock {
             self.clock = c;
+            self.dirty = true;
+        }
+        let u = crate::update::available().is_some();
+        if u != self.update {
+            self.update = u;
             self.dirty = true;
         }
         let b = power();
@@ -680,6 +693,10 @@ impl MenuBar {
     fn system_menu(&self) -> (Vec<Entry>, Vec<Do>) {
         split(vec![
             (Entry::item("About This PC"), Do::Launch("ms-settings:about")),
+            match crate::update::available() {
+                Some((v, _)) => (Entry::item(format!("Update Available: MacDock {v}…")), Do::OpenUpdate),
+                None => (Entry::item("Check for MacDock Updates…"), Do::CheckUpdate),
+            },
             (Entry::Sep, Do::None),
             (Entry::item("System Settings…"), Do::Launch("ms-settings:")),
             (Entry::item("Microsoft Store…"), Do::Launch("ms-windows-store:")),
@@ -785,6 +802,28 @@ impl MenuBar {
             }
             Do::Login => toggle_login(),
             Do::EditSettings => shell::launch(&crate::config::path()),
+            Do::OpenUpdate => {
+                if let Some((_, url)) = crate::update::available() {
+                    shell::launch(&url);
+                }
+            }
+            Do::CheckUpdate => {
+                let cur = crate::update::CURRENT;
+                match crate::update::check() {
+                    Ok(Some((v, url))) => {
+                        if confirm(self.hwnd, &format!("MacDock {v} is available (you have {cur}).
+
+Open the download page?")) {
+                            shell::launch(&url);
+                        }
+                    }
+                    Ok(None) => inform(self.hwnd, &format!("MacDock {cur} is the latest version.")),
+                    Err(e) => inform(self.hwnd, &format!("Could not check for updates: {e}.")),
+                }
+                self.update = crate::update::available().is_some();
+                self.dirty = true;
+                self.render();
+            }
             Do::Quit => return Some(BarAct::Quit),
         }
         None
@@ -893,7 +932,18 @@ impl MenuBar {
             let cx = (s.x + PAD_X) as f32 * dpi; // content left
             let mid = H as f32 / 2.0 * dpi;
             match s.item {
-                Item::Logo => draw_logo(&mut content, cx, mid, dpi),
+                Item::Logo => {
+                    draw_logo(&mut content, cx, mid, dpi);
+                    if self.update {
+                        // update available: a small blue dot on the logo's top-right corner, like a badge
+                        if let Some(p) = tiny_skia::PathBuilder::from_circle(cx + 13.0 * dpi, mid - 6.5 * dpi, 3.2 * dpi) {
+                            let mut paint = Paint::default();
+                            paint.set_color_rgba8(0xFF, 0x84, 0x0A, 0xFF); // BGRA: #0A84FF
+                            paint.anti_alias = true;
+                            content.fill_path(&p, &paint, FillRule::Winding, Transform::identity(), None);
+                        }
+                    }
+                }
                 Item::App => self.draw_text(&mut content, &self.app_name, self.font(700), cx, mid),
                 Item::Menu(m) => self.draw_text(&mut content, m, self.font(500), cx, mid),
                 Item::Chevron => self.draw_text(&mut content, "\u{E70E}", self.glyph_font(11.0), cx, mid),
@@ -988,6 +1038,8 @@ enum Do {
     Opt(BarOpt),
     Login,
     EditSettings,
+    OpenUpdate,
+    CheckUpdate,
     Quit,
 }
 

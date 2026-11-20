@@ -28,6 +28,7 @@ mod sysctl;
 mod taskbar;
 mod tile;
 mod tray;
+mod update;
 mod widgets;
 
 use std::cell::RefCell;
@@ -378,6 +379,7 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
     if want_widgets {
         widgets::start(); // after the bar and dock reserved their strips, so the work area is final
     }
+    update::start();
     if let Some(g) = app.genie.as_mut() {
         g.start();
     }

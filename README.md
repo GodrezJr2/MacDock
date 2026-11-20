@@ -77,8 +77,12 @@ notification-area icons (Discord, Steam, …).
 
 - The app in front, in bold, with **File / Edit / View / Window / Help** menus that send the real
   shortcuts (Ctrl+S, Ctrl+Z, …) to that app
-- System menu with Automatically Hide Dock and Quit MacDock
-- Battery, Wi-Fi, search, Control Center and the clock (which opens the notification center)
+- System menu with Automatically Hide Dock, Quit MacDock and **Check for MacDock Updates…**. MacDock asks
+  GitHub for the latest release at start and every 6 hours (only `api.github.com`, nothing is downloaded by
+  itself); when a newer one is out, a blue dot sits on the logo and the menu shows **Update Available**, which
+  opens the release page
+- Battery, Wi-Fi, search, Control Center and the clock, which drops a **calendar** (month view, arrows or the
+  wheel step months, rows for the notification center and date & time settings)
 - **AI usage** for Claude Code and Codex: a ring with the limit closest to running out and the live
   burn rate in tok/s. Its flyout shows tok/s over 5 and 30 minutes, the last 24 hours, each limit with the
   points used per 5 / 30 minutes, when the current pace would hit it, and every session that burned
@@ -87,6 +91,13 @@ notification-area icons (Discord, Steam, …).
   Claude Code logs none: turn on `ClaudeUsageOAuth` to read its real 5-hour and weekly limits from Anthropic
   with Claude Code's own login (every 2 minutes, only to api.anthropic.com; MacDock never refreshes the token),
   or set `ClaudeLimit5h` for an estimate from local tokens.
+
+### Desktop widgets
+
+- Four small macOS-style widgets at the top right of the desktop: an analog clock, today's date, a battery
+  ring and CPU / memory / disk bars, on frosted Liquid Glass made from your wallpaper
+- They live under every window, like on macOS; a click opens Clock, Calendar, battery settings or Task Manager
+- Redrawn every 5 seconds, and only when a value on them changed
 
 ### It stays out of the way
 
@@ -142,6 +153,8 @@ Settings live in `%APPDATA%\MacDock\config.json`, created on first run.
 | `MenuBar` | `true` | Show the menu bar |
 | `TrayIcons` | `true` | Host notification-area icons behind the `^` item |
 | `HideTaskbar` | `true` | Hide the Windows taskbar while MacDock runs |
+| `DesktopWidgets` | `true` | Clock, date, battery and system widgets on the desktop |
+| `DownloadsStack` | `true` | Downloads folder item next to the Trash |
 | `AiUsage` | `true` | Claude Code / Codex usage item in the menu bar (shown once either has logs) |
 | `ClaudeUsageOAuth` | `false` | Read Claude's real 5-hour / weekly limits from `api.anthropic.com/api/oauth/usage` with the login in `~/.claude/.credentials.json` |
 | `ClaudeLimit5h` | `null` | Tokens per 5-hour Claude block that count as 100% (input + cache writes + output) |

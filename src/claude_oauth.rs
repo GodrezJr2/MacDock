@@ -75,7 +75,7 @@ impl Drop for H {
 }
 
 /// HTTPS GET with WinHTTP (system proxy settings, 10 s timeouts). Returns (status, body).
-fn get(host: &str, path: &str, headers: &str) -> Result<(u32, String), String> {
+pub(crate) fn get(host: &str, path: &str, headers: &str) -> Result<(u32, String), String> {
     let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
     let (host_w, path_w) = (wide(host), wide(path));
     let hdr: Vec<u16> = headers.encode_utf16().collect();
