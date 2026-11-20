@@ -23,6 +23,8 @@ pub struct Config {
     pub claude_limit_5h: Option<u64>,
     /// Ask Anthropic's usage endpoint (with Claude Code's own login) for Claude's real 5-hour / weekly limits.
     pub claude_usage_oauth: bool,
+    /// Dock item key → image or exe the user picked as its icon (right-click → Change Icon…).
+    pub icon_overrides: Map<String, Value>,
     /// Keys we don't know (written by a newer build) survive a save.
     extra: Map<String, Value>,
 }
@@ -62,6 +64,7 @@ impl Default for Config {
             ai_usage: true,
             claude_limit_5h: None,
             claude_usage_oauth: false,
+            icon_overrides: Map::new(),
             extra: Map::new(),
         }
     }
@@ -89,6 +92,9 @@ impl Config {
         b("AiUsage", &mut c.ai_usage);
         b("ClaudeUsageOAuth", &mut c.claude_usage_oauth);
         c.claude_limit_5h = v.remove("ClaudeLimit5h").and_then(|x| x.as_u64()).filter(|x| *x > 0);
+        if let Some(Value::Object(o)) = v.remove("IconOverrides") {
+            c.icon_overrides = o;
+        }
         if let Some(Value::Array(p)) = v.remove("Pinned") {
             c.pinned = p.iter().filter_map(|s| s.as_str().map(String::from)).collect();
         }
@@ -118,6 +124,7 @@ impl Config {
             "AiUsage": self.ai_usage,
             "ClaudeLimit5h": self.claude_limit_5h,
             "ClaudeUsageOAuth": self.claude_usage_oauth,
+            "IconOverrides": self.icon_overrides,
         });
         if let Value::Object(f) = fields {
             m.extend(f);

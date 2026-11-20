@@ -484,7 +484,7 @@ impl Dock {
             let icon = if it.trash {
                 shell::icon(TRASH, px).map(Rc::new)
             } else {
-                it.launch.clone().and_then(|src| self.app_icon(&src, it.exe.clone().as_deref()))
+                it.launch.clone().and_then(|src| self.app_icon(&it.key, &src, it.exe.clone().as_deref()))
             };
             self.items[i].icon = icon;
             self.items[i].badge_text = None;
@@ -520,8 +520,20 @@ impl Dock {
     // -------------------------------------------------------------- items
 
     /// The shell icon for an item, put on a squircle tile when tiles are on (fetched big, tiled at draw size).
-    fn app_icon(&self, spec: &str, exe: Option<&str>) -> Option<Rc<Pixmap>> {
+    fn app_icon(&self, key: &str, spec: &str, exe: Option<&str>) -> Option<Rc<Pixmap>> {
         let px = self.icon_px();
+        // a picked icon is drawn as it is (already shaped, e.g. a macOS-style PNG), only trimmed and fitted
+        if let Some(path) = self.cfg.icon_overrides.get(key).and_then(|v| v.as_str()) {
+            let lower = path.to_lowercase();
+            let raw = if lower.ends_with(".exe") || lower.ends_with(".dll") || lower.ends_with(".lnk") {
+                shell::icon(path, 256)
+            } else {
+                gfx::image_file(path, 256)
+            };
+            if let Some(t) = raw.and_then(|r| tile::fit(&r, px)) {
+                return Some(Rc::new(t));
+            }
+        }
         let ask = if self.cfg.icon_tiles { 256 } else { px };
         let raw = shell::icon(spec, ask).or_else(|| exe.and_then(|e| shell::icon(e, ask)))?;
         if self.cfg.icon_tiles {
@@ -558,7 +570,7 @@ impl Dock {
             if it.exe.is_some() && name.to_lowercase().ends_with(".exe") {
                 name = shell::friendly_name(it.exe.as_deref(), None, &name);
             }
-            let icon = self.app_icon(spec, it.exe.as_deref());
+            let icon = self.app_icon(&key, spec, it.exe.as_deref());
             (name, icon)
         });
         self.icons.insert(key, (name.clone(), icon.clone()));
@@ -575,7 +587,7 @@ impl Dock {
         };
         let (name, icon) = self.icons.get(&key).cloned().unwrap_or_else(|| {
             let name = shell::friendly_name(w.exe.as_deref(), w.aumid.as_deref(), &w.title);
-            let icon = self.app_icon(&src, w.exe.as_deref());
+            let icon = self.app_icon(&key, &src, w.exe.as_deref());
             (name, icon)
         });
         self.icons.insert(key.clone(), (name.clone(), icon.clone()));
@@ -950,6 +962,8 @@ impl Dock {
             Keep,
             Explorer,
             QuitApp,
+            ChangeIcon,
+            ResetIcon,
         }
         let mut entries: Vec<Entry> = Vec::new();
         let mut acts: Vec<Option<Do>> = Vec::new();
@@ -991,6 +1005,10 @@ impl Dock {
                     }
                     if it.exe.as_ref().is_some_and(|e| std::path::Path::new(e).exists()) {
                         add(Entry::item("Show in Explorer"), Some(Do::Explorer));
+                    }
+                    add(Entry::item("Change Icon…"), Some(Do::ChangeIcon));
+                    if self.cfg.icon_overrides.contains_key(&it.key) {
+                        add(Entry::item("Reset Icon"), Some(Do::ResetIcon));
                     }
                     if it.running() {
                         add(Entry::Sep, None);
@@ -1039,8 +1057,37 @@ impl Dock {
                     shell::close(w.hwnd);
                 }
             }
+            Do::ChangeIcon => {
+                if let Some(path) = shell::pick_icon_file(self.hwnd) {
+                    let key = self.items[i].key.clone();
+                    self.cfg.icon_overrides.insert(key, path.into());
+                    self.cfg.save();
+                    self.reload_icon(i);
+                }
+            }
+            Do::ResetIcon => {
+                let key = self.items[i].key.clone();
+                self.cfg.icon_overrides.remove(&key);
+                self.cfg.save();
+                self.reload_icon(i);
+            }
         }
         None
+    }
+
+    /// Fetch item `i`'s icon again (after its override changed) and redraw.
+    fn reload_icon(&mut self, i: usize) {
+        let it = &self.items[i];
+        let key = it.key.clone();
+        let spec = it.launch.clone().or_else(|| it.exe.clone()).unwrap_or_default();
+        let exe = it.exe.clone();
+        let icon = self.app_icon(&key, &spec, exe.as_deref());
+        if let Some(e) = self.icons.get_mut(&key) {
+            e.1 = icon.clone();
+        }
+        self.items[i].icon = icon;
+        self.drawn.clear();
+        self.wake();
     }
 
     // -------------------------------------------------------------- frame

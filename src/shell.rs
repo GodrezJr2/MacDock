@@ -481,3 +481,26 @@ pub fn window_pid(h: HWND) -> u32 {
     unsafe { GetWindowThreadProcessId(h, Some(&mut pid)) };
     pid
 }
+
+/// "Change Icon…": an Open dialog for an image (PNG, ICO, JPG) or an exe / dll / shortcut to take the icon from.
+pub fn pick_icon_file(owner: HWND) -> Option<String> {
+    use windows::core::w;
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+    use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+    use windows::Win32::UI::Shell::{FileOpenDialog, IFileOpenDialog, SIGDN_FILESYSPATH};
+    unsafe {
+        let d: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let types = [
+            COMDLG_FILTERSPEC { pszName: w!("Icons and images"), pszSpec: w!("*.png;*.ico;*.jpg;*.jpeg;*.bmp;*.exe;*.dll;*.lnk") },
+            COMDLG_FILTERSPEC { pszName: w!("All files"), pszSpec: w!("*.*") },
+        ];
+        d.SetFileTypes(&types).ok()?;
+        d.SetTitle(w!("Choose an icon")).ok()?;
+        d.Show(owner).ok()?;
+        let item = d.GetResult().ok()?;
+        let p = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let s = p.to_string().ok();
+        CoTaskMemFree(Some(p.0 as *const c_void));
+        s
+    }
+}
