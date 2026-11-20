@@ -1,0 +1,17 @@
+name: mirror release
+
+# A v* tag reaches Gitea with the same push that starts the GitHub Actions build (.github/workflows/release.yml).
+# This job runs on the homeservergs act_runner (label "homeserver", host mode), waits for that GitHub release and
+# copies its notes, macdock.exe and checksum into a Gitea release. Nothing is built here.
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  mirror:
+    runs-on: homeserver
+    steps:
+      - name: Mirror the GitHub release
+        run: |
+          git_url="http://127.0.0.1:3030/jay/MacDock/raw/tag/${GITHUB_REF_NAME}/tools/mirror-release.sh"
+          curl -fsSL -H "Authorization: token $(cat ~/.gitea_token)" "$git_url" | bash -s -- "${GITHUB_REF_NAME}"
