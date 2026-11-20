@@ -1558,14 +1558,21 @@ impl Dock {
 
         let mut has_glass = false;
         if let Some(plate) = &plate {
-            // soft drop shadow: stacked, growing, faint pills (cheap stand-in for a blur, redrawn every frame)
+            // soft drop shadow: stacked, growing, faint pills (cheap stand-in for a blur, redrawn every frame).
+            // Only the ring outside the plate is filled: the glass covers the rest.
             for i in 1..=6 {
                 let g = i as f32 * 1.0;
-                if let Some(p) = gfx::rrect(pl - g, pt - g + 1.5, pwid + g * 2.0, phgt + g * 2.0, RADIUS as f32 + g) {
+                let ring = gfx::rrect(pl - g, pt - g + 1.5, pwid + g * 2.0, phgt + g * 2.0, RADIUS as f32 + g).map(|outer| {
+                    let mut pb = PathBuilder::new();
+                    pb.push_path(&outer);
+                    pb.push_path(plate);
+                    pb.finish()
+                });
+                if let Some(p) = ring.flatten() {
                     let mut paint = Paint::default();
                     paint.anti_alias = true;
                     paint.set_color(Color::from_rgba8(0, 0, 0, 0x03));
-                    pm.fill_path(&p, &paint, FillRule::Winding, base, None);
+                    pm.fill_path(&p, &paint, FillRule::EvenOdd, base, None);
                 }
             }
             // what is behind the plate, in screen px: the wallpaper, then every app window there, live
@@ -1619,11 +1626,15 @@ impl Dock {
                         g, pl * d, (pt + slide as f32) * d, pwid * d, phgt * d, RADIUS as f32 * d, 16.0 * d,
                         ((win_x * dpi) as f32, (win_y * dpi) as f32), (region.left as f32, region.top as f32),
                     )
-                }).map(|(p, x, y)| (gkey, p, x, y));
+                }).map(|(mut p, x, y)| {
+                    // the plate's white tint, baked into the cached layer instead of a gradient fill per frame
+                    gfx::white_wash(&mut p, (pt + slide as f32) * d - y as f32, phgt * d, 0x14, 0x06);
+                    (gkey, p, x, y)
+                });
             }
             let glass = self.glass_layer.as_ref();
             if let Some((_, layer, gx, gy)) = glass {
-                pm.draw_pixmap(*gx, *gy, layer.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+                gfx::blit_over(&mut pm, layer, *gx, *gy);
             } else if let Some(fr) = &self.frost {
                 let (fx, fy) = ((self.screen_w / fr.width() as f64) as f32, (self.screen_h / fr.height() as f64) as f32);
                 let mut paint = Paint::default();
@@ -1649,7 +1660,7 @@ impl Dock {
                 vec![GradientStop::new(0.0, white(a)), GradientStop::new(1.0, white(b))],
                 SpreadMode::Pad, Transform::identity(),
             );
-            if let Some(g) = grad(if has_glass { 0x14 } else { 0x24 }, if has_glass { 0x06 } else { 0x10 }) {
+            if let (false, Some(g)) = (has_glass, grad(0x24, 0x10)) {
                 paint.shader = g;
                 pm.fill_path(plate, &paint, FillRule::Winding, base, None);
             }
@@ -1715,7 +1726,7 @@ impl Dock {
             if let Some(ic) = &it.icon {
                 let s = (it.size / ic.width() as f64) as f32;
                 let tf = base.pre_translate(ix as f32, iy as f32).pre_scale(s, s);
-                let pp = PixmapPaint { opacity: opacity as f32, quality: FilterQuality::Bicubic, ..Default::default() };
+                let pp = PixmapPaint { opacity: opacity as f32, quality: FilterQuality::Bilinear, ..Default::default() };
                 pm.draw_pixmap(0, 0, ic.as_ref().as_ref(), &pp, tf, None);
             }
             let a = it.dot * it.presence;

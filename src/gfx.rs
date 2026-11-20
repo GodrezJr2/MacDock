@@ -252,6 +252,50 @@ pub fn shadow(path: &Path, radius: f32, rgba: (u8, u8, u8, u8)) -> Option<(Pixma
 }
 
 /// Three box blurs ≈ a gaussian with sigma ≈ radius / 2. Works on premultiplied data, all four channels.
+/// `src` over `dst` at (x, y), premultiplied; opaque pixels are copied straight.
+pub fn blit_over(dst: &mut tiny_skia::PixmapMut, src: &Pixmap, x: i32, y: i32) {
+    let (dw, dh, sw, sh) = (dst.width() as i32, dst.height() as i32, src.width() as i32, src.height() as i32);
+    let (x0, x1) = (x.max(0), (x + sw).min(dw));
+    if x0 >= x1 {
+        return;
+    }
+    let sd = src.data();
+    let dd = dst.data_mut();
+    for sy in 0..sh {
+        let ty = y + sy;
+        if ty < 0 || ty >= dh {
+            continue;
+        }
+        let s = &sd[((sy * sw + (x0 - x)) * 4) as usize..((sy * sw + (x1 - x)) * 4) as usize];
+        let d = &mut dd[((ty * dw + x0) * 4) as usize..((ty * dw + x1) * 4) as usize];
+        over_sparse(d, s);
+    }
+}
+
+/// A white wash over `pm`, fading from alpha `a0` at device row `top` to `a1` at `top + h` (rows relative to
+/// the pixmap), only where `pm` is already covered, so the shape's edge stays put.
+pub fn white_wash(pm: &mut Pixmap, top: f32, h: f32, a0: u8, a1: u8) {
+    let w = pm.width() as usize;
+    for (row, line) in pm.data_mut().chunks_exact_mut(w * 4).enumerate() {
+        let u = ((row as f32 + 0.5 - top) / h.max(1.0)).clamp(0.0, 1.0);
+        let a = (a0 as f32 + (a1 as f32 - a0 as f32) * u).round() as u32;
+        if a == 0 {
+            continue;
+        }
+        for px in line.chunks_exact_mut(4) {
+            let cov = px[3] as u32;
+            if cov == 0 {
+                continue;
+            }
+            let s = a * cov / 255; // white at alpha a, clipped to this pixel's coverage
+            let k = 255 - s;
+            for c in &mut px[..3] {
+                *c = (s + (*c as u32 * k + 127) / 255).min(cov) as u8;
+            }
+        }
+    }
+}
+
 /// `src` over `dst` (same size, premultiplied): fast when `src` is mostly empty, like the layer of icons over the dock glass.
 pub fn over_sparse(dst: &mut [u8], src: &[u8]) {
     for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
