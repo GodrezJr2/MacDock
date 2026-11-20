@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use tiny_skia::Pixmap;
 use windows::core::{s, w, Interface, PCSTR};
-use windows::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::*;
 use windows::Win32::Graphics::Direct3D11::*;
@@ -97,13 +97,8 @@ impl Gpu {
     }
 
     unsafe fn build(hwnd: HWND) -> windows::core::Result<Gpu> {
-        let mut dev = None;
-        let mut ctx = None;
-        D3D11CreateDevice(
-            None, D3D_DRIVER_TYPE_HARDWARE, HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            Some(&[D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1]), D3D11_SDK_VERSION, Some(&mut dev), None, Some(&mut ctx),
-        )?;
-        let (dev, ctx) = (dev.unwrap(), ctx.unwrap());
+        // the process-wide device the glass backdrop uses too: a second one cost ~50 MB and ~50 driver threads
+        let (dev, ctx) = crate::gfx::d3d().ok_or_else(|| windows::core::Error::from(windows::Win32::Foundation::E_FAIL))?;
         let dxgi: IDXGIDevice = dev.cast()?;
         let factory: IDXGIFactory2 = dxgi.GetAdapter()?.GetParent()?;
         let desc = DXGI_SWAP_CHAIN_DESC1 {

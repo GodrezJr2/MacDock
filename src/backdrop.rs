@@ -14,8 +14,7 @@ use windows::Foundation::TypedEventHandler;
 use windows::Graphics::Capture::{Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession};
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
-use windows::Win32::Foundation::{BOOL, HMODULE, HWND, LPARAM, RECT, WPARAM};
-use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -155,16 +154,7 @@ impl Backdrop {
             if !GraphicsCaptureSession::IsSupported().ok()? {
                 return None;
             }
-            let (mut dev, mut ctx) = (None, None);
-            D3D11CreateDevice(
-                None, D3D_DRIVER_TYPE_HARDWARE, HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION,
-                Some(&mut dev), None, Some(&mut ctx),
-            )
-            .ok()?;
-            let (dev, ctx): (ID3D11Device, ID3D11DeviceContext) = (dev?, ctx?);
-            if let Ok(mt) = ctx.cast::<ID3D11Multithread>() {
-                let _ = mt.SetMultithreadProtected(true);
-            }
+            let (dev, ctx) = crate::gfx::d3d()?; // shared with the GPU genie, multithread-protected
             let rt: IDirect3DDevice = CreateDirect3D11DeviceFromDXGIDevice(&dev.cast::<IDXGIDevice>().ok()?).ok()?.cast().ok()?;
             NOTIFY.set(notify.0 as isize);
             // window opened, closed, moved, raised, minimized or restored

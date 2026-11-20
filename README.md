@@ -3,7 +3,7 @@
 # MacDock
 
 **A macOS-style dock and menu bar for Windows 11.**
-Written from scratch in Rust on plain Win32. No Windhawk, no Explorer patching, about 13 MB of memory.
+Written from scratch in Rust on plain Win32. No Windhawk, no Explorer patching.
 
 <img src="docs/film.webp" alt="MacDock running on Windows 11: the dock magnifies under the pointer, a window minimizes into its icon with the genie effect, then the battery and Control Center flyouts open from the menu bar" width="100%">
 
@@ -104,8 +104,11 @@ notification-area icons (Discord, Steam, …).
 - Dock and menu bar are real **AppBars**: maximized windows stop at them.
 - A fullscreen game hides both, puts the render loop to sleep and removes the mouse hook. On the
   author's laptop that measured 0.00% CPU and a 17 MB working set while a game was in front.
-- Idle on the desktop: 0% CPU and about 13 MB private memory, because nothing redraws unless something
-  is moving (see [Rust vs the old C# build](#rust-vs-the-old-c-build)).
+- Idle on the desktop: about 0.4% of one core (4 ms CPU per second) and
+  about 80 MB private memory. Most of that memory is the one Direct3D device the live Liquid Glass and the
+  GPU genie share (the Intel iGPU driver alone reserves ~50 MB for it); the 13 MB of earlier versions had no
+  live glass. Nothing redraws unless something is moving (see
+  [Rust vs the old C# build](#rust-vs-the-old-c-build)).
 
 ## Install
 

@@ -7,7 +7,7 @@ use std::mem::size_of;
 use std::ptr::null_mut;
 
 use tiny_skia::{IntSize, Path, PathBuilder, Pixmap, PixmapMut};
-use windows::core::{PCWSTR, w};
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{COLORREF, GENERIC_READ, HWND, POINT, SIZE};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::Graphics::Imaging::*;
@@ -604,4 +604,43 @@ pub fn liquid_glass(
         }
     }
     Some((out, x0, y0))
+}
+
+thread_local! {
+    static D3D: std::cell::RefCell<Option<(windows::Win32::Graphics::Direct3D11::ID3D11Device, windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The one D3D11 device the process uses (live glass backdrop and GPU genie). Each device costs the Intel iGPU
+/// driver ~50 MB and ~50 worker threads, so two of them doubled the idle footprint. BGRA support (DirectComposition
+/// swap chains) and multithread protection (capture frames arrive on a pool thread) are on. Recreated after a
+/// device loss. Call from the UI thread.
+pub fn d3d() -> Option<(windows::Win32::Graphics::Direct3D11::ID3D11Device, windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext)> {
+    use windows::core::Interface;
+    use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0};
+    use windows::Win32::Graphics::Direct3D11::*;
+    D3D.with(|c| {
+        let mut c = c.borrow_mut();
+        if let Some((dev, _)) = c.as_ref() {
+            if unsafe { dev.GetDeviceRemovedReason() }.is_err() {
+                *c = None;
+            }
+        }
+        if c.is_none() {
+            let (mut dev, mut ctx) = (None, None);
+            unsafe {
+                D3D11CreateDevice(
+                    None, D3D_DRIVER_TYPE_HARDWARE, windows::Win32::Foundation::HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                    Some(&[D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1]), D3D11_SDK_VERSION, Some(&mut dev), None, Some(&mut ctx),
+                )
+                .ok()?;
+            }
+            let (dev, ctx): (ID3D11Device, ID3D11DeviceContext) = (dev?, ctx?);
+            if let Ok(mt) = ctx.cast::<ID3D11Multithread>() {
+                let _ = unsafe { mt.SetMultithreadProtected(true) };
+            }
+            *c = Some((dev, ctx));
+        }
+        c.clone()
+    })
 }
