@@ -494,8 +494,9 @@ impl Dock {
     }
 
     fn load_frost(&mut self) {
-        let fh = (96.0 * self.screen_h / self.screen_w).round().max(1.0) as u32;
-        self.frost = gfx::wallpaper(96, fh);
+        // 240 px wide: light enough blur that the wallpaper still reads through the glass, as on macOS
+        let fh = (240.0 * self.screen_h / self.screen_w).round().max(1.0) as u32;
+        self.frost = gfx::wallpaper(240, fh);
         self.drawn.clear();
         self.wake();
     }
@@ -1256,6 +1257,16 @@ impl Dock {
         let white = |a: u8| Color::from_rgba8(255, 255, 255, a);
 
         if let Some(plate) = &plate {
+            // soft drop shadow: stacked, growing, faint pills (cheap stand-in for a blur, redrawn every frame)
+            for i in 1..=6 {
+                let g = i as f32 * 1.0;
+                if let Some(p) = gfx::rrect(pl - g, pt - g + 1.5, pwid + g * 2.0, phgt + g * 2.0, RADIUS as f32 + g) {
+                    let mut paint = Paint::default();
+                    paint.anti_alias = true;
+                    paint.set_color(Color::from_rgba8(0, 0, 0, 0x03));
+                    pm.fill_path(&p, &paint, FillRule::Winding, base, None);
+                }
+            }
             if let Some(fr) = &self.frost {
                 let (fx, fy) = ((self.screen_w / fr.width() as f64) as f32, (self.screen_h / fr.height() as f64) as f32);
                 let mut paint = Paint::default();
@@ -1273,13 +1284,23 @@ impl Dock {
                 vec![GradientStop::new(0.0, white(a)), GradientStop::new(1.0, white(b))],
                 SpreadMode::Pad, Transform::identity(),
             );
-            if let Some(g) = grad(0x3A, 0x1C) {
+            if let Some(g) = grad(0x24, 0x10) {
                 paint.shader = g;
                 pm.fill_path(plate, &paint, FillRule::Winding, base, None);
             }
-            if let (Some(g), Some(edge)) = (grad(0x9A, 0x30), gfx::rrect(pl + 0.5, pt + 0.5, pwid - 1.0, phgt - 1.0, RADIUS as f32 - 0.5)) {
+            // macOS edge: a faint dark outline for separation, and a thin light rim just inside it,
+            // brightest along the top like light catching glass
+            let hair = Stroke { width: 1.0 / dpi as f32, ..Default::default() };
+            if let Some(edge) = gfx::rrect(pl, pt, pwid, phgt, RADIUS as f32) {
+                let mut dark = Paint::default();
+                dark.anti_alias = true;
+                dark.set_color(Color::from_rgba8(0, 0, 0, 0x38));
+                pm.stroke_path(&edge, &dark, &hair, base, None);
+            }
+            let inset = 1.0 / dpi as f32;
+            if let (Some(g), Some(rim)) = (grad(0x66, 0x14), gfx::rrect(pl + inset, pt + inset, pwid - inset * 2.0, phgt - inset * 2.0, RADIUS as f32 - inset)) {
                 paint.shader = g;
-                pm.stroke_path(&edge, &paint, &Stroke { width: 1.0, ..Default::default() }, base, None);
+                pm.stroke_path(&rim, &paint, &hair, base, None);
             }
         }
         if let Some(r) = Rect::from_xywh(self.sep_x as f32, pt + 11.0, 1.0, phgt - 22.0) {
