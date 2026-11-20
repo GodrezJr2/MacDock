@@ -37,6 +37,10 @@ const TIMER_REFRESH: usize = 1;
 const TIMER_DISPLAY: usize = 2;
 const TIMER_EDGE: usize = 3;
 const TIMER_TOASTS: usize = 4;
+const TIMER_BACKDROP: usize = 5;
+const TIMER_BACKDROP_RECHECK: usize = 6;
+/// changes behind the plate (video, a window dragged) repaint at most this often; hover and magnify stay at full rate
+const BACKDROP_FPS: f64 = 30.0;
 const ABN_POSCHANGED: usize = 1;
 const ABN_FULLSCREENAPP: usize = 2;
 const HSHELL_FLASH: usize = 0x8006;
@@ -66,6 +70,9 @@ pub enum DockEv {
     AppBar(usize, isize),
     /// something behind the plate changed (true: windows moved; false: a window drew)
     Backdrop(bool),
+    BackdropTick,
+    /// look again shortly after windows changed: a window opening is still cloaked during its animation
+    BackdropRecheck,
 }
 
 /// What the dock wants done by the app around it.
@@ -86,6 +93,7 @@ thread_local! {
 fn fresh_used(layer: &Option<([u32; 6], Pixmap, i32, i32)>, key: &[u32; 6]) -> bool {
     layer.as_ref().is_some_and(|l| &l.0 == key)
 }
+
 
 fn ev(e: DockEv) {
     push(Ev::Dock(e));
@@ -114,6 +122,14 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
             TIMER_DISPLAY => ev(DockEv::DisplaySettled),
             TIMER_EDGE => ev(DockEv::Edge),
             TIMER_TOASTS => ev(DockEv::Toasts),
+            TIMER_BACKDROP_RECHECK => {
+                let _ = KillTimer(h, TIMER_BACKDROP_RECHECK);
+                ev(DockEv::BackdropRecheck);
+            }
+            TIMER_BACKDROP => {
+                let _ = KillTimer(h, TIMER_BACKDROP);
+                ev(DockEv::BackdropTick);
+            }
             _ => {}
         },
         WM_DISPLAYCHANGE => ev(DockEv::DisplayChanged),
@@ -280,6 +296,11 @@ pub struct Dock {
     light_glass: bool,
     backdrop: Option<crate::backdrop::Backdrop>, // live captures of the windows behind the plate
     backdrop_gen: u64,
+    bd_due: (bool, bool), // backdrop events waiting for the next allowed repaint: (frames, layout)
+    bd_last: f64,
+    bd_timer: bool,
+    wall_strip: Option<(windows::Win32::Foundation::RECT, usize, Pixmap)>, // the wallpaper under the plate, scaled once
+    over: Option<Pixmap>, // icons, rim, labels: everything drawn over the glass
     glass_layer: Option<([u32; 6], Pixmap, i32, i32)>, // the finished glass, kept while the plate and what is behind stay put
     behind: Option<(windows::Win32::Foundation::RECT, u64, usize, Pixmap)>, // the composed backdrop, kept while nothing behind changes // the wallpaper behind the dock is bright: dark running dots, else light ones
     label: Option<(String, Pixmap)>,
@@ -340,7 +361,7 @@ impl Dock {
         let now = Instant::now();
         Dock {
             hwnd, cfg, shell: Shell::default(), dpi, screen_w, screen_h, fit_b: f64::MAX,
-            win_w: 1.0, win_h: 1.0, items: Vec::new(), icons: HashMap::new(), surface: None, drawn: Vec::new(), frost: None, glass: None, light_glass: false, backdrop: crate::backdrop::Backdrop::new(hwnd), backdrop_gen: 0, behind: None, glass_layer: None,
+            win_w: 1.0, win_h: 1.0, items: Vec::new(), icons: HashMap::new(), surface: None, drawn: Vec::new(), frost: None, glass: None, light_glass: false, backdrop: crate::backdrop::Backdrop::new(hwnd), backdrop_gen: 0, bd_due: (false, false), bd_last: 0.0, bd_timer: false, behind: None, glass_layer: None, over: None, wall_strip: None,
             label: None, label_alpha: 0.0, label_at: (0.0, 0.0, 0.0, 0.0), hovered: None, plate_left: 0.0,
             plate_w: 0.0, seps: Vec::new(), running_now: HashMap::new(), clock: now, last_t: 0.0, awake: false, hidden: false,
             sig: String::new(), refreshes: 0, appbar: false,
@@ -1231,6 +1252,25 @@ impl Dock {
         None
     }
 
+    /// Take in what changed behind the plate; repaint only when the strip under it really changed.
+    fn backdrop_tick(&mut self) {
+        let (frames, layout) = std::mem::take(&mut self.bd_due);
+        self.bd_last = self.clock.elapsed().as_secs_f64();
+        let Some(b) = self.backdrop.as_mut() else { return };
+        if frames {
+            b.handled(false);
+        }
+        if layout {
+            b.handled(true);
+            unsafe { SetTimer(self.hwnd, TIMER_BACKDROP_RECHECK, 400, None) };
+        }
+        let ch = !self.hidden && b.update(b.region());
+        if ch {
+            self.backdrop_gen += 1;
+            self.wake();
+        }
+    }
+
     fn recent_item(&mut self, r: &serde_json::Value) -> Item {
         let s = |k: &str| r[k].as_str().map(String::from);
         let key = s("Key").unwrap_or_default();
@@ -1437,7 +1477,7 @@ impl Dock {
         let f = |v: f64| v.to_bits();
         let mut k = vec![
             px.0 as u64, px.1 as u64, f(win_x), f(win_y), f(slide), f(plate_top), f(plate_bottom), f(self.plate_left),
-            f(self.plate_w), self.backdrop_gen, f(self.seps.iter().sum::<f64>() + self.seps.len() as f64 * 1e5), f(self.label_alpha), f(self.label_at.0), f(self.label_at.1),
+            f(self.plate_w), f(self.seps.iter().sum::<f64>() + self.seps.len() as f64 * 1e5), f(self.label_alpha), f(self.label_at.0), f(self.label_at.1),
             self.hovered.map_or(u64::MAX, |h| h as u64),
             self.label.as_ref().map_or(0, |l| l.1.data().as_ptr() as u64),
             self.frost.as_ref().map_or(0, |p| p.data().as_ptr() as u64),
@@ -1452,6 +1492,7 @@ impl Dock {
                 it.badge_text.as_ref().map_or(0, |t| t.1.data().as_ptr() as u64),
             ]);
         }
+        k.push(self.backdrop_gen); // last: a frame differing only here redraws just the glass
         k
     }
 
@@ -1502,6 +1543,8 @@ impl Dock {
         if !self.drawn.is_empty() && key == self.drawn {
             return;
         }
+        // only what is behind the plate changed: keep the icon layer, redraw just the glass under it
+        let only_backdrop = self.over.is_some() && key.len() == self.drawn.len() && key[..key.len() - 1] == self.drawn[..key.len() - 1];
         self.drawn = key;
         let Some(surface) = self.surface.as_mut() else { return };
         let mut pm = surface.pixmap();
@@ -1513,6 +1556,7 @@ impl Dock {
         // colours are (b, g, r, a): the surface is BGRA
         let white = |a: u8| Color::from_rgba8(255, 255, 255, a);
 
+        let mut has_glass = false;
         if let Some(plate) = &plate {
             // soft drop shadow: stacked, growing, faint pills (cheap stand-in for a blur, redrawn every frame)
             for i in 1..=6 {
@@ -1538,12 +1582,16 @@ impl Dock {
                 self.behind = None;
             }
             let fresh = if cached { None } else { self.glass.as_ref().and_then(|g| {
-                let mut comp = Pixmap::new((region.right - region.left).max(1) as u32, (region.bottom - region.top).max(1) as u32)?;
-                let (sx, sy) = ((self.screen_w * dpi) as f32 / g.width() as f32, (self.screen_h * dpi) as f32 / g.height() as f32);
-                comp.draw_pixmap(
-                    0, 0, g.as_ref(), &PixmapPaint { quality: FilterQuality::Bilinear, ..Default::default() },
-                    Transform::from_scale(sx, sy).post_translate(-region.left as f32, -region.top as f32), None,
-                );
+                if self.wall_strip.as_ref().is_none_or(|w| w.0 != region || w.1 != glass_id) {
+                    let mut strip = Pixmap::new((region.right - region.left).max(1) as u32, (region.bottom - region.top).max(1) as u32)?;
+                    let (sx, sy) = ((self.screen_w * dpi) as f32 / g.width() as f32, (self.screen_h * dpi) as f32 / g.height() as f32);
+                    strip.draw_pixmap(
+                        0, 0, g.as_ref(), &PixmapPaint { quality: FilterQuality::Bilinear, ..Default::default() },
+                        Transform::from_scale(sx, sy).post_translate(-region.left as f32, -region.top as f32), None,
+                    );
+                    self.wall_strip = Some((region, glass_id, strip));
+                }
+                let mut comp = self.wall_strip.as_ref()?.2.clone();
                 if let Some(b) = self.backdrop.as_mut() {
                     if self.hidden {
                         b.clear();
@@ -1554,7 +1602,7 @@ impl Dock {
                         b.draw(region, &mut comp);
                     }
                 }
-                gfx::blur(&mut comp, 2.0 * dpi as f32);
+                gfx::soften(&mut comp);
                 Some(comp)
             }) };
             if let Some(c) = fresh {
@@ -1586,6 +1634,14 @@ impl Dock {
                 );
                 pm.fill_path(plate, &paint, FillRule::Winding, base, None);
             }
+            has_glass = glass.is_some();
+        }
+        // everything over the glass goes on its own layer, kept for frames where only the backdrop changed
+        let mut over = self.over.take().filter(|o| (o.width(), o.height()) == (pw, ph)).or_else(|| Pixmap::new(pw.max(1), ph.max(1)));
+        if let (false, Some(over)) = (only_backdrop, over.as_mut()) {
+        over.fill(Color::TRANSPARENT);
+        let mut pm = over.as_mut();
+        if let Some(plate) = &plate {
             let mut paint = Paint::default();
             paint.anti_alias = true;
             let grad = |a: u8, b: u8| LinearGradient::new(
@@ -1593,7 +1649,7 @@ impl Dock {
                 vec![GradientStop::new(0.0, white(a)), GradientStop::new(1.0, white(b))],
                 SpreadMode::Pad, Transform::identity(),
             );
-            if let Some(g) = grad(if glass.is_some() { 0x14 } else { 0x24 }, if glass.is_some() { 0x06 } else { 0x10 }) {
+            if let Some(g) = grad(if has_glass { 0x14 } else { 0x24 }, if has_glass { 0x06 } else { 0x10 }) {
                 paint.shader = g;
                 pm.fill_path(plate, &paint, FillRule::Winding, base, None);
             }
@@ -1735,6 +1791,11 @@ impl Dock {
             }
         }
 
+        }
+        if let Some(o) = &over {
+            gfx::over_sparse(pm.data_mut(), o.data());
+        }
+        self.over = over;
         surface.present(self.hwnd, (win_x * dpi).round() as i32, (win_y * dpi).round() as i32);
     }
 
@@ -1760,6 +1821,8 @@ impl Dock {
                 if !self.hidden {
                     crate::ensure_no_activate(self.hwnd);
                     self.refresh(false);
+                    // safety net for window changes no event told us about
+                    ev(DockEv::BackdropRecheck);
                 }
             }
             DockEv::Toasts => self.poll_toasts(),
@@ -1770,14 +1833,31 @@ impl Dock {
             }
             DockEv::Wallpaper => self.load_frost(),
             DockEv::Backdrop(layout) => {
+                if layout {
+                    self.bd_due.1 = true;
+                } else {
+                    self.bd_due.0 = true;
+                }
+                let wait = self.bd_last + 1.0 / BACKDROP_FPS - self.clock.elapsed().as_secs_f64();
+                if wait <= 0.0 {
+                    self.backdrop_tick();
+                } else if !self.bd_timer {
+                    // until the timer fires, the capture thread posts nothing more (its pending flag stays set)
+                    self.bd_timer = true;
+                    unsafe { SetTimer(self.hwnd, TIMER_BACKDROP, (wait * 1000.0).ceil() as u32, None) };
+                }
+            }
+            DockEv::BackdropRecheck => {
                 if let Some(b) = self.backdrop.as_mut() {
-                    b.handled(layout);
-                    // only repaint when the strip under the plate really changed
                     if !self.hidden && b.update(b.region()) {
                         self.backdrop_gen += 1;
                         self.wake();
                     }
                 }
+            }
+            DockEv::BackdropTick => {
+                self.bd_timer = false;
+                self.backdrop_tick();
             }
             DockEv::Flash(h) => self.wants_attention(HWND(h as *mut _)),
             // Windows sends a burst while monitors come and go: settle first

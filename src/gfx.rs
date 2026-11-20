@@ -252,6 +252,57 @@ pub fn shadow(path: &Path, radius: f32, rgba: (u8, u8, u8, u8)) -> Option<(Pixma
 }
 
 /// Three box blurs ≈ a gaussian with sigma ≈ radius / 2. Works on premultiplied data, all four channels.
+/// `src` over `dst` (same size, premultiplied): fast when `src` is mostly empty, like the layer of icons over the dock glass.
+pub fn over_sparse(dst: &mut [u8], src: &[u8]) {
+    for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+        let a = s[3] as u32;
+        if a == 0 {
+            continue;
+        }
+        if a == 255 {
+            d.copy_from_slice(s);
+            continue;
+        }
+        let k = 255 - a;
+        for i in 0..4 {
+            d[i] = (s[i] as u32 + (d[i] as u32 * k + 127) / 255) as u8;
+        }
+    }
+}
+
+/// A light blur (about 1 px): two [1 2 1] passes each way, in integers. Cheap enough to run on every
+/// frame of video behind the dock.
+pub fn soften(pm: &mut Pixmap) {
+    let (w, h) = (pm.width() as usize, pm.height() as usize);
+    if w < 3 || h < 3 {
+        return;
+    }
+    let data = pm.data_mut();
+    let mut tmp = vec![0u8; data.len()];
+    let row = w * 4;
+    for _ in 0..2 {
+        // horizontal: data -> tmp
+        for y in 0..h {
+            let (s, d) = (&data[y * row..][..row], &mut tmp[y * row..][..row]);
+            d[..4].copy_from_slice(&s[..4]);
+            d[row - 4..].copy_from_slice(&s[row - 4..]);
+            for i in 4..row - 4 {
+                d[i] = ((s[i - 4] as u16 + 2 * s[i] as u16 + s[i + 4] as u16 + 2) >> 2) as u8;
+            }
+        }
+        // vertical: tmp -> data
+        data[..row].copy_from_slice(&tmp[..row]);
+        data[(h - 1) * row..].copy_from_slice(&tmp[(h - 1) * row..]);
+        for y in 1..h - 1 {
+            let (a, b, c) = (&tmp[(y - 1) * row..][..row], &tmp[y * row..][..row], &tmp[(y + 1) * row..][..row]);
+            let d = &mut data[y * row..][..row];
+            for i in 0..row {
+                d[i] = ((a[i] as u16 + 2 * b[i] as u16 + c[i] as u16 + 2) >> 2) as u8;
+            }
+        }
+    }
+}
+
 pub fn blur(pm: &mut Pixmap, radius: f32) {
     let r = ((radius / 2.0) * 0.9).round().max(1.0) as usize;
     let (w, h) = (pm.width() as usize, pm.height() as usize);
