@@ -412,8 +412,64 @@ pub fn liquid_glass(
         let i = ((sy.clamp(0, sh - 1) * sw + sx.clamp(0, sw - 1)) * 4) as usize;
         [sd[i] as f32, sd[i + 1] as f32, sd[i + 2] as f32, sd[i + 3] as f32]
     };
+    // well inside the rim the lens does nothing: those spans are a straight copy of the source
+    let inner = band.max(r);
+    let (ix0, ix1) = (((x + inner) - x0 as f32).ceil().max(0.0) as i32, ((x + w - inner) - x0 as f32).floor().min(pw as f32) as i32);
+    let (iy0, iy1) = ((y + band - y0 as f32).ceil() as i32, (y + h - band - y0 as f32).floor() as i32);
+    let (offx, offy) = ((origin.0 - src_at.0).round() as i32 + x0, (origin.1 - src_at.1).round() as i32 + y0);
     for j in 0..ph {
+        let copy_row = j >= iy0 && j < iy1 && ix1 > ix0;
+        if copy_row {
+            let (sy, sx0) = (offy + j, offx + ix0);
+            if sy >= 0 && sy < sh && sx0 >= 0 && sx0 + (ix1 - ix0) <= sw {
+                let s = ((sy * sw + sx0) * 4) as usize;
+                let d = ((j * pw + ix0) * 4) as usize;
+                let n = ((ix1 - ix0) * 4) as usize;
+                od[d..d + n].copy_from_slice(&sd[s..s + n]);
+            } else {
+                for i in ix0..ix1 {
+                    let p = px_at(offx + i, sy);
+                    let d = ((j * pw + i) * 4) as usize;
+                    for k in 0..4 {
+                        od[d + k] = p[k] as u8;
+                    }
+                }
+            }
+        }
+        // straight top and bottom edges: the lens only moves rows, the same for the whole span, so blend two source rows
+        let band_row = !copy_row && ix1 > ix0 && (j < iy0 || j >= iy1);
+        if band_row {
+            let py = y0 as f32 + j as f32 + 0.5;
+            let top = py - y < y + h - py;
+            let depth = if top { py - y } else { y + h - py };
+            let cov = (0.5 + depth).clamp(0.0, 1.0);
+            if cov > 0.0 {
+                let ny: f32 = if top { -1.0 } else { 1.0 };
+                let e = (1.0 - depth / band).max(0.0);
+                let pull = band * 0.9 * e * e;
+                let scy = origin.1 + py - ny * pull - src_at.1 - 0.5;
+                let fy = scy.floor();
+                let ty = scy - fy;
+                let (sy0, sy1) = ((fy as i32).clamp(0, sh - 1), (fy as i32 + 1).clamp(0, sh - 1));
+                let lit = (0.35 + 0.65 * (-ny * 0.85).max(0.0)).min(1.0);
+                let s = (1.0 - depth / (band * 0.35)).max(0.0);
+                let spec = s * s * s * lit * 150.0;
+                let (r0, r1) = ((sy0 * sw) as usize * 4, (sy1 * sw) as usize * 4);
+                for i in ix0..ix1 {
+                    let sx = (offx + i).clamp(0, sw - 1) as usize * 4;
+                    let o = ((j * pw + i) * 4) as usize;
+                    for k in 0..3 {
+                        let (a, b) = (sd[r0 + sx + k] as f32, sd[r1 + sx + k] as f32);
+                        od[o + k] = ((a + (b - a) * ty + spec).min(255.0) * cov) as u8;
+                    }
+                    od[o + 3] = (255.0 * cov) as u8;
+                }
+            }
+        }
         for i in 0..pw {
+            if (copy_row || band_row) && i >= ix0 && i < ix1 {
+                continue;
+            }
             let (px, py) = (x0 as f32 + i as f32 + 0.5, y0 as f32 + j as f32 + 0.5);
             // signed distance to the rounded rect, and the outward normal
             let (dx, dy) = (px - cx, py - cy);

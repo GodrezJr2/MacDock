@@ -83,6 +83,10 @@ thread_local! {
     static SHELLHOOK: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
+fn fresh_used(layer: &Option<([u32; 6], Pixmap, i32, i32)>, key: &[u32; 6]) -> bool {
+    layer.as_ref().is_some_and(|l| &l.0 == key)
+}
+
 fn ev(e: DockEv) {
     push(Ev::Dock(e));
 }
@@ -275,7 +279,9 @@ pub struct Dock {
     glass: Option<Pixmap>, // the wallpaper at half the screen's pixels, lightly blurred: what Liquid Glass shows
     light_glass: bool,
     backdrop: Option<crate::backdrop::Backdrop>, // live captures of the windows behind the plate
-    backdrop_gen: u64, // the wallpaper behind the dock is bright: dark running dots, else light ones
+    backdrop_gen: u64,
+    glass_layer: Option<([u32; 6], Pixmap, i32, i32)>, // the finished glass, kept while the plate and what is behind stay put
+    behind: Option<(windows::Win32::Foundation::RECT, u64, usize, Pixmap)>, // the composed backdrop, kept while nothing behind changes // the wallpaper behind the dock is bright: dark running dots, else light ones
     label: Option<(String, Pixmap)>,
     label_alpha: f64,
     label_at: (f64, f64, f64, f64),
@@ -334,7 +340,7 @@ impl Dock {
         let now = Instant::now();
         Dock {
             hwnd, cfg, shell: Shell::default(), dpi, screen_w, screen_h, fit_b: f64::MAX,
-            win_w: 1.0, win_h: 1.0, items: Vec::new(), icons: HashMap::new(), surface: None, drawn: Vec::new(), frost: None, glass: None, light_glass: false, backdrop: crate::backdrop::Backdrop::new(hwnd), backdrop_gen: 0,
+            win_w: 1.0, win_h: 1.0, items: Vec::new(), icons: HashMap::new(), surface: None, drawn: Vec::new(), frost: None, glass: None, light_glass: false, backdrop: crate::backdrop::Backdrop::new(hwnd), backdrop_gen: 0, behind: None, glass_layer: None,
             label: None, label_alpha: 0.0, label_at: (0.0, 0.0, 0.0, 0.0), hovered: None, plate_left: 0.0,
             plate_w: 0.0, seps: Vec::new(), running_now: HashMap::new(), clock: now, last_t: 0.0, awake: false, hidden: false,
             sig: String::new(), refreshes: 0, appbar: false,
@@ -1525,7 +1531,13 @@ impl Dock {
                 right: ((win_x + self.win_w) * dpi).ceil() as i32,
                 bottom: ((win_y + plate_bottom) * dpi).ceil() as i32,
             };
-            let behind = self.glass.as_ref().and_then(|g| {
+            let glass_id = self.glass.as_ref().map_or(0, |g| g.data().as_ptr() as usize);
+            let cached = self.behind.as_ref().is_some_and(|c| c.0 == region && c.1 == self.backdrop_gen && c.2 == glass_id)
+                && self.backdrop.as_ref().is_none_or(|b| b.region() == region);
+            if !cached {
+                self.behind = None;
+            }
+            let fresh = if cached { None } else { self.glass.as_ref().and_then(|g| {
                 let mut comp = Pixmap::new((region.right - region.left).max(1) as u32, (region.bottom - region.top).max(1) as u32)?;
                 let (sx, sy) = ((self.screen_w * dpi) as f32 / g.width() as f32, (self.screen_h * dpi) as f32 / g.height() as f32);
                 comp.draw_pixmap(
@@ -1544,15 +1556,25 @@ impl Dock {
                 }
                 gfx::blur(&mut comp, 2.0 * dpi as f32);
                 Some(comp)
-            });
-            let glass = behind.as_ref().and_then(|g| {
-                let d = dpi as f32;
-                gfx::liquid_glass(
-                    g, pl * d, (pt + slide as f32) * d, pwid * d, phgt * d, RADIUS as f32 * d, 16.0 * d,
-                    ((win_x * dpi) as f32, (win_y * dpi) as f32), (region.left as f32, region.top as f32),
-                )
-            });
-            if let Some((layer, gx, gy)) = &glass {
+            }) };
+            if let Some(c) = fresh {
+                self.behind = Some((region, self.backdrop_gen, glass_id, c));
+            }
+            let d = dpi as f32;
+            let gkey = [
+                (pl * d * 16.0) as u32, ((pt + slide as f32) * d * 16.0) as u32, (pwid * d * 16.0) as u32, (phgt * d * 16.0) as u32,
+                ((win_x * dpi * 16.0) as u32) ^ ((win_y * dpi * 16.0) as u32).rotate_left(16), (self.backdrop_gen as u32) ^ (glass_id as u32),
+            ];
+            if !fresh_used(&self.glass_layer, &gkey) || self.glass_layer.is_none() {
+                self.glass_layer = self.behind.as_ref().map(|c| &c.3).and_then(|g| {
+                    gfx::liquid_glass(
+                        g, pl * d, (pt + slide as f32) * d, pwid * d, phgt * d, RADIUS as f32 * d, 16.0 * d,
+                        ((win_x * dpi) as f32, (win_y * dpi) as f32), (region.left as f32, region.top as f32),
+                    )
+                }).map(|(p, x, y)| (gkey, p, x, y));
+            }
+            let glass = self.glass_layer.as_ref();
+            if let Some((_, layer, gx, gy)) = glass {
                 pm.draw_pixmap(*gx, *gy, layer.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
             } else if let Some(fr) = &self.frost {
                 let (fx, fy) = ((self.screen_w / fr.width() as f64) as f32, (self.screen_h / fr.height() as f64) as f32);
