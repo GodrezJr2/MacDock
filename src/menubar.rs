@@ -9,7 +9,7 @@ use std::time::Duration;
 use tiny_skia::{Color, FillRule, LineCap, Paint, PathBuilder, Pixmap, PixmapPaint, Rect, Stroke, Transform};
 use windows::core::w;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Power::{GetSystemPowerStatus, SetSuspendState, SYSTEM_POWER_STATUS};
 use windows::Win32::System::Registry::*;
 use windows::Win32::System::Shutdown::LockWorkStation;
@@ -47,6 +47,7 @@ pub enum BarEv {
     Timer(usize),
     AppBar(usize, isize),
     Display,
+    Wallpaper,
 }
 
 /// What the bar asks the app to do.
@@ -171,32 +172,6 @@ pub fn key(vks: &[u8]) {
     }
 }
 
-/// Acrylic (accent 4) or blur (3) behind the window; `tint` is ABGR. Undocumented, so loaded at run time.
-pub fn enable_blur(h: HWND, accent: i32, tint: u32) {
-    #[repr(C)]
-    struct Accent {
-        state: i32,
-        flags: i32,
-        color: u32,
-        anim: i32,
-    }
-    #[repr(C)]
-    struct Data {
-        attr: i32,
-        data: *mut Accent,
-        size: usize,
-    }
-    type Swca = unsafe extern "system" fn(HWND, *mut Data) -> i32;
-    unsafe {
-        let Ok(lib) = LoadLibraryW(w!("user32.dll")) else { return };
-        let Some(f) = GetProcAddress(lib, windows::core::s!("SetWindowCompositionAttribute")) else { return };
-        let f: Swca = std::mem::transmute(f);
-        let mut a = Accent { state: accent, flags: 2, color: tint, anim: 0 };
-        let mut d = Data { attr: 19, data: &mut a, size: std::mem::size_of::<Accent>() };
-        f(h, &mut d);
-    }
-}
-
 fn confirm(owner: HWND, q: &str) -> bool {
     let t = shell::wide(q);
     unsafe {
@@ -242,6 +217,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
         WM_TIMER => push(Ev::Bar(BarEv::Timer(w.0))),
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
         WM_DISPLAYCHANGE => push(Ev::Bar(BarEv::Display)),
+        WM_SETTINGCHANGE if w.0 == SPI_SETDESKWALLPAPER.0 as usize => push(Ev::Bar(BarEv::Wallpaper)),
         WM_DPICHANGED => {
             push(Ev::Bar(BarEv::Display));
             return LRESULT(0); // we place ourselves
@@ -288,6 +264,7 @@ pub struct MenuBar {
     ai_pct: Option<f64>,
     ai_live: bool,
     surface: Option<Surface>,
+    dark_text: bool, // the wallpaper behind the bar is bright, so the content is drawn black
     slots: Vec<Slot>,
     hover: Option<usize>,
     open: Option<usize>,  // its menu or flyout is up
@@ -311,14 +288,14 @@ impl MenuBar {
         MenuBar {
             hwnd, shell: Shell::default(), dpi, screen_w: sw, screen_h: sh, appbar: false, hidden: false, tray,
             ai, ai_gen: u64::MAX, ai_label: String::new(), ai_pct: None, ai_live: false,
-            surface: None, slots: Vec::new(), hover: None, open: None, target: HWND::default(),
+            surface: None, dark_text: false, slots: Vec::new(), hover: None, open: None, target: HWND::default(),
             app_name: "File Explorer".into(), names: HashMap::new(), clock: clock_text(), battery: b, net: n,
             ticks: 0, tracking: false, dirty: true, auto_hide_dock: false,
         }
     }
 
     pub fn start(&mut self) {
-        enable_blur(self.hwnd, 4, 0x6A1E1C1C);
+        self.load_frost();
         unsafe {
             SetTimer(self.hwnd, TIMER_TICK, 1000, None);
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
@@ -552,6 +529,10 @@ impl MenuBar {
             }
             BarEv::AppBar(2 /* ABN_FULLSCREENAPP */, on) => return Some(BarAct::Fullscreen(on != 0)),
             BarEv::AppBar(..) => {}
+            BarEv::Wallpaper => {
+                self.load_frost();
+                self.render();
+            }
         }
         self.render();
         None
@@ -853,14 +834,20 @@ impl MenuBar {
         }
         let dpi = self.dpi as f32;
         let mut pm = Pixmap::new(w, h).unwrap();
-        // nearly transparent, so the whole bar takes clicks and the acrylic shows through
+        // macOS 26: no bar at all, the content sits on the wallpaper. The bar's own pixels stay at alpha 1 so
+        // the whole strip still takes clicks; hover / open highlights go on that layer, under the content.
         pm.fill(Color::from_rgba8(0, 0, 0, 1));
+        let mut content = Pixmap::new(w, h).unwrap();
         for (i, s) in self.slots.iter().enumerate() {
             let lit = if self.open == Some(i) { 0x40 } else if self.hover == Some(i) { 0x30 } else { 0 };
             if lit > 0 {
                 if let Some(p) = gfx::rrect(s.x as f32 * dpi, 3.0 * dpi, s.w as f32 * dpi, (H as f32 - 6.0) * dpi, 5.0 * dpi) {
                     let mut paint = Paint::default();
-                    paint.set_color_rgba8(255, 255, 255, lit);
+                    if self.dark_text {
+                        paint.set_color_rgba8(0, 0, 0, lit / 2);
+                    } else {
+                        paint.set_color_rgba8(255, 255, 255, lit);
+                    }
                     paint.anti_alias = true;
                     pm.fill_path(&p, &paint, FillRule::Winding, Transform::identity(), None);
                 }
@@ -868,40 +855,72 @@ impl MenuBar {
             let cx = (s.x + PAD_X) as f32 * dpi; // content left
             let mid = H as f32 / 2.0 * dpi;
             match s.item {
-                Item::Logo => draw_logo(&mut pm, cx, mid, dpi),
-                Item::App => self.draw_text(&mut pm, &self.app_name, self.font(700), cx, mid),
-                Item::Menu(m) => self.draw_text(&mut pm, m, self.font(500), cx, mid),
-                Item::Chevron => self.draw_text(&mut pm, "\u{E70E}", self.glyph_font(11.0), cx, mid),
+                Item::Logo => draw_logo(&mut content, cx, mid, dpi),
+                Item::App => self.draw_text(&mut content, &self.app_name, self.font(700), cx, mid),
+                Item::Menu(m) => self.draw_text(&mut content, m, self.font(500), cx, mid),
+                Item::Chevron => self.draw_text(&mut content, "\u{E70E}", self.glyph_font(11.0), cx, mid),
                 Item::Ai => {
-                    draw_ai_ring(&mut pm, cx + 7.0 * dpi, mid, 6.0 * dpi, dpi, self.ai_pct, self.ai_label.ends_with("/s"));
+                    draw_ai_ring(&mut content, cx + 7.0 * dpi, mid, 6.0 * dpi, dpi, self.ai_pct, self.ai_label.ends_with("/s"));
                     if !self.ai_label.is_empty() {
-                        self.draw_text(&mut pm, &self.ai_label, self.font(400), cx + 19.0 * dpi, mid);
+                        self.draw_text(&mut content, &self.ai_label, self.font(400), cx + 19.0 * dpi, mid);
                     }
                 }
                 Item::Battery => {
                     let t = self.battery_text();
-                    self.draw_text(&mut pm, &t, self.font(400), cx, mid);
+                    self.draw_text(&mut content, &t, self.font(400), cx, mid);
                     let gx = cx + (self.text_w(&t, self.font(400)) as f32 + 6.0) * dpi;
                     if let Some((pct, ac, charging)) = self.battery {
-                        draw_battery(&mut pm, gx, mid - 6.25 * dpi + 1.0 * dpi, 26.0 * dpi, 12.5 * dpi, pct, ac, charging);
+                        draw_battery(&mut content, gx, mid - 6.25 * dpi + 1.0 * dpi, 26.0 * dpi, 12.5 * dpi, pct, ac, charging);
                     }
                 }
                 Item::Net => match self.net {
-                    Net::Wired => self.draw_text(&mut pm, "\u{E839}", self.glyph_font(GLYPH_PX), cx, mid),
-                    Net::Wifi(b) => draw_wifi(&mut pm, cx, mid - 6.25 * dpi, 17.0 * dpi, 12.5 * dpi, b, false),
-                    Net::Off => draw_wifi(&mut pm, cx, mid - 6.25 * dpi, 17.0 * dpi, 12.5 * dpi, 0, true),
+                    Net::Wired => self.draw_text(&mut content, "\u{E839}", self.glyph_font(GLYPH_PX), cx, mid),
+                    Net::Wifi(b) => draw_wifi(&mut content, cx, mid - 6.25 * dpi, 17.0 * dpi, 12.5 * dpi, b, false),
+                    Net::Off => draw_wifi(&mut content, cx, mid - 6.25 * dpi, 17.0 * dpi, 12.5 * dpi, 0, true),
                 },
-                Item::Search => self.draw_text(&mut pm, "\u{E721}", self.glyph_font(GLYPH_PX), cx, mid),
-                Item::Cc => draw_cc(&mut pm, cx, mid, dpi),
-                Item::Clock => self.draw_text(&mut pm, &self.clock, self.font(400), cx, mid),
+                Item::Search => self.draw_text(&mut content, "\u{E721}", self.glyph_font(GLYPH_PX), cx, mid),
+                Item::Cc => draw_cc(&mut content, cx, mid, dpi),
+                Item::Clock => self.draw_text(&mut content, &self.clock, self.font(400), cx, mid),
             }
         }
+        if self.dark_text {
+            // bright wallpaper: the white glyphs turn black (coloured ones, like a charging battery, stay)
+            for px in content.pixels_mut() {
+                let (r, g, b) = (px.red(), px.green(), px.blue());
+                if r.max(g).max(b) - r.min(g).min(b) < 24 {
+                    *px = tiny_skia::PremultipliedColorU8::from_rgba(0, 0, 0, px.alpha()).unwrap();
+                }
+            }
+        } else {
+            // dark wallpaper: white content with a soft shadow, like macOS
+            let mut shadow = content.clone();
+            for px in shadow.pixels_mut() {
+                *px = tiny_skia::PremultipliedColorU8::from_rgba(0, 0, 0, (px.alpha() as u16 * 110 / 255) as u8).unwrap();
+            }
+            gfx::blur(&mut shadow, 2.0 * dpi);
+            pm.draw_pixmap(0, (0.5 * dpi).round() as i32, shadow.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+        }
+        pm.draw_pixmap(0, 0, content.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
         if let Some(sf) = self.surface.as_mut() {
             // replace, not blend: the surface still holds the last frame
             let copy = PixmapPaint { blend_mode: tiny_skia::BlendMode::Source, ..Default::default() };
             sf.pixmap().draw_pixmap(0, 0, pm.as_ref(), &copy, Transform::identity(), None);
             sf.present(self.hwnd, 0, 0);
         }
+    }
+
+    /// Look at the wallpaper's top strip: bright means black content, as macOS does.
+    fn load_frost(&mut self) {
+        let fw = 128u32;
+        let fh = (fw as f64 * self.screen_h / self.screen_w).round().max(1.0) as u32;
+        if let Some(fr) = gfx::wallpaper(fw, fh) {
+            let rows = ((fh as f64 * H / self.screen_h).ceil() as u32 + 1).min(fh);
+            let d = fr.data();
+            let n = (rows * fw) as usize;
+            let sum: f64 = (0..n).map(|p| p * 4).map(|i| 0.0722 * d[i] as f64 + 0.7152 * d[i + 1] as f64 + 0.2126 * d[i + 2] as f64).sum();
+            self.dark_text = n > 0 && sum / n as f64 / 255.0 > 0.62;
+        }
+        self.dirty = true;
     }
 
     fn draw_text(&self, pm: &mut Pixmap, s: &str, f: Font, x: f32, mid: f32) {
