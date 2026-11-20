@@ -55,8 +55,17 @@ pub enum BarAct {
     Quit,
     ToggleAutoHide,
     Fullscreen(bool),
+    /// a menu bar setting was switched; the app saves it to config.json
+    Option(BarOpt, bool),
     /// open (or close, if it is the open one) a menu bar extra under the item spanning these screen px
     Flyout(Extra, i32, i32),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BarOpt {
+    BatteryPercent,
+    AiUsage,
+    TrayIcons,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -259,6 +268,7 @@ pub struct MenuBar {
     hidden: bool,
     tray: bool,
     ai: bool,
+    battery_pct: bool,
     ai_gen: u64,
     ai_label: String,
     ai_pct: Option<f64>,
@@ -281,12 +291,12 @@ pub struct MenuBar {
 }
 
 impl MenuBar {
-    pub fn new(hwnd: HWND, tray: bool, ai: bool) -> MenuBar {
+    pub fn new(hwnd: HWND, tray: bool, ai: bool, battery_pct: bool) -> MenuBar {
         let (sw, sh, dpi) = crate::dock::primary_screen();
         let b = power();
         let n = read_net();
         MenuBar {
-            hwnd, shell: Shell::default(), dpi, screen_w: sw, screen_h: sh, appbar: false, hidden: false, tray,
+            hwnd, shell: Shell::default(), dpi, screen_w: sw, screen_h: sh, appbar: false, hidden: false, tray, battery_pct,
             ai, ai_gen: u64::MAX, ai_label: String::new(), ai_pct: None, ai_live: false,
             surface: None, dark_text: false, slots: Vec::new(), hover: None, open: None, target: HWND::default(),
             app_name: "File Explorer".into(), names: HashMap::new(), clock: clock_text(), battery: b, net: n,
@@ -680,6 +690,10 @@ impl MenuBar {
             (Entry::Sep, Do::None),
             (Entry::item("Lock Screen").gesture("Win+L"), Do::Lock),
             (Entry::Sep, Do::None),
+            (Entry::item("Show Battery Percentage").checked(self.battery_pct), Do::Opt(BarOpt::BatteryPercent)),
+            (Entry::item("Show AI Usage").checked(self.ai), Do::Opt(BarOpt::AiUsage)),
+            (Entry::item("Show Tray Icons").checked(self.tray), Do::Opt(BarOpt::TrayIcons)),
+            (Entry::Sep, Do::None),
             (Entry::item("Automatically Hide Dock").checked(self.auto_hide_dock), Do::AutoHide),
             (Entry::item("Open MacDock at Login").checked(at_login()), Do::Login),
             (Entry::item("Edit Dock Settings…"), Do::EditSettings),
@@ -752,6 +766,21 @@ impl MenuBar {
                 let _ = LockWorkStation();
             },
             Do::AutoHide => return Some(BarAct::ToggleAutoHide),
+            Do::Opt(o) => {
+                let f = match o {
+                    BarOpt::BatteryPercent => &mut self.battery_pct,
+                    BarOpt::AiUsage => &mut self.ai,
+                    BarOpt::TrayIcons => &mut self.tray,
+                };
+                *f = !*f;
+                let on = *f;
+                if o == BarOpt::AiUsage && on {
+                    self.ai_gen = u64::MAX; // read the summary again on the next tick
+                }
+                self.dirty = true;
+                self.render();
+                return Some(BarAct::Option(o, on));
+            }
             Do::Login => toggle_login(),
             Do::EditSettings => shell::launch(&crate::config::path()),
             Do::Quit => return Some(BarAct::Quit),
@@ -774,7 +803,11 @@ impl MenuBar {
     }
 
     fn battery_text(&self) -> String {
-        self.battery.map(|b| format!("{}%", b.0)).unwrap_or_default()
+        match self.battery {
+            // macOS hides the number by default; we still show it when the battery runs low
+            Some((pct, ac, _)) if self.battery_pct || (pct <= 20 && !ac) => format!("{pct}%"),
+            _ => String::new(),
+        }
     }
 
     /// Content width (DIPs) of each item.
@@ -785,7 +818,10 @@ impl MenuBar {
             Item::Menu(m) => self.text_w(m, self.font(500)),
             Item::Chevron => self.text_w("\u{E70E}", self.glyph_font(11.0)),
             Item::Ai => 14.0 + if self.ai_label.is_empty() { 0.0 } else { 5.0 + self.text_w(&self.ai_label, self.font(400)) },
-            Item::Battery => self.text_w(&self.battery_text(), self.font(400)) + 6.0 + 26.0,
+            Item::Battery => {
+                let t = self.battery_text();
+                if t.is_empty() { 26.0 } else { self.text_w(&t, self.font(400)) + 6.0 + 26.0 }
+            }
             Item::Net => 17.0,
             Item::Search => self.text_w("\u{E721}", self.glyph_font(GLYPH_PX)),
             Item::Cc => 17.0,
@@ -868,7 +904,7 @@ impl MenuBar {
                 Item::Battery => {
                     let t = self.battery_text();
                     self.draw_text(&mut content, &t, self.font(400), cx, mid);
-                    let gx = cx + (self.text_w(&t, self.font(400)) as f32 + 6.0) * dpi;
+                    let gx = if t.is_empty() { cx } else { cx + (self.text_w(&t, self.font(400)) as f32 + 6.0) * dpi };
                     if let Some((pct, ac, charging)) = self.battery {
                         draw_battery(&mut content, gx, mid - 6.25 * dpi + 1.0 * dpi, 26.0 * dpi, 12.5 * dpi, pct, ac, charging);
                     }
@@ -947,6 +983,7 @@ enum Do {
     ShutDown,
     Lock,
     AutoHide,
+    Opt(BarOpt),
     Login,
     EditSettings,
     Quit,

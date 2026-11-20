@@ -31,6 +31,8 @@ pub struct Config {
     pub show_recents: bool,
     /// A Downloads folder item before the Trash; click lists the newest files.
     pub downloads_stack: bool,
+    /// The battery percentage next to the battery icon (off like macOS; still shown at 20% or less).
+    pub battery_percent: bool,
     /// Keys we don't know (written by a newer build) survive a save.
     extra: Map<String, Value>,
 }
@@ -74,6 +76,7 @@ impl Default for Config {
             recent: Vec::new(),
             show_recents: true,
             downloads_stack: true,
+            battery_percent: false,
             extra: Map::new(),
         }
     }
@@ -102,6 +105,7 @@ impl Config {
         b("ClaudeUsageOAuth", &mut c.claude_usage_oauth);
         b("ShowRecents", &mut c.show_recents);
         b("DownloadsStack", &mut c.downloads_stack);
+        b("BatteryPercent", &mut c.battery_percent);
         if let Some(Value::Array(r)) = v.remove("Recent") {
             c.recent = r.into_iter().filter(|x| x.get("Key").and_then(|k| k.as_str()).is_some()).collect();
         }
@@ -147,6 +151,7 @@ impl Config {
             "Recent": self.recent,
             "ShowRecents": self.show_recents,
             "DownloadsStack": self.downloads_stack,
+            "BatteryPercent": self.battery_percent,
         });
         if let Value::Object(f) = fields {
             m.extend(f);

@@ -219,6 +219,16 @@ impl App {
                         self.dock.set_auto_hide(on);
                     }
                     Some(menubar::BarAct::Fullscreen(on)) => self.set_fullscreen(on),
+                    Some(menubar::BarAct::Option(o, on)) => {
+                        let c = self.dock.update_config(|c| match o {
+                            menubar::BarOpt::BatteryPercent => c.battery_percent = on,
+                            menubar::BarOpt::AiUsage => c.ai_usage = on,
+                            menubar::BarOpt::TrayIcons => c.tray_icons = on,
+                        });
+                        if o == menubar::BarOpt::AiUsage && on {
+                            ai_usage::start(c.claude_limit_5h, c.claude_usage_oauth, || {});
+                        }
+                    }
                     Some(menubar::BarAct::Flyout(kind, _, r)) => self.toggle_flyout(kind, r),
                     None => {}
                 }
@@ -351,7 +361,7 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
     }
     let hwnd = dock::create_window();
     let genie = cfg.genie.then(genie::Genie::new);
-    let bar = cfg.menu_bar.then(|| menubar::MenuBar::new(menubar::create_window(), cfg.tray_icons, cfg.ai_usage));
+    let bar = cfg.menu_bar.then(|| menubar::MenuBar::new(menubar::create_window(), cfg.tray_icons, cfg.ai_usage, cfg.battery_percent));
     if cfg.menu_bar && cfg.ai_usage {
         ai_usage::start(cfg.claude_limit_5h, cfg.claude_usage_oauth, || {});
     }
