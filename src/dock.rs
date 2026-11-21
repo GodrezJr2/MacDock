@@ -73,6 +73,10 @@ pub enum DockEv {
     BackdropTick,
     /// look again shortly after windows changed: a window opening is still cloaked during its animation
     BackdropRecheck,
+    /// files are being dragged over the dock (true) or left / were dropped (false)
+    DragFiles(bool),
+    /// files dropped at screen px (x, y)
+    DropFiles(Vec<String>, i32, i32),
 }
 
 /// What the dock wants done by the app around it.
@@ -306,6 +310,7 @@ pub struct Dock {
     label: Option<(String, Pixmap)>,
     label_alpha: f64,
     menu_up: bool, // a dock menu is open: no hover label over it
+    drag_files: bool, // files are dragged over the dock: publish drop zones
     label_at: (f64, f64, f64, f64),
     hovered: Option<usize>,
     plate_left: f64,
@@ -363,7 +368,7 @@ impl Dock {
         Dock {
             hwnd, cfg, shell: Shell::default(), dpi, screen_w, screen_h, fit_b: f64::MAX,
             win_w: 1.0, win_h: 1.0, items: Vec::new(), icons: HashMap::new(), surface: None, drawn: Vec::new(), frost: None, glass: None, light_glass: false, backdrop: crate::backdrop::Backdrop::new(hwnd), backdrop_gen: 0, bd_due: (false, false), bd_last: 0.0, bd_timer: false, behind: None, glass_layer: None, over: None, wall_strip: None,
-            label: None, label_alpha: 0.0, menu_up: false, label_at: (0.0, 0.0, 0.0, 0.0), hovered: None, plate_left: 0.0,
+            label: None, label_alpha: 0.0, menu_up: false, drag_files: false, label_at: (0.0, 0.0, 0.0, 0.0), hovered: None, plate_left: 0.0,
             plate_w: 0.0, seps: Vec::new(), running_now: HashMap::new(), clock: now, last_t: 0.0, awake: false, hidden: false,
             sig: String::new(), refreshes: 0, appbar: false,
             hide: 0.0, peek_until: now, last_near: now,
@@ -1297,6 +1302,29 @@ impl Dock {
         chosen
     }
 
+    /// Files dropped on an icon: open them with that app, or put them in the Recycle Bin on the Trash.
+    fn drop_files(&mut self, files: &[String], x: i32, y: i32) {
+        self.wake();
+        let _ = y;
+        let Some(i) = self.item_at(x as f64 / self.dpi - self.win_x()) else { return };
+        let it = &mut self.items[i];
+        if it.trash {
+            crate::dropfiles::recycle(files);
+            return;
+        }
+        if it.stack {
+            return;
+        }
+        let aumid = it.aumid.clone().or_else(|| {
+            it.launch.as_deref().filter(|l| l.len() > 17 && l.is_char_boundary(17) && l[..17].eq_ignore_ascii_case("shell:AppsFolder\\")).map(|l| l[17..].to_string())
+        });
+        let target = it.exe.clone().or_else(|| it.launch.clone());
+        crate::dropfiles::open_with(target.as_deref(), aumid.as_deref(), files);
+        if !it.running() {
+            it.launching = true;
+        }
+    }
+
     /// The Downloads stack: its newest files in a menu above the icon (macOS "List" view); click opens one.
     fn downloads_menu(&mut self, i: usize) {
         let Some(dir) = self.items[i].launch.clone() else { return };
@@ -1467,6 +1495,26 @@ impl Dock {
                 self.hovered = Some(idx);
             }
             x += (b * it.scale + gap) * it.presence;
+        }
+
+        if self.drag_files {
+            // where dropped files can go, in screen px (magnified icons rise above the plate)
+            use crate::dropfiles::Zone;
+            let (d, wx, wy) = (self.dpi, self.win_x(), self.win_y() + self.slide());
+            let zones = self.items.iter()
+                .filter(|it| !it.leaving && !it.stack && (it.trash || it.launch.is_some() || it.exe.is_some() || it.aumid.is_some()))
+                .map(|it| {
+                    let g = gap / 2.0;
+                    (
+                        ((wx + it.x - g) * d).round() as i32,
+                        ((wy + plate_bottom - PAD - it.size - 8.0) * d).round() as i32,
+                        ((wx + it.x + it.size + g) * d).round() as i32,
+                        ((wy + self.win_h) * d).round() as i32,
+                        if it.trash { Zone::Trash } else { Zone::Open },
+                    )
+                })
+                .collect();
+            crate::dropfiles::set_zones(zones);
         }
 
         let want = if self.hovered.is_some() && !self.menu_up { 1.0 } else { 0.0 };
@@ -1848,6 +1896,14 @@ impl Dock {
                 }
             }
             DockEv::Toasts => self.poll_toasts(),
+            DockEv::DragFiles(on) => {
+                self.drag_files = on;
+                if !on {
+                    crate::dropfiles::set_zones(Vec::new());
+                }
+                self.wake();
+            }
+            DockEv::DropFiles(files, x, y) => self.drop_files(&files, x, y),
             DockEv::Edge => {
                 if !self.hidden && ((self.hide > 0.0 && self.at_bottom_edge()) || (self.hide < 1.0 && !self.awake)) {
                     self.wake();

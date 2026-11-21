@@ -8,6 +8,7 @@ mod backdrop;
 mod badges;
 mod config;
 mod dock;
+mod dropfiles;
 mod ai_usage;
 mod claude_oauth;
 mod fly_ai;
@@ -360,12 +361,14 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let _ = windows::Win32::System::Ole::OleInitialize(None); // drag and drop onto the dock
     }
     let cfg = Config::load();
     if cfg.hide_taskbar {
         taskbar::hide();
     }
     let hwnd = dock::create_window();
+    dropfiles::register(hwnd);
     let genie = cfg.genie.then(genie::Genie::new);
     let bar = cfg.menu_bar.then(|| menubar::MenuBar::new(menubar::create_window(), cfg.tray_icons, cfg.ai_usage, cfg.battery_percent));
     if cfg.menu_bar && cfg.ai_usage {
