@@ -30,6 +30,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 pub const WM_BACKDROP: u32 = WM_APP + 20;
 
 const MAX_WINDOWS: usize = 8;
+/// borderless window capture is missing (Windows 10): live backdrop off for the rest of the run
+static NO_BORDERLESS: AtomicBool = AtomicBool::new(false);
 
 /// COM pointers moved into the frame handler. D3D11 is made thread-safe below (SetMultithreadProtected).
 struct Sendable<T>(T);
@@ -229,8 +231,16 @@ impl Backdrop {
                 Ok(())
             });
             pool.FrameArrived(&handler).ok()?;
+            // Windows 10 has no borderless capture (IsBorderRequired is Windows 11 / 20348+): every captured window
+            // would get a yellow frame. Skip live capture there; the dock keeps its wallpaper glass.
+            if NO_BORDERLESS.load(Ordering::Relaxed) {
+                return None;
+            }
             let session = pool.CreateCaptureSession(&item).ok()?;
-            let _ = session.SetIsBorderRequired(false);
+            if session.SetIsBorderRequired(false).is_err() {
+                NO_BORDERLESS.store(true, Ordering::Relaxed);
+                return None;
+            }
             let _ = session.SetIsCursorCaptureEnabled(false);
             session.StartCapture().ok()?;
             Some(Cap { session, pool, latest, rect: RECT::default(), crop: None })
