@@ -113,6 +113,23 @@ impl App {
         genie::R { x: x * d, y: y * d, w: w * d, h: hh * d }
     }
 
+    /// Show desktop (Win+D, the three-finger swipe down) lifts the desktop window into the topmost band,
+    /// above topmost windows that were lower in it: dock, menu bar and widgets vanish and only the wallpaper
+    /// is left. Put ours back on top of it while the desktop is up, and the widgets back down after.
+    fn keep_over_desktop(&mut self, fg: HWND) {
+        let up = is_desktop(fg) && desktop_raised();
+        unsafe {
+            if up {
+                let f = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+                let _ = SetWindowPos(self.dock.hwnd, HWND_TOPMOST, 0, 0, 0, 0, f);
+                if let Some(b) = self.bar.as_ref() {
+                    let _ = SetWindowPos(b.hwnd, HWND_TOPMOST, 0, 0, 0, 0, f);
+                }
+            }
+        }
+        widgets::set_raised(up);
+    }
+
     /// Returns false to quit.
     fn act(&mut self, a: Act) -> bool {
         match a {
@@ -197,6 +214,7 @@ impl App {
                 }
             }
             Ev::Foreground(h) => {
+                self.keep_over_desktop(HWND(h as *mut _));
                 self.dock.on_foreground(HWND(h as *mut _));
                 if let Some(b) = self.bar.as_mut() {
                     b.on_foreground(HWND(h as *mut _));
@@ -283,6 +301,41 @@ fn low_integrity() -> bool {
         let label = &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);
         let count = *GetSidSubAuthorityCount(label.Label.Sid) as u32;
         *GetSidSubAuthority(label.Label.Sid, count - 1) < 0x2000
+    }
+}
+
+fn class_of(h: HWND) -> String {
+    let mut cls = [0u16; 64];
+    let n = unsafe { GetClassNameW(h, &mut cls) } as usize;
+    String::from_utf16_lossy(&cls[..n])
+}
+
+fn is_desktop(h: HWND) -> bool {
+    matches!(class_of(h).as_str(), "Progman" | "WorkerW")
+}
+
+/// The desktop sits above every app window (show desktop is on), not at the bottom as usual. The first
+/// visible, uncloaked, non-topmost window from the top tells: the desktop itself, or an app.
+fn desktop_raised() -> bool {
+    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+    unsafe {
+        let me = std::process::id();
+        let mut h = GetTopWindow(None).unwrap_or_default();
+        while !h.0.is_null() {
+            let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+            let mut cloaked = 0u32;
+            let _ = DwmGetWindowAttribute(h, DWMWA_CLOAKED, &mut cloaked as *mut u32 as *mut _, 4);
+            if IsWindowVisible(h).as_bool() && cloaked == 0 && shell::window_pid(h) != me {
+                if is_desktop(h) {
+                    return true;
+                }
+                if ex & WS_EX_TOPMOST.0 as isize == 0 && ex & WS_EX_TOOLWINDOW.0 as isize == 0 {
+                    return false;
+                }
+            }
+            h = GetWindow(h, GW_HWNDNEXT).unwrap_or_default();
+        }
+        false
     }
 }
 

@@ -41,6 +41,23 @@ const MONTHS: [&str; 12] = [
 
 thread_local! {
     static STATE: RefCell<Option<Widgets>> = const { RefCell::new(None) };
+    /// show desktop is on: the desktop window sits in the topmost band, so we must too to stay visible
+    static RAISED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Follow the desktop up while show desktop is on, back to the bottom when it ends.
+pub fn set_raised(on: bool) {
+    if RAISED.with(|r| r.replace(on)) == on {
+        return;
+    }
+    STATE.with(|st| {
+        if let Some(w) = st.borrow().as_ref() {
+            let after = if on { HWND_TOPMOST } else { HWND_BOTTOM };
+            unsafe {
+                let _ = SetWindowPos(w.hwnd, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+        }
+    });
 }
 
 struct Widgets {
@@ -332,7 +349,8 @@ impl Widgets {
             sf.present(self.hwnd, self.pos.0, self.pos.1);
         }
         unsafe {
-            let _ = SetWindowPos(self.hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            let after = if RAISED.with(|r| r.get()) { HWND_TOPMOST } else { HWND_BOTTOM };
+            let _ = SetWindowPos(self.hwnd, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
     }
 
@@ -366,9 +384,9 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             });
         }
         WM_WINDOWPOSCHANGING => {
-            // stay on the desktop: never above another window
+            // stay on the desktop: never above another window (with show desktop on, above the desktop window)
             let p = &mut *(lp.0 as *mut WINDOWPOS);
-            p.hwndInsertAfter = HWND_BOTTOM;
+            p.hwndInsertAfter = if RAISED.with(|r| r.get()) { HWND_TOPMOST } else { HWND_BOTTOM };
             p.flags &= !SWP_NOZORDER;
         }
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
