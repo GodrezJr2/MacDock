@@ -305,6 +305,7 @@ pub struct Dock {
     behind: Option<(windows::Win32::Foundation::RECT, u64, usize, Pixmap)>, // the composed backdrop, kept while nothing behind changes // the wallpaper behind the dock is bright: dark running dots, else light ones
     label: Option<(String, Pixmap)>,
     label_alpha: f64,
+    menu_up: bool, // a dock menu is open: no hover label over it
     label_at: (f64, f64, f64, f64),
     hovered: Option<usize>,
     plate_left: f64,
@@ -362,7 +363,7 @@ impl Dock {
         Dock {
             hwnd, cfg, shell: Shell::default(), dpi, screen_w, screen_h, fit_b: f64::MAX,
             win_w: 1.0, win_h: 1.0, items: Vec::new(), icons: HashMap::new(), surface: None, drawn: Vec::new(), frost: None, glass: None, light_glass: false, backdrop: crate::backdrop::Backdrop::new(hwnd), backdrop_gen: 0, bd_due: (false, false), bd_last: 0.0, bd_timer: false, behind: None, glass_layer: None, over: None, wall_strip: None,
-            label: None, label_alpha: 0.0, label_at: (0.0, 0.0, 0.0, 0.0), hovered: None, plate_left: 0.0,
+            label: None, label_alpha: 0.0, menu_up: false, label_at: (0.0, 0.0, 0.0, 0.0), hovered: None, plate_left: 0.0,
             plate_w: 0.0, seps: Vec::new(), running_now: HashMap::new(), clock: now, last_t: 0.0, awake: false, hidden: false,
             sig: String::new(), refreshes: 0, appbar: false,
             hide: 0.0, peek_until: now, last_near: now,
@@ -1176,7 +1177,7 @@ impl Dock {
                 anchor = Anchor::Above(((self.win_x() + it.x + it.size / 2.0) * dpi).round() as i32, (top * dpi).round() as i32);
             }
         }
-        let chosen = menu::popup(self.hwnd, &entries, anchor, dpi);
+        let chosen = self.popup(&entries, anchor, dpi);
         self.wake();
         let d = chosen.and_then(|c| acts.get_mut(c).and_then(|a| a.take()))?;
         let i = idx.unwrap_or(0);
@@ -1286,6 +1287,16 @@ impl Dock {
         it
     }
 
+    /// Show a dock menu with the hover label cleared first (it would show through behind the menu).
+    fn popup(&mut self, entries: &[Entry], anchor: Anchor, dpi: f64) -> Option<usize> {
+        self.menu_up = true;
+        self.label_alpha = 0.0;
+        self.frame();
+        let chosen = menu::popup(self.hwnd, entries, anchor, dpi);
+        self.menu_up = false;
+        chosen
+    }
+
     /// The Downloads stack: its newest files in a menu above the icon (macOS "List" view); click opens one.
     fn downloads_menu(&mut self, i: usize) {
         let Some(dir) = self.items[i].launch.clone() else { return };
@@ -1315,7 +1326,7 @@ impl Dock {
         let top = self.win_y() + self.win_h - BOTTOM_GAP - PAD - it.size + self.slide() - 6.0;
         let anchor = Anchor::Above(((self.win_x() + it.x + it.size / 2.0) * self.dpi).round() as i32, (top * self.dpi).round() as i32);
         let n = entries.len();
-        let chosen = menu::popup(self.hwnd, &entries, anchor, self.dpi);
+        let chosen = self.popup(&entries, anchor, self.dpi);
         self.wake();
         match chosen {
             Some(c) if c == n - 1 => shell::launch(&dir),
@@ -1458,7 +1469,7 @@ impl Dock {
             x += (b * it.scale + gap) * it.presence;
         }
 
-        let want = if self.hovered.is_some() { 1.0 } else { 0.0 };
+        let want = if self.hovered.is_some() && !self.menu_up { 1.0 } else { 0.0 };
         self.label_alpha = approach(self.label_alpha, want, 1.0 - (-dt * 22.0).exp());
         if self.label_alpha != want {
             settled = false;
