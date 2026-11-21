@@ -20,6 +20,33 @@ Written from scratch in Rust on plain Win32. No Windhawk, no Explorer patching.
 
 ---
 
+## Before and after
+
+Same laptop, same wallpaper, a minute apart.
+
+<table>
+<tr>
+<td width="50%"><img src="docs/before.jpg" alt="Stock Windows 11 desktop with the default taskbar"></td>
+<td width="50%"><img src="docs/after.jpg" alt="The same desktop with MacDock: menu bar on top, desktop widgets at the top right, Liquid Glass dock at the bottom"></td>
+</tr>
+<tr>
+<td align="center"><sub>Windows 11, stock taskbar</sub></td>
+<td align="center"><sub>MacDock: menu bar, desktop widgets, Liquid Glass dock</sub></td>
+</tr>
+</table>
+
+## New in this round
+
+| | |
+| --- | --- |
+| **Liquid Glass dock** | The plate shows the real windows behind it (live capture), bent at the rim like macOS 26, not a blurred wallpaper copy |
+| **Alt+Tab like Cmd+Tab** | One icon per app, most recent first, on a dark frosted panel. A quick tap flips to the previous app without the panel |
+| **Drop files on the dock** | A file dropped on an app icon opens in that app; dropped on the Trash it goes to the Recycle Bin |
+| **Desktop widgets** | Clock, date, battery and system tiles that sit on the wallpaper under every window |
+| **Recent apps, Downloads, icons** | Last 3 apps after a divider, a Downloads stack by the Trash, and right-click → Change Icon… for any item |
+
+<img src="docs/switcher.jpg" alt="The Alt+Tab switcher: Terminal, Task Manager, Discord (selected), File Explorer and Chrome on a dark frosted panel" width="100%">
+
 ## What you get
 
 <table>
@@ -27,7 +54,7 @@ Written from scratch in Rust on plain Win32. No Windhawk, no Explorer patching.
 <td width="50%" valign="top">
 
 ### The dock
-<img src="docs/dock.png" alt="The dock with Chrome magnified under the pointer and a red unread badge on Outlook">
+<img src="docs/dock-glass.jpg" alt="The Liquid Glass dock: pinned apps, unread badges on Chrome and Discord, recent apps after a divider, and the Trash">
 
 - **Magnification** that follows the pointer (cosine falloff, smoothed per frame)
 - **Genie** minimize into the app's icon, and back out on restore
@@ -35,7 +62,9 @@ Written from scratch in Rust on plain Win32. No Windhawk, no Explorer patching.
 - Running dots, hover labels and red **unread badges**
 - Drag to reorder, drag out to remove, right-click for windows, Keep in Dock, Show in Explorer and Quit
 - **Auto-hide**, and icons shrink once the dock reaches the screen edges
-- Icons sit on macOS-style squircle tiles
+- Icons sit on macOS-style squircle tiles; right-click → **Change Icon…** picks your own image
+- **Drop files** on an app icon to open them with it, or on the Trash to recycle them
+- **Recent apps** (the last 3 you quit) after a divider, and a **Downloads stack** next to the Trash
 
 </td>
 <td width="50%" valign="top">
@@ -92,7 +121,19 @@ notification-area icons (Discord, Steam, …).
   with Claude Code's own login (every 2 minutes, only to api.anthropic.com; MacDock never refreshes the token),
   or set `ClaudeLimit5h` for an estimate from local tokens.
 
+### Alt+Tab, the macOS way
+
+- Hold Alt and press Tab (Shift+Tab or the arrow keys go back), release Alt to switch. One icon per app,
+  not per window, most recently used first, with the app's name under the selection
+- **Esc** cancels, **Q** quits the selected app, **H** minimizes it; the mouse selects on hover and switches on click
+- A quick tap switches to the previous app without ever showing the panel
+- Runs on its own thread with a low-level keyboard hook, so the dock never makes it lag. Turn it off with
+  `"AppSwitcher": false` to get the Windows switcher back
+
 ### Desktop widgets
+
+<img src="docs/widgets.jpg" alt="Desktop widgets: analog clock, Saturday 21 November, battery ring at 53% charging, CPU memory and disk bars, under the menu bar">
+
 
 - Four small macOS-style widgets at the top right of the desktop: an analog clock, today's date, a battery
   ring and CPU / memory / disk bars, on frosted Liquid Glass made from your wallpaper
@@ -158,6 +199,10 @@ Settings live in `%APPDATA%\MacDock\config.json`, created on first run.
 | `HideTaskbar` | `true` | Hide the Windows taskbar while MacDock runs |
 | `DesktopWidgets` | `true` | Clock, date, battery and system widgets on the desktop |
 | `DownloadsStack` | `true` | Downloads folder item next to the Trash |
+| `DownloadsFolder` | your Downloads | Folder the stack lists, if it is not the Windows Downloads folder |
+| `ShowRecents` | `true` | The last 3 apps you quit, after a divider |
+| `AppSwitcher` | `true` | macOS-style Alt+Tab (off = the Windows switcher) |
+| `IconOverrides` | `{}` | Item → image or exe used as its icon (set with right-click → Change Icon…) |
 | `AiUsage` | `true` | Claude Code / Codex usage item in the menu bar (shown once either has logs) |
 | `ClaudeUsageOAuth` | `false` | Read Claude's real 5-hour / weekly limits from `api.anthropic.com/api/oauth/usage` with the login in `~/.claude/.credentials.json` |
 | `ClaudeLimit5h` | `null` | Tokens per 5-hour Claude block that count as 100% (input + cache writes + output) |
@@ -167,11 +212,13 @@ A crash writes `%APPDATA%\MacDock\panic.log` and still puts the taskbar back.
 ## How it works
 
 <details>
-<summary><b>The frosted dock without a blur API</b></summary>
+<summary><b>Liquid Glass without a blur API</b></summary>
 
 Windows ignores window regions for layered windows, so accent blur behind a rounded plate showed up as a
-black or grey square. The plate is instead painted with a blurred slice of your wallpaper, mapped to its
-position on screen. Because the dock is an AppBar, the wallpaper is almost always what sits behind it.
+black or grey square. MacDock draws the glass itself: the windows under the plate are captured live with
+Windows Graphics Capture (one capture per window, wallpaper where there is none), and the plate shows them
+nearly sharp, bent inward near the rim like a lens, with a light edge on top. Captures repaint at most 30 times
+a second, so a video playing behind the dock costs about 0.1 s of CPU per second.
 </details>
 
 <details>
