@@ -85,6 +85,22 @@ impl Surface {
     }
 }
 
+/// What is on screen at (x, y, w, h) right now (screen px), opaque.
+pub fn capture_screen(x: i32, y: i32, w: u32, h: u32) -> Option<Pixmap> {
+    let mut sf = Surface::new(w, h)?;
+    unsafe {
+        let sdc = GetDC(HWND::default());
+        let ok = BitBlt(sf.dc, 0, 0, w as i32, h as i32, sdc, x, y, SRCCOPY | CAPTUREBLT);
+        ReleaseDC(HWND::default(), sdc);
+        ok.ok()?;
+    }
+    let mut v = sf.bytes().to_vec();
+    for p in v.chunks_exact_mut(4) {
+        p[3] = 255;
+    }
+    Pixmap::from_vec(v, IntSize::from_wh(w, h)?)
+}
+
 impl Drop for Surface {
     fn drop(&mut self) {
         unsafe {

@@ -24,6 +24,7 @@ mod menu;
 mod menubar;
 mod power;
 mod shell;
+mod switcher;
 mod sysctl;
 mod taskbar;
 mod tile;
@@ -371,6 +372,7 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
         ai_usage::start(cfg.claude_limit_5h, cfg.claude_usage_oauth, || {});
     }
     let want_widgets = cfg.desktop_widgets;
+    let want_switcher = cfg.app_switcher;
     let mut app = App { dock: Dock::new(hwnd, cfg), genie, bar, fly: None, fullscreen: false };
     if let Some(b) = app.bar.as_mut() {
         b.start(); // reserve the top strip before the dock measures the work area
@@ -378,6 +380,9 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
     app.dock.start();
     if want_widgets {
         widgets::start(); // after the bar and dock reserved their strips, so the work area is final
+    }
+    if want_switcher {
+        switcher::start();
     }
     update::start();
     if let Some(g) = app.genie.as_mut() {
