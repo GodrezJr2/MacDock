@@ -515,6 +515,11 @@ pub trait Content {
     fn glass(&self) -> Option<f32> {
         None
     }
+    /// A glass window that grows downward as it fills (Spotlight): its top at this fraction of the screen
+    /// height, and the tallest it gets. The window is that tall from the start; the glass follows the content.
+    fn glass_top(&self) -> Option<(f32, f32)> {
+        None
+    }
     /// Esc: close, unless the panel has something to undo first (a search).
     fn escape(&mut self) -> Cmd {
         Cmd::Close
@@ -597,6 +602,9 @@ pub struct Flyout {
     stage_pm: Option<Pixmap>,
     /// the glass window's body (shadow, lens of the screen behind it, tint), built once when it opens
     glass: Option<Pixmap>,
+    /// the blurred screen behind a growing glass window, and the panel height its glass was cut for
+    under: Option<Pixmap>,
+    glass_h: f32,
     tracking: bool,
     pub stay_open: bool,
     /// a window panel: stays open, can be dragged, minimized and zoomed to fill the screen
@@ -621,7 +629,7 @@ impl Flyout {
         let screen_w_px = unsafe { GetSystemMetrics(SM_CXSCREEN) };
         let mut f = Flyout {
             hwnd, kind, content, dpi: dpi as f32, right_px, top_px, screen_w_px, pos: (0, 0), mouse: None, hot: None,
-            press: None, spots: Vec::new(), surface: None, stage_pm: None, glass: None, tracking: false, stay_open: window, window, moved: None,
+            press: None, spots: Vec::new(), surface: None, stage_pm: None, glass: None, under: None, glass_h: 0.0, tracking: false, stay_open: window, window, moved: None,
             full: false, view: (dpi as f32, 0.0, 0.0), stage: false, born: std::time::Instant::now(), anim_timer: false,
         };
         f.content.opened(hwnd.0 as isize);
@@ -869,12 +877,22 @@ impl Flyout {
     /// so the labels read on any wallpaper. Captured once, before the window first shows.
     #[allow(clippy::too_many_arguments)]
     fn build_glass(x: i32, y: i32, pw: u32, ph: u32, w: f32, panel_h: f32, s: f32) -> Option<Pixmap> {
+        let under = Self::glass_under(x, y, pw, ph, s)?;
+        Self::glass_body(&under, pw, ph, w, panel_h, s)
+    }
+
+    /// What is on screen where the window will be, blurred.
+    fn glass_under(x: i32, y: i32, pw: u32, ph: u32, s: f32) -> Option<Pixmap> {
         let mut under = gfx::capture_screen(x, y, pw, ph).or_else(|| {
             let mut p = Pixmap::new(pw, ph)?;
             p.fill(Color::from_rgba8(0x30, 0x30, 0x34, 0xFF));
             Some(p)
         })?;
         gfx::blur(&mut under, 22.0 * s);
+        Some(under)
+    }
+
+    fn glass_body(under: &Pixmap, pw: u32, ph: u32, w: f32, panel_h: f32, s: f32) -> Option<Pixmap> {
         let mut pm = Pixmap::new(pw, ph)?;
         let (gx, gy, gw, gh, r) = (MARGIN * s, MARGIN * s, w * s, panel_h * s, GLASS_R * s);
         if let Some(path) = gfx::rrect(gx, gy + 5.0 * s, gw, gh, r) {
@@ -882,7 +900,7 @@ impl Flyout {
                 pm.draw_pixmap(sx.round() as i32, sy.round() as i32, sh.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
             }
         }
-        let (mut g, lx, ly) = gfx::liquid_glass(&under, gx, gy, gw, gh, r, 16.0 * s, (0.0, 0.0), (0.0, 0.0))?;
+        let (mut g, lx, ly) = gfx::liquid_glass(under, gx, gy, gw, gh, r, 16.0 * s, (0.0, 0.0), (0.0, 0.0))?;
         // like the dock: a light grey wash, a touch brighter at the top; just enough shade that white labels
         // still read over a bright wallpaper
         if let Some(p) = gfx::rrect(gx - lx as f32, gy - ly as f32, gw, gh, r) {
@@ -915,14 +933,32 @@ impl Flyout {
         let (padx, pady) = self.content.padding();
         let s = self.dpi;
         let panel_h = ch + 2.0 * pady;
-        let (pw, ph) = (((w + 2.0 * MARGIN) * s).ceil() as u32, ((panel_h + 2.0 * MARGIN) * s).ceil() as u32);
+        let top = self.content.glass_top();
+        let full_h = top.map_or(panel_h, |t| t.1 + 2.0 * pady);
+        let (pw, ph) = (((w + 2.0 * MARGIN) * s).ceil() as u32, ((full_h + 2.0 * MARGIN) * s).ceil() as u32);
         let sh = unsafe { GetSystemMetrics(SM_CYSCREEN) };
-        // centred, a little above the middle as macOS places it, and never under the menu bar
         let x = (self.screen_w_px - pw as i32) / 2;
-        let y = ((sh - ph as i32) / 2 - (24.0 * s) as i32).max(self.top_px - (40.0 * s) as i32).max(0);
+        let y = match top {
+            // a fixed top, growing down
+            Some((f, _)) => ((sh as f32 * f) as i32 - (MARGIN * s) as i32).max(self.top_px - (40.0 * s) as i32).max(0),
+            // centred, a little above the middle as macOS places it, and never under the menu bar
+            None => ((sh - ph as i32) / 2 - (24.0 * s) as i32).max(self.top_px - (40.0 * s) as i32).max(0),
+        };
         self.pos = (x, y);
-        if self.glass.as_ref().is_none_or(|g| g.width() != pw || g.height() != ph) {
-            self.glass = Self::build_glass(x, y, pw, ph, w, panel_h, s);
+        let stale = self.glass.as_ref().is_none_or(|g| g.width() != pw || g.height() != ph);
+        if top.is_none() {
+            if stale {
+                self.glass = Self::build_glass(x, y, pw, ph, w, panel_h, s);
+            }
+        } else if stale || (self.glass_h - panel_h).abs() > 0.25 {
+            // the screen is captured once (before the window shows); only the glass is cut again as it grows
+            if self.under.as_ref().is_none_or(|u| u.width() != pw || u.height() != ph) {
+                self.under = Self::glass_under(x, y, pw, ph, s);
+            }
+            if let Some(u) = self.under.as_ref() {
+                self.glass = Self::glass_body(u, pw, ph, w, panel_h, s);
+                self.glass_h = panel_h;
+            }
         }
         let Some(base) = self.glass.as_ref() else { return };
         let mut pm = base.clone();
@@ -944,7 +980,7 @@ impl Flyout {
             let a = (t / 0.16).min(1.0);
             let a = 1.0 - (1.0 - a) * (1.0 - a);
             if let Some(mut out) = Pixmap::new(pw, ph) {
-                let (ax, ay) = (pw as f32 / 2.0, ph as f32 / 2.0);
+                let (ax, ay) = (pw as f32 / 2.0, (MARGIN + panel_h / 2.0) * s);
                 let paint = PixmapPaint { opacity: a, quality: tiny_skia::FilterQuality::Bilinear, ..Default::default() };
                 out.draw_pixmap(0, 0, pm.as_ref(), &paint, Transform::from_row(z, 0.0, 0.0, z, ax - ax * z, ay - ay * z), None);
                 pm = out;

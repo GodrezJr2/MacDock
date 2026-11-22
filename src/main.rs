@@ -11,6 +11,7 @@ mod dock;
 mod dropfiles;
 mod ai_usage;
 mod apps;
+mod spotlight;
 mod claude_oauth;
 mod fly_ai;
 mod fly_battery;
@@ -61,6 +62,8 @@ pub enum Ev {
     MinimizeStart(isize),
     MoveSizeEnd(isize),
     Settings(fly_settings::Change),
+    /// Alt+Space
+    Spotlight,
 }
 
 thread_local! {
@@ -209,6 +212,7 @@ impl App {
             menubar::Extra::Calendar => Box::new(fly_cal::CalFly::new()),
             menubar::Extra::Settings => return self.open_settings(),
             menubar::Extra::Launchpad => self.all_apps(),
+            menubar::Extra::Spotlight => Box::new(spotlight::Spotlight::new(!self.dock.config().reduce_motion)),
         };
         let Some(b) = self.bar.as_mut() else { return };
         b.set_open_extra(Some(kind));
@@ -230,6 +234,16 @@ impl App {
             None => ((80.0 * self.dock.dpi) as i32, self.dock.dpi),
         };
         self.win = Some(flyout::Flyout::open(menubar::Extra::Settings, Box::new(s), 0, top, dpi));
+    }
+
+    /// Spotlight from Alt+Space or the menu bar's magnifier (works without the menu bar too).
+    fn open_spotlight(&mut self) {
+        if self.bar.is_some() {
+            return self.toggle_flyout(menubar::Extra::Spotlight, 0);
+        }
+        self.close_flyout();
+        let content = Box::new(spotlight::Spotlight::new(!self.dock.config().reduce_motion));
+        self.fly = Some(flyout::Flyout::open(menubar::Extra::Spotlight, content, 0, (80.0 * self.dock.dpi) as i32, self.dock.dpi));
     }
 
     /// Launchpad from the dock's menu (works without the menu bar too).
@@ -420,6 +434,7 @@ impl App {
                 }
             }
             Ev::Settings(ch) => return self.on_settings(ch),
+            Ev::Spotlight => self.open_spotlight(),
             Ev::Genie(ge) => {
                 if let Some(g) = self.genie.as_mut() {
                     g.handle(ge);
@@ -629,6 +644,9 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
         .collect();
 
     unsafe {
+        // Spotlight on Alt+Space (macOS has Cmd+Space; Win+Space is taken by the keyboard layouts)
+        use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, MOD_ALT, MOD_NOREPEAT, VK_SPACE};
+        let _ = RegisterHotKey(HWND::default(), 1, MOD_ALT | MOD_NOREPEAT, VK_SPACE.0 as u32);
         let mut msg = MSG::default();
         'run: loop {
             if !app.awake() {
@@ -636,12 +654,18 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
                 if !GetMessageW(&mut msg, HWND::default(), 0, 0).as_bool() {
                     break;
                 }
+                if msg.message == WM_HOTKEY {
+                    push(Ev::Spotlight);
+                }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
             while PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_REMOVE).as_bool() {
                 if msg.message == WM_QUIT {
                     break 'run;
+                }
+                if msg.message == WM_HOTKEY {
+                    push(Ev::Spotlight);
                 }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);

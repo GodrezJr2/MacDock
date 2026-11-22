@@ -88,11 +88,15 @@ pub fn path() -> String {
     format!("{}\\config.json", dir())
 }
 
+/// The dock's Apps item (macOS 26's Launchpad icon): opens the Apps window, or the full-screen Launchpad.
+pub const APPS_ITEM: &str = "macdock:apps";
+
 impl Default for Config {
     fn default() -> Self {
         Config {
             pinned: [
                 r"shell:AppsFolder\Microsoft.Windows.Explorer",
+                APPS_ITEM,
                 r"shell:AppsFolder\Chrome",
                 r"shell:AppsFolder\Microsoft.OutlookForWindows_8wekyb3d8bbwe!Microsoft.OutlookforWindows",
                 r"shell:AppsFolder\Microsoft.WindowsTerminal_8wekyb3d8bbwe!App",
@@ -138,6 +142,7 @@ impl Config {
     pub fn load() -> Config {
         let mut c = Config::default();
         let Some(Value::Object(mut v)) = std::fs::read_to_string(path()).ok().and_then(|s| serde_json::from_str::<Value>(s.trim_start_matches('\u{feff}')).ok()) else {
+            c.extra.insert("AppsInDock".into(), Value::Bool(true));
             c.save();
             return c;
         };
@@ -197,6 +202,15 @@ impl Config {
             c.magnify = x.clamp(MAGNIFY.0, MAGNIFY.1);
         }
         c.extra = v;
+        // docks set up before the Apps item existed get it once, after Finder (File Explorer) as on macOS;
+        // removed later, it stays removed
+        if !c.extra.contains_key("AppsInDock") {
+            if !c.pinned.iter().any(|p| p == APPS_ITEM) {
+                c.pinned.insert(c.pinned.len().min(1), APPS_ITEM.into());
+            }
+            c.extra.insert("AppsInDock".into(), Value::Bool(true));
+            c.save();
+        }
         c
     }
 

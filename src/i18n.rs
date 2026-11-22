@@ -128,6 +128,10 @@ fn id(s: &str) -> Option<&'static str> {
         "No Results" => "Tidak Ada Hasil",
         // the Apps window and its categories
         "Applications" => "Aplikasi",
+        "Apps" => "Apps",
+        "Spotlight Search" => "Cari dengan Spotlight",
+        "Application" => "Aplikasi",
+        "Search the Web for" => "Cari di web",
         "Utilities" => "Utilitas",
         "Productivity & Finance" => "Produktivitas & Keuangan",
         "Entertainment" => "Hiburan",

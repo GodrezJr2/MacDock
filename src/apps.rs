@@ -88,7 +88,7 @@ fn load_recents() -> Vec<String> {
     std::fs::read_to_string(recents_path()).map(|s| s.lines().filter(|l| !l.is_empty()).map(String::from).collect()).unwrap_or_default()
 }
 
-fn remember(spec: &str) {
+pub(crate) fn remember(spec: &str) {
     let mut r = load_recents();
     r.retain(|s| s != spec);
     r.insert(0, spec.to_string());

@@ -21,7 +21,7 @@ use windows::Win32::UI::Shell::{SHAppBarMessage, SHEmptyRecycleBinW, ABE_BOTTOM,
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::badges;
-use crate::config::Config;
+use crate::config::{Config, APPS_ITEM};
 use crate::gfx::{self, Font, Surface};
 use crate::menu::{self, Anchor, Entry};
 use crate::shell::{self, eq_ic, AppWindow, Shell};
@@ -245,6 +245,46 @@ impl Item {
         }
         false
     }
+}
+
+/// The Apps icon, drawn: nine coloured squares on a light tile, the way macOS 26 draws it. A full square at
+/// 256 px, which `tile::make` shapes and shadows like every other icon.
+fn apps_icon() -> Option<Pixmap> {
+    let n = 256.0;
+    let mut pm = Pixmap::new(256, 256)?;
+    let mut bg = Paint::default();
+    bg.shader = LinearGradient::new(
+        Point::from_xy(0.0, 0.0),
+        Point::from_xy(0.0, n),
+        vec![GradientStop::new(0.0, Color::from_rgba8(0xFD, 0xFD, 0xFE, 255)), GradientStop::new(1.0, Color::from_rgba8(0xD6, 0xDA, 0xE2, 255))],
+        SpreadMode::Pad,
+        Transform::identity(),
+    )?;
+    pm.fill_rect(Rect::from_xywh(0.0, 0.0, n, n)?, &bg, Transform::identity(), None);
+    const COLOURS: [(u8, u8, u8); 9] = [
+        (0xFF, 0x45, 0x3A), (0xFF, 0x9F, 0x0A), (0xFF, 0xD6, 0x0A),
+        (0x30, 0xD1, 0x58), (0x40, 0xC8, 0xE0), (0x0A, 0x84, 0xFF),
+        (0x5E, 0x5C, 0xE6), (0xBF, 0x5A, 0xF2), (0xFF, 0x37, 0x5F),
+    ];
+    let (size, gap) = (50.0, 17.0);
+    let start = (n - (3.0 * size + 2.0 * gap)) / 2.0;
+    for (k, &(r, g, b)) in COLOURS.iter().enumerate() {
+        let (x, y) = (start + (k % 3) as f32 * (size + gap), start + (k / 3) as f32 * (size + gap));
+        let Some(path) = gfx::rrect(x, y, size, size, 14.0) else { continue };
+        let mut p = Paint::default();
+        p.anti_alias = true;
+        // a little lighter at the top, like a lit glass chip (pixels are BGRA here, as Windows hands icons over)
+        let lift = |c: u8| c.saturating_add(((255 - c) as f32 * 0.22) as u8);
+        p.shader = LinearGradient::new(
+            Point::from_xy(0.0, y),
+            Point::from_xy(0.0, y + size),
+            vec![GradientStop::new(0.0, Color::from_rgba8(lift(b), lift(g), lift(r), 255)), GradientStop::new(1.0, Color::from_rgba8(b, g, r, 255))],
+            SpreadMode::Pad,
+            Transform::identity(),
+        )?;
+        pm.fill_path(&path, &p, FillRule::Winding, Transform::identity(), None);
+    }
+    Some(pm)
 }
 
 /// Squirrel apps are pinned through …\App\Update.exe while their windows belong to …\App\app-1.2.3\App.exe:
@@ -638,6 +678,9 @@ impl Dock {
     /// The shell icon for an item, put on a squircle tile when tiles are on (fetched big, tiled at draw size).
     fn app_icon(&self, key: &str, spec: &str, exe: Option<&str>) -> Option<Rc<Pixmap>> {
         let px = self.icon_px();
+        if spec == APPS_ITEM && !self.cfg.icon_overrides.contains_key(key) {
+            return apps_icon().and_then(|raw| tile::make(&raw, px)).map(Rc::new);
+        }
         // a picked icon is drawn as it is (already shaped, e.g. a macOS-style PNG), only trimmed and fitted
         if let Some(path) = self.cfg.icon_overrides.get(key).and_then(|v| v.as_str()) {
             let lower = path.to_lowercase();
@@ -664,6 +707,11 @@ impl Dock {
         let key = format!("pin:{}", spec.to_lowercase());
         let mut it = Item::new(key.clone(), String::new(), None, 1.0);
         it.launch = Some(spec.to_string());
+        if spec == APPS_ITEM {
+            it.name = crate::i18n::t("Apps").to_string();
+            it.icon = self.app_icon(&key, spec, None);
+            return it;
+        }
         const APPS: &str = "shell:AppsFolder\\";
         if spec.len() > APPS.len() && spec.is_char_boundary(APPS.len()) && eq_ic(&spec[..APPS.len()], APPS) {
             let aumid = spec[APPS.len()..].to_string();
@@ -1083,6 +1131,9 @@ impl Dock {
             self.downloads_menu(i);
             return None;
         }
+        if it.launch.as_deref() == Some(APPS_ITEM) {
+            return Some(Act::OpenLaunchpad);
+        }
         let it = &mut self.items[i];
         if !it.running() {
             let l = it.launch.clone()?;
@@ -1265,6 +1316,9 @@ impl Dock {
             }
             Do::Activate(h) => shell::activate(h),
             Do::Launch => {
+                if self.items[i].launch.as_deref() == Some(APPS_ITEM) {
+                    return Some(Act::OpenLaunchpad);
+                }
                 if let Some(l) = self.items[i].launch.clone() {
                     shell::launch(&l);
                 }
@@ -1375,7 +1429,7 @@ impl Dock {
             crate::dropfiles::recycle(files);
             return;
         }
-        if it.stack {
+        if it.stack || it.launch.as_deref() == Some(APPS_ITEM) {
             return;
         }
         let aumid = it.aumid.clone().or_else(|| {
@@ -2036,5 +2090,17 @@ fn downloads_dir() -> Option<String> {
         }
         let s = format!("{}\\Downloads", std::env::var("USERPROFILE").ok()?);
         std::path::Path::new(&s).is_dir().then_some(s)
+    }
+}
+
+#[cfg(test)]
+mod apps_icon_tests {
+    /// The drawn Apps icon as the dock shows it: target/apps_icon.png
+    #[test]
+    #[ignore]
+    fn apps_icon_snapshot() {
+        let t = crate::tile::make(&super::apps_icon().unwrap(), 128).unwrap();
+        let path = format!(r"{}\target\apps_icon.png", env!("CARGO_MANIFEST_DIR"));
+        assert!(crate::gfx::save_png(&path, t.width(), t.height(), t.data()));
     }
 }

@@ -79,12 +79,13 @@ pub enum Extra {
     Calendar,
     Settings,
     Launchpad,
+    Spotlight,
 }
 
 impl Extra {
     /// A panel of its own in the middle of the screen, not a drop-down under its menu bar item.
     pub fn centred(self) -> bool {
-        matches!(self, Extra::Settings | Extra::Launchpad)
+        matches!(self, Extra::Settings | Extra::Launchpad | Extra::Spotlight)
     }
 
     /// A window of its own (traffic lights, stays open, can be dragged), not a drop-down.
@@ -607,7 +608,7 @@ impl MenuBar {
     pub fn set_open_extra(&mut self, e: Option<Extra>) {
         let want = e.and_then(|e| {
             self.slots.iter().position(|s| {
-                matches!((s.item, e), (Item::Chevron, Extra::Tray) | (Item::Ai, Extra::Ai) | (Item::Battery, Extra::Battery) | (Item::Net, Extra::Wifi) | (Item::Cc, Extra::ControlCenter) | (Item::Clock, Extra::Calendar) | (Item::Apps, Extra::Launchpad))
+                matches!((s.item, e), (Item::Chevron, Extra::Tray) | (Item::Ai, Extra::Ai) | (Item::Battery, Extra::Battery) | (Item::Net, Extra::Wifi) | (Item::Cc, Extra::ControlCenter) | (Item::Clock, Extra::Calendar) | (Item::Apps, Extra::Launchpad) | (Item::Search, Extra::Spotlight))
             })
         });
         if want != self.open {
@@ -628,6 +629,7 @@ impl MenuBar {
             Extra::Calendar => Item::Clock,
             Extra::Settings => Item::Logo,
             Extra::Launchpad => Item::Apps,
+            Extra::Spotlight => Item::Search,
         };
         self.slots.iter().find(|s| s.item == item).map(|s| (self.px(s.x), self.px(s.x + s.w)))
     }
@@ -655,11 +657,10 @@ impl MenuBar {
             Item::Battery => return Some(BarAct::Flyout(Extra::Battery, l, r)),
             Item::Net => return Some(BarAct::Flyout(Extra::Wifi, l, r)),
             Item::Cc => return Some(BarAct::Flyout(Extra::ControlCenter, l, r)),
-            Item::Search => key(&[VK_LWIN, b'S']),
+            Item::Search => return Some(BarAct::Flyout(Extra::Spotlight, l, r)),
             Item::Apps => return Some(BarAct::Flyout(Extra::Launchpad, l, r)),
             Item::Clock => return Some(BarAct::Flyout(Extra::Calendar, l, r)),
         }
-        None
     }
 
     // -------------------------------------------------------------- menus
