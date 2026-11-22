@@ -45,6 +45,18 @@ static BACKDROP: std::sync::Mutex<Option<std::sync::Arc<Pixmap>>> = std::sync::M
 /// The wallpaper changed: build the full-screen backdrop again next time.
 pub fn forget_backdrop() {
     *BACKDROP.lock().unwrap() = None;
+    warm_backdrop();
+}
+
+/// Build the backdrop on a worker (decoding and blurring the wallpaper takes ~150 ms) so the Launchpad's first frame doesn't wait.
+pub fn warm_backdrop() {
+    std::thread::spawn(|| unsafe {
+        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        let (sw, sh) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+        if sw > 0 && sh > 0 {
+            let _ = stage_backdrop(sw as u32, sh as u32);
+        }
+    });
 }
 
 /// The wallpaper at `w` x `h`, heavily blurred and dimmed like the macOS Launchpad background.
@@ -698,23 +710,30 @@ impl Flyout {
         self.pos = (0, 0);
         let t = if motion() && self.content.motion() { (self.born.elapsed().as_secs_f32() * 1000.0 / STAGE_IN_MS).min(1.0) } else { 1.0 };
         let e = 1.0 - (1.0 - t).powi(3); // ease out
-        let Some(mut pm) = Pixmap::new(pw, ph) else { return };
         let back = stage_backdrop(pw, ph);
-        let fade = PixmapPaint { opacity: e, ..Default::default() };
-        pm.draw_pixmap(0, 0, back.as_ref().as_ref(), &fade, Transform::identity(), None);
+        if self.surface.as_ref().is_none_or(|sf| sf.w != pw || sf.h != ph) {
+            self.surface = Surface::new(pw, ph);
+        }
+        let Some(sf) = self.surface.as_mut() else { return };
+        let bytes = sf.bytes();
+        if e >= 1.0 {
+            bytes.copy_from_slice(back.data());
+        } else {
+            bytes.fill(0);
+        }
+        let Some(mut pm) = tiny_skia::PixmapMut::from_bytes(bytes, pw, ph) else { return };
+        if e < 1.0 {
+            let fade = PixmapPaint { opacity: e, ..Default::default() };
+            pm.draw_pixmap(0, 0, back.as_ref().as_ref(), &fade, Transform::identity(), None);
+        }
         // the icons settle from slightly larger, as on macOS
         let z = 1.0 + 0.08 * (1.0 - e);
         let (cx, cy) = (sw as f32 / 2.0, sh as f32 / 2.0);
         let tf = Transform::from_row(z, 0.0, 0.0, z, cx - cx * z, cy - cy * z);
         let paint = PixmapPaint { opacity: e, quality: if t < 1.0 { tiny_skia::FilterQuality::Bilinear } else { tiny_skia::FilterQuality::Nearest }, ..Default::default() };
+        let tf = if e >= 1.0 { Transform::identity() } else { tf };
         pm.draw_pixmap(0, 0, layer.as_ref(), &paint, tf, None);
-        if self.surface.as_ref().is_none_or(|sf| sf.w != pw || sf.h != ph) {
-            self.surface = Surface::new(pw, ph);
-        }
-        if let Some(sf) = self.surface.as_mut() {
-            sf.bytes().copy_from_slice(pm.data());
-            sf.present(self.hwnd, 0, 0);
-        }
+        sf.present(self.hwnd, 0, 0);
     }
 
     fn render_panel(&mut self) {

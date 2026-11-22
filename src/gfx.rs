@@ -167,7 +167,7 @@ pub fn wallpaper(fw: u32, fh: u32) -> Option<Pixmap> {
 }
 
 /// Text style for [`text_ex`].
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Font {
     pub face: &'static str,
     pub px: i32,
@@ -183,7 +183,34 @@ pub fn text(s: &str, px: i32) -> Option<Pixmap> {
 }
 
 /// Measure text in pixels without rasterizing it.
+/// Text is drawn and measured over and over with the same strings (every frame of an animation, every
+/// redraw of a panel), and each GDI round trip makes a font, a DC and a bitmap; so both are remembered.
+/// Per thread, and dropped wholesale when they grow past their cap (rendered text is kept smaller: RAM matters).
+const TEXT_CACHE_MAX: usize = 3000;
+const TEXT_PIX_MAX: usize = 400;
+
+thread_local! {
+    static MEASURED: std::cell::RefCell<std::collections::HashMap<(String, Font), (i32, i32)>> = Default::default();
+    static RENDERED: std::cell::RefCell<std::collections::HashMap<(String, Font, (u8, u8, u8)), Option<Pixmap>>> = Default::default();
+}
+
 pub fn measure(s: &str, f: Font) -> (i32, i32) {
+    let key = (s.to_string(), f);
+    if let Some(v) = MEASURED.with(|m| m.borrow().get(&key).copied()) {
+        return v;
+    }
+    let v = measure_gdi(s, f);
+    MEASURED.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() > TEXT_CACHE_MAX {
+            m.clear();
+        }
+        m.insert(key, v);
+    });
+    v
+}
+
+fn measure_gdi(s: &str, f: Font) -> (i32, i32) {
     unsafe {
         let dc = CreateCompatibleDC(HDC::default());
         let font = make_font(f);
@@ -213,6 +240,22 @@ pub fn text_ex(s: &str, f: Font, rgb: (u8, u8, u8)) -> Option<Pixmap> {
     if s.is_empty() {
         return None;
     }
+    let key = (s.to_string(), f, rgb);
+    if let Some(v) = RENDERED.with(|m| m.borrow().get(&key).cloned()) {
+        return v;
+    }
+    let v = text_gdi(s, f, rgb);
+    RENDERED.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() > TEXT_PIX_MAX {
+            m.clear();
+        }
+        m.insert(key, v.clone());
+    });
+    v
+}
+
+fn text_gdi(s: &str, f: Font, rgb: (u8, u8, u8)) -> Option<Pixmap> {
     unsafe {
         let dc = CreateCompatibleDC(HDC::default());
         let font = make_font(f);

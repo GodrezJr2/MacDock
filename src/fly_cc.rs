@@ -30,6 +30,9 @@ const ID_PLAY: u32 = 11;
 const ID_NEXT: u32 = 12;
 
 static MANAGER: Mutex<Option<Manager>> = Mutex::new(None);
+/// what the slow reads said last time (Energy Saver ~90 ms, the Wi-Fi name ~30 ms), shown while they run again
+static LAST_SAVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LAST_WIFI: Mutex<String> = Mutex::new(String::new());
 
 fn session() -> Option<Session> {
     let mut m = MANAGER.lock().unwrap();
@@ -55,6 +58,8 @@ struct State {
     brightness: Option<f32>,
     volume: Option<f32>,
     media: Option<Media>,
+    /// Energy Saver holding the power mode, once read on the worker
+    saver: Option<bool>,
 }
 
 /// (pending value, worker running)
@@ -124,9 +129,11 @@ fn read_media(st: &Mutex<State>) {
 
 impl ControlCenter {
     pub fn new() -> ControlCenter {
-        let st = State { wifi_on: true, wifi_sub: wifi_sub(true), bt: None, ..Default::default() };
+        // only cheap reads here: the panel opens at once and the worker fills in the rest
+        let st = State { wifi_on: true, wifi_sub: LAST_WIFI.lock().unwrap().clone(), bt: None, ..Default::default() };
         ControlCenter {
-            hwnd: 0, st: Arc::new(Mutex::new(st)), dark: sysctl::dark(), power: sysctl::power_mode(), saver: sysctl::power_saver(), drag: None,
+            hwnd: 0, st: Arc::new(Mutex::new(st)), dark: sysctl::dark(), power: sysctl::power_mode(),
+            saver: LAST_SAVER.load(std::sync::atomic::Ordering::Relaxed), drag: None,
             bright_job: Arc::new(Mutex::new((None, false))), vol_job: Arc::new(Mutex::new((None, false))),
         }
     }
@@ -213,17 +220,19 @@ impl Content for ControlCenter {
     }
     fn opened(&mut self, hwnd: isize) {
         self.hwnd = hwnd;
-        self.dark = sysctl::dark();
-        self.power = sysctl::power_mode();
-        self.saver = sysctl::power_saver();
         self.work(|st| {
             let on = fly_wifi::is_on();
+            let sub = wifi_sub(on);
+            *LAST_WIFI.lock().unwrap() = sub.clone();
             {
                 let mut s = st.lock().unwrap();
                 s.wifi_on = on;
-                s.wifi_sub = wifi_sub(on);
+                s.wifi_sub = sub;
                 s.volume = sysctl::volume();
             }
+            let saver = sysctl::power_saver();
+            LAST_SAVER.store(saver, std::sync::atomic::Ordering::Relaxed);
+            st.lock().unwrap().saver = Some(saver);
             read_media(st);
             let bt = sysctl::bluetooth().map(|r| r.State().is_ok_and(|x| x == windows::Devices::Radios::RadioState::On));
             {
@@ -294,7 +303,11 @@ impl Content for ControlCenter {
                 self.power = (sysctl::power_mode() + 1) % 3;
                 sysctl::set_power_mode(self.power);
                 self.power = sysctl::power_mode();
-                self.saver = sysctl::power_saver();
+                self.work(|st| {
+                    let saver = sysctl::power_saver();
+                    LAST_SAVER.store(saver, std::sync::atomic::Ordering::Relaxed);
+                    st.lock().unwrap().saver = Some(saver);
+                });
             }
             ID_POWER_TEXT => return Cmd::Launch("ms-settings:powersleep".into()),
             ID_PREV | ID_PLAY | ID_NEXT => self.media_cmd(id),
@@ -328,12 +341,13 @@ impl Content for ControlCenter {
         toggle(ui, rx + 10.0, 10.0, col - 20.0, '\u{E708}', "Dark Mode", if self.dark { "On" } else { "Off" }, self.dark, ID_DARK, ID_DARK);
         tile(ui, rx, th + 8.0, col, th);
         let mode = sysctl::POWER_MODES[self.power].0;
-        let power_sub = if self.saver { format!("{mode} · Saver") } else { mode.to_string() };
+        let saver = st.saver.unwrap_or(self.saver);
+        let power_sub = if saver { format!("{mode} · Saver") } else { mode.to_string() };
         let pg = match self.power {
             0 => '\u{EC0A}',
             _ => '\u{E945}',
         };
-        toggle(ui, rx + 10.0, th + 8.0 + 10.0, col - 20.0, pg, "Power Mode", &power_sub, self.power != 1 || self.saver, ID_POWER_DOT, ID_POWER_TEXT);
+        toggle(ui, rx + 10.0, th + 8.0 + 10.0, col - 20.0, pg, "Power Mode", &power_sub, self.power != 1 || saver, ID_POWER_DOT, ID_POWER_TEXT);
         let mut y = right_h + 8.0;
 
         // display and sound
