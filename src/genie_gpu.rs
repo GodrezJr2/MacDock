@@ -61,7 +61,7 @@ pub struct Gpu {
     raster: ID3D11RasterizerState,
     size: (u32, u32),
     msaa: Option<(ID3D11Texture2D, ID3D11RenderTargetView)>,
-    tex: Option<(usize, ID3D11ShaderResourceView)>, // keyed by the snapshot's address
+    tex: Vec<(usize, ID3D11ShaderResourceView)>, // keyed by the snapshot's address, newest last
 }
 
 fn compile(entry: PCSTR, target: PCSTR) -> windows::core::Result<Vec<u8>> {
@@ -158,7 +158,7 @@ impl Gpu {
         Ok(Gpu {
             hwnd, dev, ctx, swap, _dcomp: dcomp, _target: target, _visual: visual, vs: vs.unwrap(), ps: ps.unwrap(),
             layout: layout.unwrap(), vbuf: vbuf.unwrap(), cbuf: cbuf.unwrap(), sampler: sampler.unwrap(), raster: raster.unwrap(),
-            size: (8, 8), msaa: None, tex: None,
+            size: (8, 8), msaa: None, tex: Vec::new(),
         })
     }
 
@@ -193,10 +193,8 @@ impl Gpu {
     /// stays smooth instead of shimmering.
     fn texture(&mut self, img: &Arc<Pixmap>) -> windows::core::Result<ID3D11ShaderResourceView> {
         let key = Arc::as_ptr(img) as usize;
-        if let Some((k, srv)) = &self.tex {
-            if *k == key {
-                return Ok(srv.clone());
-            }
+        if let Some((_, srv)) = self.tex.iter().find(|(k, _)| *k == key) {
+            return Ok(srv.clone());
         }
         unsafe {
             let (w, h) = (img.width(), img.height());
@@ -216,27 +214,29 @@ impl Gpu {
             self.dev.CreateShaderResourceView(&t, None, Some(&mut srv))?;
             let srv = srv.unwrap();
             self.ctx.GenerateMips(&srv);
-            self.tex = Some((key, srv.clone()));
+            self.tex.push((key, srv.clone()));
+            if self.tex.len() > 8 {
+                self.tex.remove(0);
+            }
             Ok(srv)
         }
     }
 
     /// Draw the mesh; `rows` are (left, right, y) in screen pixels, `origin` is the window's top-left.
     /// `alpha` fades the whole mesh (premultiplied), 1.0 while it moves.
+    #[cfg(test)]
     pub fn draw(&mut self, img: &Arc<Pixmap>, rows: &[(f64, f64, f64)], origin: (f64, f64), alpha: f32) -> windows::core::Result<()> {
-        let srv = self.texture(img)?;
+        self.draw_many(&[(img, rows)], origin, alpha)
+    }
+
+    /// Draw several meshes in one frame, the first at the back; each is (snapshot, rows) with rows as
+    /// (left, right, y) in screen pixels; `origin` is the overlay's top-left. `alpha` fades them all.
+    pub fn draw_many(&mut self, meshes: &[(&Arc<Pixmap>, &[(f64, f64, f64)])], origin: (f64, f64), alpha: f32) -> windows::core::Result<()> {
         let Some((msaa, rtv)) = self.msaa.clone() else { return Ok(()) };
-        let n = rows.len() - 1;
+        // upload first: a new snapshot's mip generation runs on the same context
+        let srvs = meshes.iter().map(|(img, _)| self.texture(img)).collect::<windows::core::Result<Vec<_>>>()?;
         unsafe {
             let mut m = D3D11_MAPPED_SUBRESOURCE::default();
-            self.ctx.Map(&self.vbuf, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut m))?;
-            let v = std::slice::from_raw_parts_mut(m.pData as *mut [f32; 4], rows.len() * 2);
-            for (i, &(l, r, y)) in rows.iter().enumerate() {
-                let (yy, tv) = ((y - origin.1) as f32, i as f32 / n as f32);
-                v[i * 2] = [(l - origin.0) as f32, yy, 0.0, tv];
-                v[i * 2 + 1] = [(r - origin.0) as f32, yy, 1.0, tv];
-            }
-            self.ctx.Unmap(&self.vbuf, 0);
             self.ctx.Map(&self.cbuf, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut m))?;
             *(m.pData as *mut [f32; 4]) = [self.size.0 as f32, self.size.1 as f32, alpha.clamp(0.0, 1.0), 0.0];
             self.ctx.Unmap(&self.cbuf, 0);
@@ -255,9 +255,20 @@ impl Gpu {
             self.ctx.VSSetConstantBuffers(0, Some(&[Some(self.cbuf.clone())]));
             self.ctx.PSSetShader(&self.ps, None);
             self.ctx.PSSetConstantBuffers(0, Some(&[Some(self.cbuf.clone())]));
-            self.ctx.PSSetShaderResources(0, Some(&[Some(srv)]));
             self.ctx.PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
-            self.ctx.Draw((rows.len() * 2) as u32, 0);
+            for (&(_, rows), srv) in meshes.iter().zip(srvs) {
+                let n = rows.len() - 1;
+                self.ctx.Map(&self.vbuf, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut m))?;
+                let v = std::slice::from_raw_parts_mut(m.pData as *mut [f32; 4], rows.len() * 2);
+                for (i, &(l, r, y)) in rows.iter().enumerate() {
+                    let (yy, tv) = ((y - origin.1) as f32, i as f32 / n as f32);
+                    v[i * 2] = [(l - origin.0) as f32, yy, 0.0, tv];
+                    v[i * 2 + 1] = [(r - origin.0) as f32, yy, 1.0, tv];
+                }
+                self.ctx.Unmap(&self.vbuf, 0);
+                self.ctx.PSSetShaderResources(0, Some(&[Some(srv)]));
+                self.ctx.Draw((rows.len() * 2) as u32, 0);
+            }
             let back: ID3D11Texture2D = self.swap.GetBuffer(0)?;
             self.ctx.ResolveSubresource(&back, 0, &msaa, 0, FMT);
             self.swap.Present(0, DXGI_PRESENT(0)).ok()?;
@@ -267,7 +278,7 @@ impl Gpu {
 
     /// Drop the snapshot texture (it can be large) once an animation is over.
     pub fn release_texture(&mut self) {
-        self.tex = None;
+        self.tex.clear();
     }
 
     /// Shrink the swap chain and drop the MSAA target once an animation is over. Both are sized to the

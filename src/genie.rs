@@ -385,6 +385,93 @@ fn virtual_screen() -> R {
     }
 }
 
+/// A window's own pixels, read from DWM even where other windows cover it (PrintWindow with
+/// PW_RENDERFULLCONTENT), cropped to its visible frame `r`. The screen grab only sees what is in front, so
+/// this is what lets several windows animate at once. None if it fails, the window is wider than SNAP_W, or
+/// it comes back black (some GPU-drawn windows do), so the caller can fall back to the screen.
+fn grab_window(h: HWND, r: RECT) -> Option<Pixmap> {
+    unsafe {
+        let mut wr = RECT::default();
+        GetWindowRect(h, &mut wr).ok()?;
+        let (ww, wh) = (wr.right - wr.left, wr.bottom - wr.top);
+        let (cx, cy, w, hh) = (r.left - wr.left, r.top - wr.top, r.right - r.left, r.bottom - r.top);
+        if ww <= 0 || wh <= 0 || w <= 0 || hh <= 0 || w > SNAP_W || cx < 0 || cy < 0 || cx + w > ww || cy + hh > wh {
+            return None;
+        }
+        let sdc = GetDC(HWND::default());
+        let mdc = CreateCompatibleDC(sdc);
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER { biSize: 40, biWidth: ww, biHeight: -wh, biPlanes: 1, biBitCount: 32, ..Default::default() },
+            ..Default::default()
+        };
+        let mut bits = std::ptr::null_mut();
+        let out = match CreateDIBSection(sdc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0) {
+            Ok(dib) => {
+                let old = SelectObject(mdc, dib);
+                let ok = windows::Win32::Storage::Xps::PrintWindow(h, mdc, windows::Win32::Storage::Xps::PRINT_WINDOW_FLAGS(2)).as_bool();
+                let _ = GdiFlush();
+                SelectObject(mdc, old);
+                let src = std::slice::from_raw_parts(bits as *const u32, (ww * wh) as usize);
+                let mut v: Vec<u8> = Vec::with_capacity((w * hh * 4) as usize);
+                let mut lit = 0u32;
+                for y in 0..hh {
+                    let row = &src[((cy + y) * ww + cx) as usize..((cy + y) * ww + cx + w) as usize];
+                    for &px in row {
+                        if px & 0x00F0_F0F0 != 0 {
+                            lit += 1;
+                        }
+                        v.extend_from_slice(&(px | 0xFF00_0000).to_le_bytes());
+                    }
+                }
+                let _ = DeleteObject(dib);
+                // black (or nearly) means the window did not render into the print: not a usable snapshot
+                if ok && lit as i64 * 100 > (w as i64 * hh as i64) { Pixmap::from_vec(v, IntSize::from_wh(w as u32, hh as u32)?) } else { None }
+            }
+            Err(_) => None,
+        };
+        let _ = DeleteDC(mdc);
+        ReleaseDC(HWND::default(), sdc);
+        out
+    }
+}
+
+/// grab_window for several windows at once, one thread each (~12-22 ms apiece). Those that fail are left out.
+fn grab_windows(hs: &[isize]) -> Vec<(isize, Pixmap, R)> {
+    std::thread::scope(|s| {
+        let jobs: Vec<_> = hs
+            .iter()
+            .map(|&k| {
+                s.spawn(move || {
+                    let r = window_rect(hwnd_of(k))?;
+                    let img = grab_window(hwnd_of(k), r)?;
+                    Some((k, img, R { x: r.left as f64, y: r.top as f64, w: (r.right - r.left) as f64, h: (r.bottom - r.top) as f64 }))
+                })
+            })
+            .collect();
+        jobs.into_iter().filter_map(|j| j.join().ok().flatten()).collect()
+    })
+}
+
+/// `wins` sorted by z-order, front first; any not found among the top-level windows go last.
+fn front_first(wins: &[HWND]) -> Vec<HWND> {
+    let mut order = Vec::with_capacity(wins.len());
+    unsafe {
+        let mut h = GetTopWindow(HWND::default()).unwrap_or_default();
+        while !h.0.is_null() && order.len() < wins.len() {
+            if wins.contains(&h) {
+                order.push(h);
+            }
+            h = GetWindow(h, GW_HWNDNEXT).unwrap_or_default();
+        }
+    }
+    for &w in wins {
+        if !order.contains(&w) {
+            order.push(w);
+        }
+    }
+    order
+}
+
 /// The window's visible frame on screen, clipped to all monitors; None if too small to bother.
 fn window_rect(h: HWND) -> Option<RECT> {
     let mut r = RECT::default();
@@ -559,11 +646,11 @@ fn create_overlay() -> HWND {
 // ------------------------------------------------------------------ the genie
 
 struct Anim {
-    img: Arc<Pixmap>,
-    win: R,
+    /// the windows animating together, back to front (the last one is the window in front)
+    items: Vec<Item>,
     icon: R,
     restore: bool,
-    duration: f64,
+    duration: f64, // of one window; the whole set takes `duration` plus the last one's delay
     frame: u32,
     start: Instant,
     /// (first, last) refresh time of the motion on the DWM clock; None falls back to `start`
@@ -571,11 +658,22 @@ struct Anim {
     started: Then,
     done: Then,
     finished: Option<Instant>,
-    /// restore: the window coming back, and when it was first seen out of the dock
-    front: Option<isize>,
+    /// restore: when the windows were first seen out of the dock
     shown: Option<Instant>,
     stats: Stats,
 }
+
+/// One window in an animation: its snapshot, where it sits, and how long after the start it begins to move.
+struct Item {
+    h: isize,
+    img: Arc<Pixmap>,
+    win: R,
+    delay: f64,
+}
+
+/// Several windows of an app minimizing or restoring together set off one after another by this much, so
+/// they pour into the icon (or out of it) in a cascade instead of as one lump.
+const STAGGER: f64 = 0.05;
 
 /// Frame timing of one animation, written to genie.log when it ends.
 #[derive(Default)]
@@ -864,18 +962,23 @@ impl Genie {
 
     /// Returns (raster ms, present ms); on the GPU path both are CPU time spent submitting.
     fn draw(&mut self, img: &Arc<Pixmap>, win: R, icon: R, p: f64) -> (f64, f64) {
-        self.draw_faded(img, win, icon, p, 1.0)
+        self.draw_set(&[(img, win, p)], icon, 1.0)
     }
 
-    fn draw_faded(&mut self, img: &Arc<Pixmap>, win: R, icon: R, p: f64, alpha: f64) -> (f64, f64) {
-        let rows = shape(win, icon, p);
+    /// Draw several windows at their own progress, back to front, all faded by `alpha`. The CPU fallback only
+    /// draws the last (front) one: its rasterizer owns whole lines.
+    fn draw_set(&mut self, set: &[(&Arc<Pixmap>, R, f64)], icon: R, alpha: f64) -> (f64, f64) {
+        let Some(&(img, win, p)) = set.last() else { return (0.0, 0.0) };
         if let (Some(g), Some(a)) = (self.gpu.as_mut(), self.gpu_area) {
             let t0 = Instant::now();
-            match g.draw(img, &rows, (a.x, a.y), alpha as f32) {
+            let rows: Vec<Vec<(f64, f64, f64)>> = set.iter().map(|&(_, w, p)| shape(w, icon, p)).collect();
+            let meshes: Vec<(&Arc<Pixmap>, &[(f64, f64, f64)])> = set.iter().zip(&rows).map(|(&(i, _, _), r)| (i, r.as_slice())).collect();
+            match g.draw_many(&meshes, (a.x, a.y), alpha as f32) {
                 Ok(()) => return (0.0, t0.elapsed().as_secs_f64() * 1e3),
                 Err(e) => self.gpu_failed(&e),
             }
         }
+        let rows = shape(win, icon, p);
         let Some((sf, area)) = self.surface.as_mut() else { return (0.0, 0.0) };
         let (mut l, mut r) = (f64::MAX, f64::MIN);
         for &(a, b, _) in &rows {
@@ -952,8 +1055,17 @@ impl Genie {
         }
     }
 
-    /// Both rects in screen pixels. False if the overlay is busy.
+    /// One window; both rects in screen pixels. False if the overlay is busy.
     fn play(&mut self, img: Arc<Pixmap>, win: R, icon: R, restore: bool, started: Then, done: Then) -> bool {
+        self.play_set(vec![Item { h: 0, img, win, delay: 0.0 }], icon, restore, started, done)
+    }
+
+    /// Several windows, back to front. Minimizing, the front one leaves first; restoring, it arrives last, so
+    /// it ends up on top.
+    fn play_set(&mut self, mut items: Vec<Item>, icon: R, restore: bool, started: Then, done: Then) -> bool {
+        if items.is_empty() {
+            return false;
+        }
         if self.anim.as_ref().is_some_and(|a| a.finished.is_some()) {
             // the last one is only dissolving into its window: cut that short rather than skip this one
             self.anim = None;
@@ -962,17 +1074,24 @@ impl Genie {
         if self.anim.is_some() {
             return false;
         }
-        let prepared = self.armed.as_ref().is_some_and(|a| Arc::ptr_eq(&a.1, &img));
+        let n = items.len();
+        for (i, it) in items.iter_mut().enumerate() {
+            it.delay = STAGGER * if restore { i } else { n - 1 - i } as f64;
+        }
+        let front = items.last().unwrap();
+        let prepared = n == 1 && self.armed.as_ref().is_some_and(|a| Arc::ptr_eq(&a.1, &front.img));
         self.armed = None;
         ARMED_FOR.store(0, Ordering::Relaxed);
-        self.ensure_surface(win.union(&icon));
-        self.draw(&img, win, icon, if restore { 1.0 } else { 0.0 });
+        let area = items.iter().fold(icon, |a, it| a.union(&it.win));
+        self.ensure_surface(area);
+        let p0 = if restore { 1.0 } else { 0.0 };
+        let set: Vec<(&Arc<Pixmap>, R, f64)> = items.iter().map(|it| (&it.img, it.win, p0)).collect();
+        self.draw_set(&set, icon, 1.0);
         unsafe {
             let _ = ShowWindow(self.overlay(), SW_SHOWNOACTIVATE);
         }
         self.anim = Some(Anim {
-            img, win, icon, restore, duration: if restore { self.secs.1 } else { self.secs.0 }, frame: if prepared { 2 } else { 0 },
-            front: match &done { Then::Restore(f, _) => Some(f.0 as isize), _ => None },
+            items, icon, restore, duration: if restore { self.secs.1 } else { self.secs.0 }, frame: if prepared { 2 } else { 0 },
             start: Instant::now(), vsync: None, started, done, finished: None, shown: None, stats: Stats::default(),
         });
         true
@@ -989,7 +1108,7 @@ impl Genie {
             }
             // wait (without blocking) until the window is out of the dock, let it paint, then dissolve
             if a.shown.is_none() {
-                let out = a.front.map_or(true, |h| unsafe { !IsIconic(hwnd_of(h)).as_bool() });
+                let out = a.items.iter().all(|it| it.h == 0 || unsafe { !IsIconic(hwnd_of(it.h)).as_bool() });
                 if out || f.elapsed().as_secs_f64() > RESTORE_WAIT_MAX {
                     a.shown = Some(Instant::now());
                 }
@@ -1000,8 +1119,8 @@ impl Genie {
                 return;
             }
             if fade > 0.0 {
-                let img = a.img.clone();
-                self.draw_faded(&img, a.win, a.icon, 0.0, 1.0 - smooth(fade / RESTORE_FADE));
+                let set: Vec<(&Arc<Pixmap>, R, f64)> = a.items.iter().map(|it| (&it.img, it.win, 0.0)).collect();
+                self.draw_set(&set, a.icon, 1.0 - smooth(fade / RESTORE_FADE));
             }
             self.anim = Some(a);
             return;
@@ -1029,10 +1148,17 @@ impl Genie {
             },
             (true, None) => a.start.elapsed().as_secs_f64(),
         };
-        let t = (elapsed / a.duration).min(1.0);
-        let p = if a.restore { 1.0 - t } else { t };
-        let img = a.img.clone();
-        let (rt, pt) = self.draw(&img, a.win, a.icon, p);
+        let last = a.items.iter().map(|it| it.delay).fold(0.0, f64::max);
+        let t = (elapsed / (a.duration + last)).min(1.0);
+        let set: Vec<(&Arc<Pixmap>, R, f64)> = a
+            .items
+            .iter()
+            .map(|it| {
+                let ti = ((elapsed - it.delay) / a.duration).clamp(0.0, 1.0);
+                (&it.img, it.win, if a.restore { 1.0 - ti } else { ti })
+            })
+            .collect();
+        let (rt, pt) = self.draw_set(&set, a.icon, 1.0);
         if a.frame > 3 {
             let st = &mut a.stats;
             let now = Instant::now();
@@ -1054,8 +1180,8 @@ impl Genie {
                 let n = st.frames as f64;
                 let avg = st.gap_sum / n;
                 log(&format!(
-                    "{} {:.0}x{:.0}: {} frames, interval avg {avg:.1} ms max {:.1} ms, raster {:.2} ms, present {:.2} ms, dock {:.2} ms, flush {:.2} ms, on battery {}",
-                    if a.restore { "restore" } else { "minimize" }, a.win.w, a.win.h, st.frames, st.gap_max,
+                    "{} {}x {:.0}x{:.0}: {} frames, interval avg {avg:.1} ms max {:.1} ms, raster {:.2} ms, present {:.2} ms, dock {:.2} ms, flush {:.2} ms, on battery {}",
+                    if a.restore { "restore" } else { "minimize" }, a.items.len(), a.items.last().map_or(0.0, |i| i.win.w), a.items.last().map_or(0.0, |i| i.win.h), st.frames, st.gap_max,
                     st.raster / (n + 1.0), st.present / (n + 1.0), LOOP.with(|c| { let (d, _, k) = c.get(); d / k.max(1) as f64 }), LOOP.with(|c| { let (_, f, k) = c.get(); f / k.max(1) as f64 }), on_battery()
                 ));
             }
@@ -1067,6 +1193,9 @@ impl Genie {
     pub fn on_minimize_start(&mut self, h: HWND, icon: R) {
         ARMED_FOR.store(0, Ordering::Relaxed);
         let key = h.0 as isize;
+        if self.anim.as_ref().is_some_and(|a| a.items.iter().any(|it| it.h == key)) {
+            return; // the dock minimized it as part of a set that is already flying (and saved)
+        }
         let Some(s) = self.snaps.get_mut(&key) else {
             log(&format!("minimize without snapshot: {}", describe(h)));
             self.disarm();
@@ -1083,33 +1212,66 @@ impl Genie {
     }
 
     /// Minimize started by the dock: put the fresh snapshot on screen first, then minimize under it.
+    /// Every open window of the app gets its own genie: the front one from the screen, the others (covered,
+    /// at least in part) read from DWM with PrintWindow. A window that cannot be read just minimizes.
     pub fn minimize_from_dock(&mut self, h: HWND, wins: Vec<HWND>, icon: R) {
         self.capture(h, true);
-        let snap = self.snaps.get(&(h.0 as isize)).map(|s| (s.img.clone(), s.rect));
-        let ok = match snap {
-            Some((img, rect)) => self.play(img, rect, icon, false, Then::Minimize(wins.clone()), Then::Nothing),
-            None => false,
-        };
-        if !ok {
+        let open: Vec<HWND> = wins.iter().copied().filter(|&w| unsafe { IsWindowVisible(w).as_bool() && !IsIconic(w).as_bool() }).collect();
+        let others: Vec<isize> = open.iter().filter(|&&w| w != h).map(|w| w.0 as isize).collect();
+        let mut got: HashMap<isize, (Arc<Pixmap>, R)> = HashMap::new();
+        if !self.paused {
+            for (k, img, rect) in grab_windows(&others) {
+                got.insert(k, (Arc::new(img), rect));
+            }
+        }
+        if let Some(s) = self.snaps.get(&(h.0 as isize)) {
+            got.insert(h.0 as isize, (s.img.clone(), s.rect));
+        }
+        // back to front, the window in front last
+        let mut order = front_first(&open);
+        order.retain(|&w| w != h);
+        order.reverse();
+        order.push(h);
+        let mut items = Vec::new();
+        for w in order {
+            let k = w.0 as isize;
+            if let Some((img, rect)) = got.remove(&k) {
+                let snap = Snap { img: img.clone(), rect, at: Instant::now() };
+                self.persist(w, &snap); // the restore reads it back if memory has let it go
+                self.snaps.insert(k, snap);
+                items.push(Item { h: k, img, win: rect, delay: 0.0 });
+            }
+        }
+        self.prune();
+        if !self.play_set(items, icon, false, Then::Minimize(wins.clone()), Then::Nothing) {
             minimize_all(&wins);
         }
     }
 
     /// Plays the window coming out of the dock, then restores it. Restores at once if there is no snapshot.
+    /// Every minimized window of the app comes out with its own genie, the front one last (on top).
     pub fn restore(&mut self, front: HWND, minimized: Vec<HWND>, icon: R) {
-        let then = Then::Restore(front, minimized);
-        let key = front.0 as isize;
-        let snap = match self.snaps.remove(&key) {
-            Some(s) => Some(s),
-            None => self.load_persisted(front),
-        };
-        forget(key);
-        let Some(s) = snap else {
-            log(&format!("restore without snapshot: {}", describe(front)));
+        let then = Then::Restore(front, minimized.clone());
+        let mut order: Vec<HWND> = minimized.into_iter().filter(|&w| w != front).collect();
+        order.push(front);
+        let mut items = Vec::new();
+        for w in order {
+            let key = w.0 as isize;
+            let snap = match self.snaps.remove(&key) {
+                Some(s) => Some(s),
+                None => self.load_persisted(w),
+            };
+            forget(key);
+            match snap {
+                Some(s) => items.push(Item { h: key, img: s.img, win: s.rect, delay: 0.0 }),
+                None => log(&format!("restore without snapshot: {}", describe(w))),
+            }
+        }
+        if items.is_empty() {
             then.run();
             return;
-        };
-        if !self.play(s.img, s.rect, icon, true, Then::Nothing, then.clone()) {
+        }
+        if !self.play_set(items, icon, true, Then::Nothing, then.clone()) {
             log(&format!("restore skipped, overlay busy: {}", describe(front)));
             then.run();
         }
@@ -1211,6 +1373,89 @@ mod bench {
             }
             println!("max {w}: {px} px wide, {:.1} ms", t.elapsed().as_secs_f64() * 1e3 / n as f64);
         }
+    }
+
+    /// PrintWindow snapshots of every Windows Terminal window, covered or not; saves them to $OUT_DIR_SNAPS.
+    /// cargo test --release window_grab -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn window_grab() {
+        let out = std::env::var("OUT_DIR_SNAPS").unwrap_or(".".into());
+        let mut wins: Vec<HWND> = Vec::new();
+        unsafe extern "system" fn each(h: HWND, l: LPARAM) -> windows::Win32::Foundation::BOOL {
+            let v = &mut *(l.0 as *mut Vec<HWND>);
+            let mut c = [0u16; 64];
+            let n = GetClassNameW(h, &mut c);
+            if IsWindowVisible(h).as_bool() && String::from_utf16_lossy(&c[..n as usize]) == "CASCADIA_HOSTING_WINDOW_CLASS" {
+                v.push(h);
+            }
+            true.into()
+        }
+        unsafe {
+            let _ = EnumWindows(Some(each), LPARAM(&mut wins as *mut _ as isize));
+        }
+        for (i, h) in wins.iter().enumerate() {
+            let Some(r) = window_rect(*h) else { continue };
+            let t = Instant::now();
+            let img = grab_window(*h, r);
+            let ms = t.elapsed().as_secs_f64() * 1e3;
+            match img {
+                Some(p) => {
+                    let f = format!("{out}/term{i}.png");
+                    crate::gfx::save_png(&f, p.width(), p.height(), p.data());
+                    println!("{i}: {}x{} in {ms:.1} ms -> {f}", p.width(), p.height());
+                }
+                None => println!("{i}: no image ({ms:.1} ms)"),
+            }
+        }
+    }
+
+    /// Several real Windows Terminal windows mid-genie in one GPU frame (as a dock minimize of the app draws
+    /// them), shown for a moment and grabbed off the screen to $SHOT.
+    /// cargo test --release multi_shot -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn multi_shot() {
+        let mut wins: Vec<HWND> = Vec::new();
+        unsafe extern "system" fn each(h: HWND, l: LPARAM) -> windows::Win32::Foundation::BOOL {
+            let v = &mut *(l.0 as *mut Vec<HWND>);
+            let mut c = [0u16; 64];
+            let n = GetClassNameW(h, &mut c);
+            if IsWindowVisible(h).as_bool() && !IsIconic(h).as_bool() && String::from_utf16_lossy(&c[..n as usize]) == "CASCADIA_HOSTING_WINDOW_CLASS" {
+                v.push(h);
+            }
+            true.into()
+        }
+        unsafe {
+            let _ = EnumWindows(Some(each), LPARAM(&mut wins as *mut _ as isize));
+        }
+        let order: Vec<isize> = front_first(&wins).iter().rev().map(|h| h.0 as isize).collect();
+        let got = grab_windows(&order);
+        let items: Vec<(Arc<Pixmap>, R)> = order
+            .iter()
+            .filter_map(|k| got.iter().find(|g| g.0 == *k).map(|g| (Arc::new(g.1.clone()), g.2)))
+            .collect();
+        println!("{} windows grabbed", items.len());
+        let icon = R { x: 900.0, y: 1000.0, w: 64.0, h: 64.0 };
+        let area = items.iter().fold(icon, |a, it| a.union(&it.1));
+        let mut g = Gpu::new().expect("gpu");
+        g.set_area(area.x as i32, area.y as i32, area.w as u32 + 2, area.h as u32 + 2).unwrap();
+        let ps = [0.15, 0.4, 0.65];
+        let rows: Vec<Vec<(f64, f64, f64)>> = items.iter().enumerate().map(|(i, it)| shape(it.1, icon, ps[i % 3])).collect();
+        let meshes: Vec<(&Arc<Pixmap>, &[(f64, f64, f64)])> = items.iter().zip(&rows).map(|(it, r)| (&it.0, r.as_slice())).collect();
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_millis(400) {
+            g.draw_many(&meshes, (area.x, area.y), 1.0).unwrap();
+            unsafe {
+                let _ = ShowWindow(g.hwnd, SW_SHOWNOACTIVATE);
+                let _ = windows::Win32::Graphics::Dwm::DwmFlush();
+            }
+        }
+        let rc = RECT { left: area.x as i32, top: area.y as i32, right: area.right() as i32, bottom: area.bottom() as i32 };
+        let shot = grab(rc, 4096).unwrap();
+        let out = std::env::var("SHOT").unwrap_or("multi_shot.png".into());
+        crate::gfx::save_png(&out, shot.width(), shot.height(), shot.data());
+        println!("{}x{} -> {out}", shot.width(), shot.height());
     }
 
     /// Frame steps of the DWM refresh clock against Instant::now(), both sampled after DwmFlush plus some
