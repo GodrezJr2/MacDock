@@ -87,6 +87,7 @@ pub enum Act {
     Minimize { fg: HWND, wins: Vec<HWND> },
     /// restore these minimized windows (back to front) and bring `front` forward
     Restore { front: HWND, minimized: Vec<HWND> },
+    OpenSettings,
 }
 
 thread_local! {
@@ -338,6 +339,8 @@ pub struct Dock {
     pub last_app: HWND,
     // badges
     seen: Option<badges::Seen>,
+    /// icon size / magnification / tiles changed while a slider was dragged: cut the icons again on release
+    look_pending: bool,
     toasts: Vec<(String, i64)>,
     toast_job: Option<Arc<Mutex<Option<Vec<(String, i64)>>>>>,
 }
@@ -374,7 +377,7 @@ impl Dock {
             hide: 0.0, peek_until: now, last_near: now,
             pressed: None, press_pt: (0.0, 0.0), dragging: false, drag_out: false, drag_x: 0.0,
             last_app: unsafe { GetForegroundWindow() },
-            seen: None, toasts: Vec::new(), toast_job: None,
+            seen: None, toasts: Vec::new(), toast_job: None, look_pending: false,
         }
     }
 
@@ -474,6 +477,47 @@ impl Dock {
         f(&mut self.cfg);
         self.cfg.save();
         &self.cfg
+    }
+
+    pub fn config(&self) -> &Config {
+        &self.cfg
+    }
+
+    /// The Settings panel changed the config (already saved): redo what depends on what changed. `relayout`
+    /// is false while a size slider is still being dragged (icons are cut again once it is let go).
+    pub fn settings_changed(&mut self, old: &Config, relayout: bool) {
+        if old.auto_hide != self.cfg.auto_hide {
+            let on = self.cfg.auto_hide;
+            self.set_auto_hide(on);
+        }
+        if old.badges != self.cfg.badges {
+            unsafe {
+                if self.cfg.badges {
+                    self.seen = Some(badges::Seen::load());
+                    SetTimer(self.hwnd, TIMER_TOASTS, 3000, None);
+                } else {
+                    let _ = KillTimer(self.hwnd, TIMER_TOASTS);
+                    self.seen = None;
+                    for it in &mut self.items {
+                        it.badge = 0;
+                        it.badge_text = None;
+                    }
+                }
+            }
+            self.update_badges();
+        }
+        if old.show_recents != self.cfg.show_recents || old.downloads_stack != self.cfg.downloads_stack {
+            self.refresh(false);
+        }
+        let look = old.icon_size != self.cfg.icon_size || old.magnify != self.cfg.magnify || old.icon_tiles != self.cfg.icon_tiles;
+        if relayout && (look || self.look_pending) {
+            self.look_pending = false;
+            self.apply_display();
+        } else if look {
+            self.look_pending = true;
+        }
+        self.drawn.clear();
+        self.wake();
     }
 
     pub fn set_auto_hide(&mut self, on: bool) {
@@ -1102,6 +1146,7 @@ impl Dock {
         enum Do {
             Hide,
             QuitDock,
+            Settings,
             OpenTrash,
             EmptyTrash,
             Activate(HWND),
@@ -1131,6 +1176,8 @@ impl Dock {
                 add(Entry::Sep, None);
                 add(Entry::item("Show Recent Apps").checked(self.cfg.show_recents), Some(Do::ToggleRecents));
                 add(Entry::item("Show Downloads Stack").checked(self.cfg.downloads_stack), Some(Do::ToggleStack));
+                add(Entry::Sep, None);
+                add(Entry::item("Dock Settings…"), Some(Do::Settings));
                 if !self.cfg.menu_bar {
                     add(Entry::Sep, None);
                     add(Entry::item("Quit MacDock"), Some(Do::QuitDock));
@@ -1189,6 +1236,7 @@ impl Dock {
         match d {
             Do::Hide => self.set_auto_hide(!self.cfg.auto_hide),
             Do::QuitDock => return Some(Act::Quit),
+            Do::Settings => return Some(Act::OpenSettings),
             Do::OpenTrash => shell::launch(TRASH),
             Do::EmptyTrash => {
                 unsafe {
@@ -1407,13 +1455,13 @@ impl Dock {
             hovering = my >= plate_top - 70.0;
         }
 
-        let kh = 1.0 - (-dt * 13.0).exp();
+        let kh = self.cfg.ease(dt, 13.0, self.cfg.hide_speed);
         if self.cfg.auto_hide {
             if hovering || self.dragging || self.pressed.is_some() || self.at_bottom_edge() {
                 self.last_near = now;
             }
             // linger a moment after the pointer leaves, like macOS
-            let show = now < self.peek_until || now_secs(now, self.last_near) < 0.35;
+            let show = now < self.peek_until || now_secs(now, self.last_near) < self.cfg.hide_delay_ms / 1000.0;
             self.hide = approach(self.hide, if show { 0.0 } else { 1.0 }, kh);
         } else {
             self.hide = approach(self.hide, 0.0, kh);
@@ -1423,7 +1471,7 @@ impl Dock {
         let rest_w = self.width(|_| 1.0) + PAD_X * 2.0;
         let mut x = (self.win_w - rest_w) / 2.0 + PAD_X;
         let r = b * 2.9;
-        let (k, kp) = (1.0 - (-dt * 17.0).exp(), 1.0 - (-dt * 9.0).exp());
+        let (k, kp) = (self.cfg.ease(dt, 17.0, self.cfg.magnify_speed), self.cfg.ease(dt, 9.0, 1.0));
         let mut settled = !self.dragging && self.pressed.is_none();
         let fg = unsafe { GetForegroundWindow() };
         for it in &mut self.items {

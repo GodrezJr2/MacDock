@@ -535,6 +535,8 @@ pub struct Genie {
     original_min_animate: Option<bool>,
     paused: bool,
     stores: u32,
+    /// (minimize, restore) length in seconds, from the settings
+    pub secs: (f64, f64),
 }
 
 impl Genie {
@@ -544,6 +546,7 @@ impl Genie {
         Genie {
             hwnd, snaps: HashMap::new(), capture: None, pending: Vec::new(), anim: None, armed: None, surface: None,
             gpu: None, gpu_area: None, gpu_tried: false, original_min_animate: None, paused: false, stores: 0,
+            secs: (0.56, 0.5),
         }
     }
 
@@ -889,7 +892,7 @@ impl Genie {
             let _ = ShowWindow(self.overlay(), SW_SHOWNOACTIVATE);
         }
         self.anim = Some(Anim {
-            img, win, icon, restore, duration: if restore { 0.5 } else { 0.56 }, frame: if prepared { 2 } else { 0 },
+            img, win, icon, restore, duration: if restore { self.secs.1 } else { self.secs.0 }, frame: if prepared { 2 } else { 0 },
             start: Instant::now(), started, done, finished: None, stats: Stats::default(),
         });
         true

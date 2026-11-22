@@ -2,6 +2,7 @@
 
 use serde_json::{json, Map, Value};
 
+#[derive(Clone)]
 pub struct Config {
     pub pinned: Vec<String>,
     pub icon_size: f64,
@@ -37,8 +38,42 @@ pub struct Config {
     pub desktop_widgets: bool,
     /// macOS-style Alt+Tab: one icon per app in a frosted panel (replaces the Windows switcher).
     pub app_switcher: bool,
+    /// How long the Genie minimize takes, in ms (restoring takes a little less).
+    pub genie_ms: f64,
+    /// Multiplier on how fast icons grow and shrink under the pointer.
+    pub magnify_speed: f64,
+    /// How long a hidden dock lingers after the pointer leaves, in ms.
+    pub hide_delay_ms: f64,
+    /// Multiplier on how fast an auto-hiding dock slides in and out.
+    pub hide_speed: f64,
+    /// Snap instead of animating: magnification, auto-hide and a very short minimize.
+    pub reduce_motion: bool,
     /// Keys we don't know (written by a newer build) survive a save.
     extra: Map<String, Value>,
+}
+
+/// Allowed ranges (min, max) of the numeric settings.
+pub const ICON_SIZE: (f64, f64) = (16.0, 128.0);
+pub const MAGNIFY: (f64, f64) = (1.0, 3.0);
+pub const GENIE_MS: (f64, f64) = (150.0, 1500.0);
+pub const HIDE_DELAY_MS: (f64, f64) = (0.0, 2000.0);
+pub const SPEED: (f64, f64) = (0.25, 4.0);
+
+impl Config {
+    /// Per-frame smoothing factor for a rate (1/s) scaled by a speed setting; 1 = jump there now.
+    pub fn ease(&self, dt: f64, rate: f64, speed: f64) -> f64 {
+        if self.reduce_motion {
+            1.0
+        } else {
+            1.0 - (-dt * rate * speed).exp()
+        }
+    }
+
+    /// Genie length in seconds for a minimize (false) or a restore (true).
+    pub fn genie_secs(&self, restore: bool) -> f64 {
+        let s = if self.reduce_motion { 0.15 } else { self.genie_ms / 1000.0 };
+        if restore { s * 0.5 / 0.56 } else { s }
+    }
 }
 
 pub fn dir() -> String {
@@ -83,6 +118,11 @@ impl Default for Config {
             desktop_widgets: true,
             app_switcher: true,
             battery_percent: false,
+            genie_ms: 560.0,
+            magnify_speed: 1.0,
+            hide_delay_ms: 350.0,
+            hide_speed: 1.0,
+            reduce_motion: false,
             extra: Map::new(),
         }
     }
@@ -114,6 +154,16 @@ impl Config {
         b("BatteryPercent", &mut c.battery_percent);
         b("DesktopWidgets", &mut c.desktop_widgets);
         b("AppSwitcher", &mut c.app_switcher);
+        b("ReduceMotion", &mut c.reduce_motion);
+        let mut f = |k: &str, d: &mut f64, lo: f64, hi: f64| {
+            if let Some(x) = v.remove(k).and_then(|x| x.as_f64()) {
+                *d = x.clamp(lo, hi);
+            }
+        };
+        f("GenieDuration", &mut c.genie_ms, GENIE_MS.0, GENIE_MS.1);
+        f("MagnifySpeed", &mut c.magnify_speed, SPEED.0, SPEED.1);
+        f("AutoHideDelay", &mut c.hide_delay_ms, HIDE_DELAY_MS.0, HIDE_DELAY_MS.1);
+        f("AutoHideSpeed", &mut c.hide_speed, SPEED.0, SPEED.1);
         if let Some(Value::Array(r)) = v.remove("Recent") {
             c.recent = r.into_iter().filter(|x| x.get("Key").and_then(|k| k.as_str()).is_some()).collect();
         }
@@ -125,10 +175,10 @@ impl Config {
             c.pinned = p.iter().filter_map(|s| s.as_str().map(String::from)).collect();
         }
         if let Some(x) = v.remove("IconSize").and_then(|x| x.as_f64()) {
-            c.icon_size = x.clamp(16.0, 128.0);
+            c.icon_size = x.clamp(ICON_SIZE.0, ICON_SIZE.1);
         }
         if let Some(x) = v.remove("Magnify").and_then(|x| x.as_f64()) {
-            c.magnify = x.clamp(1.0, 3.0);
+            c.magnify = x.clamp(MAGNIFY.0, MAGNIFY.1);
         }
         c.extra = v;
         c
@@ -162,6 +212,11 @@ impl Config {
             "BatteryPercent": self.battery_percent,
             "DesktopWidgets": self.desktop_widgets,
             "AppSwitcher": self.app_switcher,
+            "GenieDuration": self.genie_ms,
+            "MagnifySpeed": self.magnify_speed,
+            "AutoHideDelay": self.hide_delay_ms,
+            "AutoHideSpeed": self.hide_speed,
+            "ReduceMotion": self.reduce_motion,
         });
         if let Value::Object(f) = fields {
             m.extend(f);

@@ -15,6 +15,7 @@ mod fly_ai;
 mod fly_battery;
 mod fly_cal;
 mod fly_cc;
+mod fly_settings;
 mod fly_tray;
 mod fly_wifi;
 mod flyout;
@@ -56,6 +57,7 @@ pub enum Ev {
     Foreground(isize),
     MinimizeStart(isize),
     MoveSizeEnd(isize),
+    Settings(fly_settings::Change),
 }
 
 thread_local! {
@@ -99,6 +101,8 @@ struct App {
     bar: Option<menubar::MenuBar>,
     fly: Option<flyout::Flyout>,
     fullscreen: bool,
+    /// menu bar, widgets, Alt+Tab as this process started them (changing them needs a restart)
+    started: (bool, bool, bool),
 }
 
 impl App {
@@ -134,6 +138,7 @@ impl App {
     fn act(&mut self, a: Act) -> bool {
         match a {
             Act::Quit => return false,
+            Act::OpenSettings => self.open_settings(),
             Act::Fullscreen(on) => self.set_fullscreen(on),
             Act::Minimize { fg, wins } => {
                 let icon = self.icon_for(fg);
@@ -196,10 +201,101 @@ impl App {
             menubar::Extra::Tray => Box::new(fly_tray::TrayFly::new()),
             menubar::Extra::Ai => Box::new(fly_ai::AiFly::new()),
             menubar::Extra::Calendar => Box::new(fly_cal::CalFly::new()),
+            menubar::Extra::Settings => return self.open_settings(),
         };
         let Some(b) = self.bar.as_mut() else { return };
         b.set_open_extra(Some(kind));
         self.fly = Some(flyout::Flyout::open(kind, content, right_px, b.bottom_px(), b.dpi()));
+    }
+
+    /// The Settings panel, centred near the top of the screen. It stays up until closed with Esc or a click
+    /// outside, so the dock can be watched while sliders move.
+    fn open_settings(&mut self) {
+        if self.fly.as_ref().is_some_and(|f| f.kind == menubar::Extra::Settings) {
+            return;
+        }
+        self.close_flyout();
+        let mut s = fly_settings::Settings::new(self.dock.config());
+        s.set_started(self.started.0, self.started.1, self.started.2);
+        let (top, dpi) = match self.bar.as_ref() {
+            Some(b) => (b.bottom_px() + (40.0 * b.dpi()) as i32, b.dpi()),
+            None => ((80.0 * self.dock.dpi) as i32, self.dock.dpi),
+        };
+        self.fly = Some(flyout::Flyout::open(menubar::Extra::Settings, Box::new(s), 0, top, dpi));
+    }
+
+    fn on_settings(&mut self, ch: fly_settings::Change) -> bool {
+        use fly_settings::{Change, Key};
+        let old = self.dock.config().clone();
+        let mut done = true;
+        match ch {
+            Change::Restart => {
+                restart();
+                return false;
+            }
+            Change::OpenConfig => {
+                self.close_flyout();
+                shell::launch(&config::path());
+                return true;
+            }
+            Change::ResetAnimations => {
+                self.dock.update_config(fly_settings::reset_animations);
+            }
+            Change::Set(k, v, d) => {
+                done = d;
+                let mut changed = false;
+                self.dock.update_config(|c| changed = fly_settings::apply(c, k, v));
+                if !changed && !done {
+                    return true;
+                }
+                let c = self.dock.config().clone();
+                match k {
+                    Key::Genie => {
+                        if c.genie && self.genie.is_none() {
+                            let mut g = genie::Genie::new();
+                            g.start();
+                            self.genie = Some(g);
+                        } else if !c.genie {
+                            if let Some(mut g) = self.genie.take() {
+                                g.stop();
+                            }
+                        }
+                    }
+                    Key::HideTaskbar => {
+                        if c.hide_taskbar {
+                            taskbar::hide();
+                        } else {
+                            taskbar::restore(false);
+                        }
+                    }
+                    Key::BatteryPct | Key::AiUsage | Key::TrayIcons => {
+                        let (o, on) = match k {
+                            Key::BatteryPct => (menubar::BarOpt::BatteryPercent, c.battery_percent),
+                            Key::AiUsage => (menubar::BarOpt::AiUsage, c.ai_usage),
+                            _ => (menubar::BarOpt::TrayIcons, c.tray_icons),
+                        };
+                        if let Some(b) = self.bar.as_mut() {
+                            b.set_option(o, on);
+                        }
+                        if k == Key::AiUsage && on && c.menu_bar {
+                            ai_usage::start(c.claude_limit_5h, c.claude_usage_oauth, || {});
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        self.dock.settings_changed(&old, done);
+        self.apply_genie_timing();
+        true
+    }
+
+    fn apply_genie_timing(&mut self) {
+        let c = self.dock.config();
+        let secs = (c.genie_secs(false), c.genie_secs(true));
+        if let Some(g) = self.genie.as_mut() {
+            g.secs = secs;
+        }
     }
 
     fn handle(&mut self, e: Ev) -> bool {
@@ -258,6 +354,7 @@ impl App {
                         }
                     }
                     Some(menubar::BarAct::Flyout(kind, _, r)) => self.toggle_flyout(kind, r),
+                    Some(menubar::BarAct::OpenSettings) => self.open_settings(),
                     None => {}
                 }
             }
@@ -275,6 +372,7 @@ impl App {
                     }
                 }
             }
+            Ev::Settings(ch) => return self.on_settings(ch),
             Ev::Genie(ge) => {
                 if let Some(g) = self.genie.as_mut() {
                     g.handle(ge);
@@ -282,6 +380,13 @@ impl App {
             }
         }
         true
+    }
+}
+
+/// Start a fresh copy that waits for this one to quit (the caller then returns false to end the loop).
+fn restart() {
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::process::Command::new(exe).arg("--restart").spawn();
     }
 }
 
@@ -396,8 +501,25 @@ fn main() {
         genie::restore_system_animation();
     }));
     // one dock at a time; the C# build uses the same name, so the two never run together
-    let _single = unsafe { CreateMutexW(None, true, w!("MacDock.Singleton")) };
-    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+    // after "Restart MacDock" the old process may still be shutting down: wait for it a few seconds
+    let tries = if std::env::args().any(|a| a == "--restart") { 50 } else { 1 };
+    let mut _single = None;
+    for i in 0..tries {
+        let m = unsafe { CreateMutexW(None, true, w!("MacDock.Singleton")) };
+        if unsafe { GetLastError() } != ERROR_ALREADY_EXISTS {
+            _single = Some(m);
+            break;
+        }
+        if let Ok(h) = m {
+            unsafe {
+                let _ = windows::Win32::Foundation::CloseHandle(h);
+            }
+        }
+        if i + 1 < tries {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+    if _single.is_none() {
         return;
     }
     if low_integrity() {
@@ -432,7 +554,9 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
     }
     let want_widgets = cfg.desktop_widgets;
     let want_switcher = cfg.app_switcher;
-    let mut app = App { dock: Dock::new(hwnd, cfg), genie, bar, fly: None, fullscreen: false };
+    let started = (cfg.menu_bar, want_widgets, want_switcher);
+    let mut app = App { dock: Dock::new(hwnd, cfg), genie, bar, fly: None, fullscreen: false, started };
+    app.apply_genie_timing();
     if let Some(b) = app.bar.as_mut() {
         b.start(); // reserve the top strip before the dock measures the work area
     }

@@ -59,6 +59,7 @@ pub enum BarAct {
     Option(BarOpt, bool),
     /// open (or close, if it is the open one) a menu bar extra under the item spanning these screen px
     Flyout(Extra, i32, i32),
+    OpenSettings,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -76,6 +77,7 @@ pub enum Extra {
     Wifi,
     ControlCenter,
     Calendar,
+    Settings,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -562,6 +564,24 @@ impl MenuBar {
         None
     }
 
+    /// A menu bar option changed in the Settings panel.
+    pub fn set_option(&mut self, o: BarOpt, on: bool) {
+        let f = match o {
+            BarOpt::BatteryPercent => &mut self.battery_pct,
+            BarOpt::AiUsage => &mut self.ai,
+            BarOpt::TrayIcons => &mut self.tray,
+        };
+        if *f == on {
+            return;
+        }
+        *f = on;
+        if o == BarOpt::AiUsage && on {
+            self.ai_gen = u64::MAX;
+        }
+        self.dirty = true;
+        self.render();
+    }
+
     /// The extra under this item has closed (or opened): keep its button lit while it is up.
     pub fn set_open_extra(&mut self, e: Option<Extra>) {
         let want = e.and_then(|e| {
@@ -585,6 +605,7 @@ impl MenuBar {
             Extra::Wifi => Item::Net,
             Extra::ControlCenter => Item::Cc,
             Extra::Calendar => Item::Clock,
+            Extra::Settings => Item::Logo,
         };
         self.slots.iter().find(|s| s.item == item).map(|s| (self.px(s.x), self.px(s.x + s.w)))
     }
@@ -715,7 +736,7 @@ impl MenuBar {
             (Entry::Sep, Do::None),
             (Entry::item("Automatically Hide Dock").checked(self.auto_hide_dock), Do::AutoHide),
             (Entry::item("Open MacDock at Login").checked(at_login()), Do::Login),
-            (Entry::item("Edit Dock Settings…"), Do::EditSettings),
+            (Entry::item("MacDock Settings…"), Do::Settings),
             (Entry::item("Quit MacDock"), Do::Quit),
         ])
     }
@@ -801,7 +822,7 @@ impl MenuBar {
                 return Some(BarAct::Option(o, on));
             }
             Do::Login => toggle_login(),
-            Do::EditSettings => shell::launch(&crate::config::path()),
+            Do::Settings => return Some(BarAct::OpenSettings),
             Do::OpenUpdate => {
                 if let Some((_, url)) = crate::update::available() {
                     shell::launch(&url);
@@ -1037,7 +1058,7 @@ enum Do {
     AutoHide,
     Opt(BarOpt),
     Login,
-    EditSettings,
+    Settings,
     OpenUpdate,
     CheckUpdate,
     Quit,

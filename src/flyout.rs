@@ -546,7 +546,12 @@ impl Flyout {
 
         // right-align under the anchor, inside the screen
         let win_w = pw as i32;
-        let x = (self.right_px + (MARGIN * s) as i32 - win_w).min(self.screen_w_px - win_w - (4.0 * s) as i32).max((8.0 * s) as i32);
+        let x = if self.kind == crate::menubar::Extra::Settings {
+            (self.screen_w_px - win_w) / 2 // a window of its own, not under a menu bar item
+        } else {
+            self.right_px + (MARGIN * s) as i32 - win_w
+        };
+        let x = x.min(self.screen_w_px - win_w - (4.0 * s) as i32).max((8.0 * s) as i32);
         let y = self.top_px - (7.0 * s) as i32;
         self.pos = (x, y);
         self.content.placed(&self.spots, (x + (ox * s) as i32, y + (oy * s) as i32), s);
