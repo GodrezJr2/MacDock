@@ -118,13 +118,11 @@ fn refresh() {
     }
 }
 
-const W: f32 = 940.0;
 const COLS: usize = 7;
-const ROWS: usize = 4;
+const ROWS: usize = 5;
 const PER_PAGE: usize = COLS * ROWS;
-const CELL_H: f32 = 118.0;
-const ICON: f32 = 64.0;
-const SEARCH_H: f32 = 34.0;
+const SEARCH_W: f32 = 240.0;
+const SEARCH_H: f32 = 30.0;
 const ID_APP: u32 = 1; // ids 1..=PER_PAGE: the cells of the page shown
 const ID_DOT: u32 = 100; // 100.. the page dots
 
@@ -138,14 +136,28 @@ pub struct Launchpad {
     sel: usize,
     /// a scroll in progress: wheel notches add up until a page turn
     wheel: i32,
+    /// the screen in DIPs
+    screen: (f32, f32),
+    /// a page turn in progress: the page we came from and how far the slide still has to go (1 -> 0)
+    from: usize,
+    slide: f32,
+    last_tick: Option<std::time::Instant>,
+    motion: bool,
 }
 
 impl Launchpad {
-    pub fn new() -> Launchpad {
-        let mut l = Launchpad { apps: Vec::new(), query: String::new(), shown: Vec::new(), page: 0, sel: 0, wheel: 0 };
+    pub fn new(motion: bool) -> Launchpad {
+        let mut l = Launchpad::empty(Vec::new(), motion);
         l.pick_up();
         refresh();
         l
+    }
+
+    fn empty(apps: Vec<App>, motion: bool) -> Launchpad {
+        Launchpad {
+            apps, query: String::new(), shown: Vec::new(), page: 0, sel: 0, wheel: 0, screen: (1536.0, 864.0), from: 0,
+            slide: 0.0, last_tick: None, motion,
+        }
     }
 
     fn pick_up(&mut self) {
@@ -183,6 +195,7 @@ impl Launchpad {
         let pages = self.pages();
         self.page = self.page.min(pages - 1);
         self.sel = self.sel.min(self.shown.len().saturating_sub(1));
+        self.slide = 0.0;
     }
 
     fn pages(&self) -> usize {
@@ -204,10 +217,24 @@ impl Launchpad {
         self.filter();
     }
 
+    /// Show page `p`, sliding over from the one shown now.
+    fn go(&mut self, p: usize) {
+        let p = p.min(self.pages() - 1);
+        if p == self.page {
+            return;
+        }
+        if self.motion {
+            self.from = self.page;
+            self.slide = 1.0;
+            self.last_tick = None;
+        }
+        self.page = p;
+    }
+
     fn turn(&mut self, d: i32) {
         let p = (self.page as i32 + d).clamp(0, self.pages() as i32 - 1) as usize;
         if p != self.page {
-            self.page = p;
+            self.go(p);
             self.sel = p * PER_PAGE;
         }
     }
@@ -218,17 +245,90 @@ impl Launchpad {
         }
         let s = (self.sel as i32 + d).clamp(0, self.shown.len() as i32 - 1) as usize;
         self.sel = s;
-        self.page = s / PER_PAGE;
+        self.go(s / PER_PAGE);
+    }
+
+    /// The grid on screen: left edge, top, cell size, icon size.
+    fn grid(&self) -> (f32, f32, f32, f32, f32) {
+        let (w, h) = self.screen;
+        let gw = (w * 0.74).min(1240.0);
+        let cell_w = gw / COLS as f32;
+        let top = 96.0;
+        let grid_h = (h - top - 96.0).max(300.0);
+        let cell_h = grid_h / ROWS as f32;
+        let icon = (cell_w * 0.5).min(cell_h * 0.62).clamp(48.0, 104.0);
+        ((w - gw) / 2.0, top, cell_w, cell_h, icon)
+    }
+
+    /// One page of icons, shifted `dx` DIPs sideways; only the page shown gets clickable spots.
+    fn draw_page(&self, ui: &mut Ui, page: usize, dx: f32, live: bool) {
+        let (x0, top, cell_w, cell_h, icon) = self.grid();
+        let start = page * PER_PAGE;
+        for cell in 0..PER_PAGE {
+            let Some(&ai) = self.shown.get(start + cell) else { break };
+            let (r, c) = (cell / COLS, cell % COLS);
+            let x = x0 + c as f32 * cell_w + dx;
+            let y = top + r as f32 * cell_h;
+            if x + cell_w < 0.0 || x > self.screen.0 {
+                continue;
+            }
+            let ix = x + (cell_w - icon) / 2.0;
+            let iy = y + (cell_h - icon - 26.0) / 2.0;
+            let id = ID_APP + cell as u32;
+            if live {
+                ui.hit(id, ix - 10.0, iy - 6.0, icon + 20.0, icon + 34.0);
+            }
+            let selected = live && !self.query.is_empty() && start + cell == self.sel;
+            if selected {
+                ui.fill(ix - 10.0, iy - 8.0, icon + 20.0, icon + 20.0, 22.0, white(0x33));
+            }
+            let a = &self.apps[ai];
+            match &a.icon {
+                Some(img) => ui.image(img, ix, iy, icon, icon),
+                None => ui.fill(ix + icon * 0.08, iy + icon * 0.08, icon * 0.84, icon * 0.84, icon * 0.22, white(0x1F)),
+            }
+            if live && ui.pressed == Some(id) {
+                ui.fill(ix + icon * 0.06, iy + icon * 0.06, icon * 0.88, icon * 0.88, icon * 0.22, (0, 0, 0, 0x55));
+            }
+            let max = cell_w - 12.0;
+            let tw = ui.text_w(&a.name, 12.5, 500).min(max);
+            let (tx, ty) = (x + (cell_w - tw) / 2.0, iy + icon + 8.0);
+            ui.text(tx, ty + 1.0, &a.name, 12.5, 500, (0, 0, 0, 0x70), max); // shadow keeps it readable on bright wallpapers
+            ui.text(tx, ty, &a.name, 12.5, 500, white(0xF2), max);
+        }
     }
 }
 
 impl Content for Launchpad {
     fn width(&self) -> f32 {
-        W
+        self.screen.0
     }
 
-    fn padding(&self) -> (f32, f32) {
-        (22.0, 20.0)
+    fn stage(&mut self, w: f32, h: f32) -> bool {
+        self.screen = (w, h);
+        true
+    }
+
+    fn animating(&self) -> bool {
+        self.slide > 0.0
+    }
+
+    fn motion(&self) -> bool {
+        self.motion
+    }
+
+    fn tick(&mut self) {
+        if self.slide <= 0.0 {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let dt = self.last_tick.map_or(0.016, |t| (now - t).as_secs_f32()).min(0.05);
+        self.last_tick = Some(now);
+        // ease out: about 300 ms to settle
+        self.slide *= (-dt * 14.0).exp();
+        if self.slide < 0.002 {
+            self.slide = 0.0;
+        }
     }
 
     fn opened(&mut self, hwnd: isize) {
@@ -244,73 +344,62 @@ impl Content for Launchpad {
     }
 
     fn draw(&mut self, ui: &mut Ui) -> f32 {
-        let cw = ui.w;
-        // search field, centred
-        let sw = 300.0f32.min(cw);
-        let sx = (cw - sw) / 2.0;
-        ui.fill(sx, 0.0, sw, SEARCH_H, SEARCH_H / 2.0, white(0x1C));
-        ui.outline(sx, 0.0, sw, SEARCH_H, SEARCH_H / 2.0, 1.0, white(0x26));
-        ui.glyph(sx + 18.0, SEARCH_H / 2.0, '\u{E721}', 13.0, white(0x8C));
-        let tx = sx + 34.0;
+        let (w, h) = self.screen;
+        // search field, small and centred at the top
+        let sx = (w - SEARCH_W) / 2.0;
+        let sy = 34.0;
+        ui.fill(sx, sy, SEARCH_W, SEARCH_H, SEARCH_H / 2.0, white(0x2E));
+        ui.outline(sx, sy, SEARCH_W, SEARCH_H, SEARCH_H / 2.0, 1.0, white(0x2E));
+        let my = sy + SEARCH_H / 2.0;
         if self.query.is_empty() {
-            ui.text_mid(tx, SEARCH_H / 2.0, t("Search"), 14.0, 400, white(0x73), 0.0);
-            ui.fill(tx - 1.0, 9.0, 1.5, SEARCH_H - 18.0, 0.0, (ACCENT.0, ACCENT.1, ACCENT.2, 255));
+            let label = t("Search");
+            let lw = ui.text_w(label, 13.0, 400);
+            let gx = (w - lw - 20.0) / 2.0;
+            ui.glyph(gx + 6.0, my, '\u{E721}', 11.5, white(0xB3));
+            ui.text_mid(gx + 20.0, my, label, 13.0, 400, white(0xB3), 0.0);
         } else {
-            let end = ui.text_mid(tx, SEARCH_H / 2.0, &self.query, 14.0, 400, white(0xF2), sw - 50.0);
-            let cx = tx + end.min(sw - 50.0) + 1.0;
-            ui.fill(cx, 9.0, 1.5, SEARCH_H - 18.0, 0.0, (ACCENT.0, ACCENT.1, ACCENT.2, 255));
+            ui.glyph(sx + 16.0, my, '\u{E721}', 11.5, white(0xB3));
+            let tx = sx + 30.0;
+            let end = ui.text_mid(tx, my, &self.query, 13.0, 400, white(0xF2), SEARCH_W - 44.0);
+            ui.fill(tx + end.min(SEARCH_W - 44.0) + 1.0, my - 7.5, 1.5, 15.0, 0.0, (ACCENT.0, ACCENT.1, ACCENT.2, 255));
         }
 
-        let top = SEARCH_H + 24.0;
-        let cell_w = cw / COLS as f32;
-        let grid_h = CELL_H * ROWS as f32;
+        let (_, top, _, cell_h, _) = self.grid();
+        let grid_h = cell_h * ROWS as f32;
         if self.shown.is_empty() {
             let msg = t(if self.apps.is_empty() { "Loading apps…" } else { "No Results" });
-            let w = ui.text_w(msg, 18.0, 500);
-            ui.text_mid((cw - w) / 2.0, top + grid_h / 2.0, msg, 18.0, 500, white(0x80), 0.0);
+            let mw = ui.text_w(msg, 20.0, 500);
+            ui.text_mid((w - mw) / 2.0, top + grid_h / 2.0, msg, 20.0, 500, white(0xB3), 0.0);
         }
-        let start = self.page * PER_PAGE;
-        for cell in 0..PER_PAGE {
-            let Some(&ai) = self.shown.get(start + cell) else { break };
-            let (r, c) = (cell / COLS, cell % COLS);
-            let x = c as f32 * cell_w;
-            let y = top + r as f32 * CELL_H;
-            let hov = ui.hit(ID_APP + cell as u32, x + 4.0, y, cell_w - 8.0, CELL_H - 6.0);
-            let selected = !self.query.is_empty() && start + cell == self.sel;
-            if hov || selected {
-                ui.fill(x + 4.0, y, cell_w - 8.0, CELL_H - 6.0, 14.0, white(if selected { 0x26 } else { 0x16 }));
-            }
-            let a = &self.apps[ai];
-            let ix = x + (cell_w - ICON) / 2.0;
-            let iy = y + 12.0;
-            match &a.icon {
-                Some(img) => ui.image(img, ix, iy, ICON, ICON),
-                None => ui.fill(ix + 6.0, iy + 6.0, ICON - 12.0, ICON - 12.0, 12.0, white(0x14)),
-            }
-            let max = cell_w - 16.0;
-            let tw = ui.text_w(&a.name, 12.5, 400).min(max);
-            ui.text(x + (cell_w - tw) / 2.0, iy + ICON + 10.0, &a.name, 12.5, 400, white(0xE6), max);
+        if self.slide > 0.0 {
+            // the old page leaves to one side while the new one comes in from the other
+            let dir = if self.page > self.from { 1.0 } else { -1.0 };
+            let off = self.slide * w * dir;
+            self.draw_page(ui, self.from, off - w * dir, false);
+            self.draw_page(ui, self.page, off, true);
+        } else {
+            self.draw_page(ui, self.page, 0.0, true);
         }
 
         // page dots
         let pages = self.pages();
-        let dy = top + grid_h + 14.0;
+        let dy = top + grid_h + 30.0;
         if pages > 1 {
-            let gap = 16.0;
-            let x0 = (cw - gap * (pages - 1) as f32) / 2.0;
+            let gap = 18.0;
+            let x0 = (w - gap * (pages - 1) as f32) / 2.0;
             for p in 0..pages {
                 let cx = x0 + gap * p as f32;
-                let hov = ui.hit(ID_DOT + p as u32, cx - 7.0, dy - 7.0, 14.0, 14.0);
-                let a = if p == self.page { 0xE6 } else if hov { 0x80 } else { 0x4D };
-                ui.circle(cx, dy, 3.5, white(a));
+                let hov = ui.hit(ID_DOT + p as u32, cx - 8.0, dy - 8.0, 16.0, 16.0);
+                let a = if p == self.page { 0xF2 } else if hov { 0x99 } else { 0x59 };
+                ui.circle(cx, dy, 4.0, white(a));
             }
         }
-        dy + 10.0
+        h
     }
 
     fn click(&mut self, id: u32, _fx: f32) -> Cmd {
         if id >= ID_DOT {
-            self.page = ((id - ID_DOT) as usize).min(self.pages() - 1);
+            self.go((id - ID_DOT) as usize);
             return Cmd::None;
         }
         match self.app_at(id) {
@@ -375,7 +464,7 @@ mod tests {
 
     fn pad(names: &[&str]) -> Launchpad {
         let apps = names.iter().map(|n| App { name: n.to_string(), spec: format!("shell:AppsFolder\\{n}"), icon: None }).collect();
-        let mut l = Launchpad { apps, query: String::new(), shown: Vec::new(), page: 0, sel: 0, wheel: 0 };
+        let mut l = Launchpad::empty(apps, false);
         l.filter();
         l
     }
@@ -400,7 +489,7 @@ mod tests {
 
     #[test]
     fn paging_and_selection() {
-        let names: Vec<String> = (0..60).map(|i| format!("App {i:02}")).collect();
+        let names: Vec<String> = (0..80).map(|i| format!("App {i:02}")).collect();
         let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
         let mut l = pad(&refs);
         assert_eq!(l.pages(), 3);
@@ -424,9 +513,9 @@ mod tests {
             .map(|(name, spec)| App { icon: crate::shell::icon(&spec, ICON_PX).map(Arc::new), name, spec })
             .collect();
         assert!(apps.len() > 10, "only {} apps", apps.len());
-        let mut l = Launchpad { apps, query: String::new(), shown: Vec::new(), page: 0, sel: 0, wheel: 0 };
+        let mut l = Launchpad::empty(apps, false);
         l.filter();
-        let (w, h, px) = crate::flyout::snapshot(&mut l, 1.25);
+        let (w, h, px) = crate::flyout::snapshot_stage(&mut l, 1536.0, 864.0, 1.25);
         let path = format!(r"{}\target\launchpad.png", env!("CARGO_MANIFEST_DIR"));
         assert!(crate::gfx::save_png(&path, w, h, &px));
     }

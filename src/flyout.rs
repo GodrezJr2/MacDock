@@ -21,6 +21,44 @@ pub const ACCENT4: (u8, u8, u8, u8) = (0x0A, 0x84, 0xFF, 0xFF);
 const WM_MOUSELEAVE: u32 = 0x02A3;
 pub const WM_FLY_DATA: u32 = WM_APP + 30;
 const TIMER_TICK: usize = 1;
+const TIMER_ANIM: usize = 2;
+/// how long a full-screen panel takes to zoom and fade in
+const STAGE_IN_MS: f32 = 240.0;
+
+/// The blurred, dimmed wallpaper behind full-screen panels, kept for the next open (screen px).
+static BACKDROP: std::sync::Mutex<Option<std::sync::Arc<Pixmap>>> = std::sync::Mutex::new(None);
+
+/// The wallpaper changed: build the full-screen backdrop again next time.
+pub fn forget_backdrop() {
+    *BACKDROP.lock().unwrap() = None;
+}
+
+/// The wallpaper at `w` x `h`, heavily blurred and dimmed like the macOS Launchpad background.
+fn stage_backdrop(w: u32, h: u32) -> std::sync::Arc<Pixmap> {
+    let mut cache = BACKDROP.lock().unwrap();
+    if let Some(b) = cache.as_ref().filter(|b| b.width() == w && b.height() == h) {
+        return b.clone();
+    }
+    let mut pm = Pixmap::new(w, h).unwrap();
+    pm.fill(Color::from_rgba8(0x1E, 0x22, 0x30, 0xFF));
+    // blur a small copy and stretch it: smooth, and cheap enough to do on open
+    let (bw, bh) = ((w / 8).max(8), (h / 8).max(8));
+    // blurred with a margin that is cut off after, so the edges don't fade into the dark outside
+    const M: u32 = 8;
+    if let Some(mut small) = gfx::wallpaper(bw + 2 * M, bh + 2 * M) {
+        gfx::blur(&mut small, 9.0);
+        let paint = PixmapPaint { quality: tiny_skia::FilterQuality::Bicubic, ..Default::default() };
+        let (kx, ky) = (w as f32 / bw as f32, h as f32 / bh as f32);
+        let tf = Transform::from_row(kx, 0.0, 0.0, ky, -(M as f32) * kx, -(M as f32) * ky);
+        pm.draw_pixmap(0, 0, small.as_ref(), &paint, tf, None);
+    }
+    let mut veil = Paint::default();
+    veil.set_color(Color::from_rgba8(0, 0, 0, 0x5A));
+    pm.fill_rect(tiny_skia::Rect::from_xywh(0.0, 0.0, w as f32, h as f32).unwrap(), &veil, Transform::identity(), None);
+    let b = std::sync::Arc::new(pm);
+    *cache = Some(b.clone());
+    b
+}
 
 /// Straight (r, g, b, a) to the BGRA layout our surfaces use.
 pub fn rgba(c: (u8, u8, u8, u8)) -> Color {
@@ -314,6 +352,19 @@ pub trait Content {
     fn drag_area(&self, _x: f32, _y: f32) -> bool {
         false
     }
+    /// Full-screen panels (Launchpad) say yes and get the screen size in DIPs; they draw over the blurred
+    /// wallpaper with no panel, and a click on nothing closes them.
+    fn stage(&mut self, _w: f32, _h: f32) -> bool {
+        false
+    }
+    /// Something is moving (a page sliding): keep ticking at the frame rate.
+    fn animating(&self) -> bool {
+        false
+    }
+    /// false when Reduce motion is on: no zoom on open.
+    fn motion(&self) -> bool {
+        true
+    }
 }
 
 unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -394,6 +445,10 @@ pub struct Flyout {
     full: bool,
     /// scale and content origin (DIPs) of the last render, for mapping the mouse
     view: (f32, f32, f32),
+    /// full screen over the blurred wallpaper (Launchpad), and when it opened (for the zoom in)
+    stage: bool,
+    born: std::time::Instant,
+    anim_timer: bool,
 }
 
 impl Flyout {
@@ -405,7 +460,7 @@ impl Flyout {
         let mut f = Flyout {
             hwnd, kind, content, dpi: dpi as f32, right_px, top_px, screen_w_px, pos: (0, 0), mouse: None, hot: None,
             press: None, spots: Vec::new(), surface: None, tracking: false, stay_open: window, window, moved: None,
-            full: false, view: (dpi as f32, 0.0, 0.0),
+            full: false, view: (dpi as f32, 0.0, 0.0), stage: false, born: std::time::Instant::now(), anim_timer: false,
         };
         f.content.opened(hwnd.0 as isize);
         f.render();
@@ -517,6 +572,9 @@ impl Flyout {
             }
             FlyEv::Up(x, y) => {
                 let p = self.to_content(x, y);
+                if self.stage && self.press.is_none() && self.spot_at(p).is_none() {
+                    cmd = Cmd::Close; // a click on the background, like macOS Launchpad
+                }
                 if let Some(id) = self.press.take() {
                     if let Some(s) = self.spots.iter().find(|s| s.id == id).copied() {
                         self.content.release(id, Self::frac(&s, p));
@@ -562,6 +620,67 @@ impl Flyout {
     }
 
     pub fn render(&mut self) {
+        let (sw, sh) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+        self.stage = self.content.stage(sw as f32 / self.dpi, sh as f32 / self.dpi);
+        if self.stage {
+            self.render_stage(sw, sh);
+        } else {
+            self.render_panel();
+        }
+        self.keep_ticking();
+    }
+
+    /// Run a frame-rate timer while the open zoom or the content is moving.
+    fn keep_ticking(&mut self) {
+        let opening = self.stage && self.content.motion() && self.born.elapsed().as_secs_f32() * 1000.0 < STAGE_IN_MS;
+        let want = opening || self.content.animating();
+        if want != self.anim_timer {
+            self.anim_timer = want;
+            unsafe {
+                if want {
+                    SetTimer(self.hwnd, TIMER_ANIM, 15, None);
+                } else {
+                    let _ = KillTimer(self.hwnd, TIMER_ANIM);
+                }
+            }
+        }
+    }
+
+    /// Full screen over the blurred wallpaper, no panel; zooms down and fades in when it opens.
+    fn render_stage(&mut self, sw: i32, sh: i32) {
+        let (pw, ph) = (sw as u32, sh as u32);
+        let s = self.dpi;
+        let Some(mut layer) = Pixmap::new(pw, ph) else { return };
+        let mut spots = Vec::new();
+        {
+            let mut ui = Ui { pm: &mut layer, s, ox: 0.0, oy: 0.0, mouse: self.mouse, pressed: self.press, spots: &mut spots, w: sw as f32 / s };
+            self.content.draw(&mut ui);
+        }
+        self.spots = spots;
+        self.view = (s, 0.0, 0.0);
+        self.pos = (0, 0);
+        let t = if self.content.motion() { (self.born.elapsed().as_secs_f32() * 1000.0 / STAGE_IN_MS).min(1.0) } else { 1.0 };
+        let e = 1.0 - (1.0 - t).powi(3); // ease out
+        let Some(mut pm) = Pixmap::new(pw, ph) else { return };
+        let back = stage_backdrop(pw, ph);
+        let fade = PixmapPaint { opacity: e, ..Default::default() };
+        pm.draw_pixmap(0, 0, back.as_ref().as_ref(), &fade, Transform::identity(), None);
+        // the icons settle from slightly larger, as on macOS
+        let z = 1.0 + 0.08 * (1.0 - e);
+        let (cx, cy) = (sw as f32 / 2.0, sh as f32 / 2.0);
+        let tf = Transform::from_row(z, 0.0, 0.0, z, cx - cx * z, cy - cy * z);
+        let paint = PixmapPaint { opacity: e, quality: if t < 1.0 { tiny_skia::FilterQuality::Bilinear } else { tiny_skia::FilterQuality::Nearest }, ..Default::default() };
+        pm.draw_pixmap(0, 0, layer.as_ref(), &paint, tf, None);
+        if self.surface.as_ref().is_none_or(|sf| sf.w != pw || sf.h != ph) {
+            self.surface = Surface::new(pw, ph);
+        }
+        if let Some(sf) = self.surface.as_mut() {
+            sf.bytes().copy_from_slice(pm.data());
+            sf.present(self.hwnd, 0, 0);
+        }
+    }
+
+    fn render_panel(&mut self) {
         let w = self.content.width() - 2.0 * MARGIN; // the width includes the shadow margin, as in Flyout.cs
         let (padx, pady) = self.content.padding();
         let s = self.dpi;
@@ -604,6 +723,7 @@ impl Flyout {
         if self.full {
             return self.render_full(w, panel_h, padx, pady);
         }
+        let _ = panel_h;
         {
             let mut ui = Ui { pm: &mut pm, s, ox, oy, mouse: self.mouse, pressed: self.press, spots: &mut spots, w: cw };
             self.content.draw(&mut ui);
@@ -662,6 +782,19 @@ impl Flyout {
             sf.present(self.hwnd, 0, 0);
         }
     }
+}
+
+/// Test aid: a full-screen panel over the blurred wallpaper at `w` x `h` DIPs and scale `s`.
+#[cfg(test)]
+pub fn snapshot_stage(content: &mut dyn Content, w: f32, h: f32, s: f32) -> (u32, u32, Vec<u8>) {
+    let (pw, ph) = ((w * s) as u32, (h * s) as u32);
+    assert!(content.stage(w, h));
+    let back = stage_backdrop(pw, ph);
+    let mut pm = (*back).clone();
+    let mut spots = Vec::new();
+    let mut ui = Ui { pm: &mut pm, s, ox: 0.0, oy: 0.0, mouse: None, pressed: None, spots: &mut spots, w };
+    content.draw(&mut ui);
+    (pw, ph, pm.data().to_vec())
 }
 
 /// Test aid: paint a panel the way `Flyout::render` does, on a dark backdrop, and return (w, h, BGRA).

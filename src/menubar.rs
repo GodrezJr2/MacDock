@@ -570,6 +570,7 @@ impl MenuBar {
             BarEv::AppBar(2 /* ABN_FULLSCREENAPP */, on) => return Some(BarAct::Fullscreen(on != 0)),
             BarEv::AppBar(..) => {}
             BarEv::Wallpaper => {
+                crate::flyout::forget_backdrop();
                 self.load_frost();
                 self.render();
             }

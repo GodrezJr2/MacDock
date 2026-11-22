@@ -207,7 +207,7 @@ impl App {
             menubar::Extra::Ai => Box::new(fly_ai::AiFly::new()),
             menubar::Extra::Calendar => Box::new(fly_cal::CalFly::new()),
             menubar::Extra::Settings => return self.open_settings(),
-            menubar::Extra::Launchpad => Box::new(launchpad::Launchpad::new()),
+            menubar::Extra::Launchpad => Box::new(launchpad::Launchpad::new(!self.dock.config().reduce_motion)),
         };
         let Some(b) = self.bar.as_mut() else { return };
         b.set_open_extra(Some(kind));
@@ -238,7 +238,7 @@ impl App {
         }
         self.close_flyout();
         let dpi = self.dock.dpi;
-        self.fly = Some(flyout::Flyout::open(menubar::Extra::Launchpad, Box::new(launchpad::Launchpad::new()), 0, (80.0 * dpi) as i32, dpi));
+        self.fly = Some(flyout::Flyout::open(menubar::Extra::Launchpad, Box::new(launchpad::Launchpad::new(!self.dock.config().reduce_motion)), 0, (80.0 * dpi) as i32, dpi));
     }
 
     fn on_settings(&mut self, ch: fly_settings::Change) -> bool {
