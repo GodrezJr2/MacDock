@@ -39,11 +39,12 @@ Same laptop, same wallpaper, a minute apart.
 
 | | |
 | --- | --- |
+| **Apps window** | macOS 26's replacement for Launchpad: a Liquid Glass window with a search field that has the typing at once, category chips, recent apps and every installed app. The Apps icon in the dock or the menu bar opens it; the full-screen Launchpad is still there in Settings |
+| **Spotlight** | The menu bar's magnifier or **Alt+Space**: a glass capsule that grows into results as you type, apps first, then a web search |
+| **Settings window** | A floating Mac-style window with traffic lights for every option, animation speeds included, in English or Indonesian |
 | **Liquid Glass dock** | The plate shows the real windows behind it (live capture), bent at the rim like macOS 26, not a blurred wallpaper copy |
 | **Alt+Tab like Cmd+Tab** | One icon per app, most recent first, on a dark frosted panel. A quick tap flips to the previous app without the panel |
-| **Drop files on the dock** | A file dropped on an app icon opens in that app; dropped on the Trash it goes to the Recycle Bin |
-| **Desktop widgets** | Clock, date, battery and system tiles that sit on the wallpaper under every window |
-| **Recent apps, Downloads, icons** | Last 3 apps after a divider, a Downloads stack by the Trash, and right-click → Change Icon… for any item |
+| **Drop files, widgets, recents** | Files dropped on an app icon open in it, on the Trash they are recycled; desktop widgets; the last 3 apps and a Downloads stack by the Trash |
 
 <img src="docs/switcher.jpg" alt="The Alt+Tab switcher: Terminal, Task Manager, Discord (selected), File Explorer and Chrome on a dark frosted panel" width="100%">
 
@@ -110,7 +111,7 @@ notification-area icons (Discord, Steam, …).
   GitHub for the latest release at start and every 6 hours (only `api.github.com`, nothing is downloaded by
   itself); when a newer one is out, a blue dot sits on the logo and the menu shows **Update Available**, which
   opens the release page
-- Battery, Wi-Fi, search, Control Center and the clock, which drops a **calendar** (month view, arrows or the
+- Battery, Wi-Fi, **Spotlight** search, Control Center and the clock, which drops a **calendar** (month view, arrows or the
   wheel step months, rows for the notification center and date & time settings)
 - **AI usage** for Claude Code and Codex: a ring with the limit closest to running out and the live
   burn rate in tok/s. Its flyout shows tok/s over 5 and 30 minutes, the last 24 hours, each limit with the
@@ -187,7 +188,8 @@ Settings live in `%APPDATA%\MacDock\config.json`, created on first run.
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `Pinned` | Explorer, Chrome, Outlook, Terminal, VS Code, Discord, Settings | Dock items: `shell:AppsFolder\<AppID>`, a `.lnk` or an `.exe` |
+| `Pinned` | Explorer, Apps, Chrome, Outlook, Terminal, VS Code, Discord, Settings | Dock items: `shell:AppsFolder\<AppID>`, a `.lnk`, an `.exe`, or `macdock:apps` for the Apps item |
+| `LaunchpadStyle` | `"apps"` | What the Apps icon opens: `"apps"` (the macOS 26 Apps window) or `"classic"` (full-screen Launchpad) |
 | `IconSize` | `52` | Icon size at rest, in pixels |
 | `Magnify` | `1.75` | Size of the icon under the pointer, relative to rest |
 | `AutoHide` | `false` | Slide the dock away until the pointer touches the bottom edge |
