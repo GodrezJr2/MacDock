@@ -51,9 +51,15 @@ pub fn minimize_all(wins: &[HWND]) {
     }
 }
 
+/// `minimized` is front first. They come back from the back, each put on top of the one before, so they
+/// stack the way the genie drew them (Windows may refuse to activate a restored window, leaving it behind).
 pub fn restore_all(front: HWND, minimized: &[HWND]) {
+    use windows::Win32::UI::WindowsAndMessaging::{SetWindowPos, HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE};
     for &w in minimized.iter().rev() {
         shell::restore(w);
+        unsafe {
+            let _ = SetWindowPos(w, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
     }
     shell::activate(front);
 }
@@ -702,6 +708,12 @@ pub struct Genie {
     stores: u32,
     /// (minimize, restore) length in seconds, from the settings
     pub secs: (f64, f64),
+    /// Stacking of minimized windows, from when they went into the dock: higher was further in front. A
+    /// restore brings them back in this order, so the overlay and the real windows agree on what is on top.
+    stack: HashMap<isize, u64>,
+    stack_seq: u64,
+    /// the windows of the last dock minimize, already placed in `stack` (their own minimize events follow)
+    stack_batch: Vec<isize>,
 }
 
 impl Genie {
@@ -711,7 +723,7 @@ impl Genie {
         Genie {
             hwnd, snaps: HashMap::new(), capture: None, pending: Vec::new(), anim: None, armed: None, surface: None,
             gpu: None, gpu_area: None, gpu_tried: false, original_min_animate: None, paused: false, stores: 0,
-            secs: (0.56, 0.5),
+            secs: (0.56, 0.5), stack: HashMap::new(), stack_seq: 0, stack_batch: Vec::new(),
         }
     }
 
@@ -1193,6 +1205,13 @@ impl Genie {
     pub fn on_minimize_start(&mut self, h: HWND, icon: R) {
         ARMED_FOR.store(0, Ordering::Relaxed);
         let key = h.0 as isize;
+        let in_batch = match self.stack_batch.iter().position(|&k| k == key) {
+            Some(i) => {
+                self.stack_batch.swap_remove(i);
+                true
+            }
+            None => false,
+        };
         if self.anim.as_ref().is_some_and(|a| a.items.iter().any(|it| it.h == key)) {
             return; // the dock minimized it as part of a set that is already flying (and saved)
         }
@@ -1205,6 +1224,10 @@ impl Genie {
         let (img, rect) = (s.img.clone(), s.rect);
         if let Some(s) = self.snaps.get(&key) {
             self.persist(h, s);
+        }
+        if !in_batch {
+            self.stack_seq += 1;
+            self.stack.insert(key, self.stack_seq);
         }
         if !self.play(img, rect, icon, false, Then::Nothing, Then::Nothing) {
             self.disarm();
@@ -1242,6 +1265,12 @@ impl Genie {
                 items.push(Item { h: k, img, win: rect, delay: 0.0 });
             }
         }
+        self.stack_batch.clear();
+        for w in front_first(&open).into_iter().rev() {
+            self.stack_seq += 1;
+            self.stack.insert(w.0 as isize, self.stack_seq);
+            self.stack_batch.push(w.0 as isize);
+        }
         self.prune();
         if !self.play_set(items, icon, false, Then::Minimize(wins.clone()), Then::Nothing) {
             minimize_all(&wins);
@@ -1251,9 +1280,19 @@ impl Genie {
     /// Plays the window coming out of the dock, then restores it. Restores at once if there is no snapshot.
     /// Every minimized window of the app comes out with its own genie, the front one last (on top).
     pub fn restore(&mut self, front: HWND, minimized: Vec<HWND>, icon: R) {
-        let then = Then::Restore(front, minimized.clone());
-        let mut order: Vec<HWND> = minimized.into_iter().filter(|&w| w != front).collect();
-        order.push(front);
+        // back to front as they went into the dock (unknown ones at the back); the front one returns last and
+        // gets the focus. restore_all brings them back in this same order, each on top of the one before.
+        let mut order: Vec<HWND> = minimized.clone();
+        if order.is_empty() {
+            order.push(front);
+        }
+        order.sort_by_key(|w| self.stack.get(&(w.0 as isize)).copied().unwrap_or(0));
+        for w in &order {
+            self.stack.remove(&(w.0 as isize));
+        }
+        self.stack_batch.clear();
+        let front = *order.last().unwrap();
+        let then = Then::Restore(front, order.iter().rev().copied().collect());
         let mut items = Vec::new();
         for w in order {
             let key = w.0 as isize;
