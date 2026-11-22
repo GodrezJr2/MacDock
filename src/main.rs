@@ -160,7 +160,7 @@ impl App {
                 let icon = self.icon_for(front);
                 match self.genie.as_mut() {
                     Some(g) => g.restore(front, minimized, icon),
-                    None => genie::restore_all(front, &minimized),
+                    None => genie::restore_async(front, minimized),
                 }
             }
         }

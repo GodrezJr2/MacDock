@@ -22,7 +22,7 @@ const FMT: DXGI_FORMAT = DXGI_FORMAT_B8G8R8A8_UNORM;
 const SAMPLES: u32 = 4;
 
 const SHADER: &str = r#"
-cbuffer C : register(b0) { float2 size; float2 pad; };
+cbuffer C : register(b0) { float2 size; float alpha; float pad; };
 struct V { float2 pos : POSITION; float2 uv : TEXCOORD; };
 struct P { float4 pos : SV_POSITION; float2 uv : TEXCOORD; };
 P vs(V v) {
@@ -33,7 +33,7 @@ P vs(V v) {
 }
 Texture2D tex : register(t0);
 SamplerState smp : register(s0);
-float4 ps(P p) : SV_TARGET { return float4(tex.Sample(smp, p.uv).rgb, 1.0); }
+float4 ps(P p) : SV_TARGET { return float4(tex.Sample(smp, p.uv).rgb * alpha, alpha); }
 "#;
 
 unsafe extern "system" fn proc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
@@ -222,7 +222,8 @@ impl Gpu {
     }
 
     /// Draw the mesh; `rows` are (left, right, y) in screen pixels, `origin` is the window's top-left.
-    pub fn draw(&mut self, img: &Arc<Pixmap>, rows: &[(f64, f64, f64)], origin: (f64, f64)) -> windows::core::Result<()> {
+    /// `alpha` fades the whole mesh (premultiplied), 1.0 while it moves.
+    pub fn draw(&mut self, img: &Arc<Pixmap>, rows: &[(f64, f64, f64)], origin: (f64, f64), alpha: f32) -> windows::core::Result<()> {
         let srv = self.texture(img)?;
         let Some((msaa, rtv)) = self.msaa.clone() else { return Ok(()) };
         let n = rows.len() - 1;
@@ -237,7 +238,7 @@ impl Gpu {
             }
             self.ctx.Unmap(&self.vbuf, 0);
             self.ctx.Map(&self.cbuf, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut m))?;
-            *(m.pData as *mut [f32; 4]) = [self.size.0 as f32, self.size.1 as f32, 0.0, 0.0];
+            *(m.pData as *mut [f32; 4]) = [self.size.0 as f32, self.size.1 as f32, alpha.clamp(0.0, 1.0), 0.0];
             self.ctx.Unmap(&self.cbuf, 0);
 
             self.ctx.ClearRenderTargetView(&rtv, &[0.0, 0.0, 0.0, 0.0]);
@@ -253,6 +254,7 @@ impl Gpu {
             self.ctx.VSSetShader(&self.vs, None);
             self.ctx.VSSetConstantBuffers(0, Some(&[Some(self.cbuf.clone())]));
             self.ctx.PSSetShader(&self.ps, None);
+            self.ctx.PSSetConstantBuffers(0, Some(&[Some(self.cbuf.clone())]));
             self.ctx.PSSetShaderResources(0, Some(&[Some(srv)]));
             self.ctx.PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
             self.ctx.Draw((rows.len() * 2) as u32, 0);

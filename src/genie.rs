@@ -71,10 +71,30 @@ impl Then {
         match self {
             Then::Nothing => {}
             Then::Minimize(w) => minimize_all(&w),
-            Then::Restore(f, m) => restore_all(f, &m),
+            Then::Restore(f, m) => restore_async(f, m),
         }
     }
 }
+
+/// restore_all on a thread of its own. ShowWindow on another process's window waits until that app has
+/// handled the restore, which for a busy app (a browser, an editor) is a good part of a second; on the frame
+/// loop that froze the overlay on its last frame and the window then popped in.
+pub fn restore_async(front: HWND, minimized: Vec<HWND>) {
+    let (f, m): (isize, Vec<isize>) = (front.0 as isize, minimized.iter().map(|h| h.0 as isize).collect());
+    let spawned = std::thread::Builder::new().name("genie-restore".into()).spawn(move || {
+        let m: Vec<HWND> = m.into_iter().map(hwnd_of).collect();
+        restore_all(hwnd_of(f), &m);
+    });
+    if spawned.is_err() {
+        restore_all(front, &minimized);
+    }
+}
+
+/// After a restore: the snapshot stays up until the real window is out of the dock and has had a moment to
+/// paint, then dissolves into it instead of vanishing, which hides whatever changed since the snapshot.
+const RESTORE_WAIT_MAX: f64 = 0.6; // give up waiting for the window after this long
+const RESTORE_PAINT: f64 = 0.05; // frames for the window to paint once it is shown
+const RESTORE_FADE: f64 = 0.12;
 
 // ------------------------------------------------------------------ Windows' own minimize animation
 
@@ -541,6 +561,9 @@ struct Anim {
     started: Then,
     done: Then,
     finished: Option<Instant>,
+    /// restore: the window coming back, and when it was first seen out of the dock
+    front: Option<isize>,
+    shown: Option<Instant>,
     stats: Stats,
 }
 
@@ -829,10 +852,14 @@ impl Genie {
 
     /// Returns (raster ms, present ms); on the GPU path both are CPU time spent submitting.
     fn draw(&mut self, img: &Arc<Pixmap>, win: R, icon: R, p: f64) -> (f64, f64) {
+        self.draw_faded(img, win, icon, p, 1.0)
+    }
+
+    fn draw_faded(&mut self, img: &Arc<Pixmap>, win: R, icon: R, p: f64, alpha: f64) -> (f64, f64) {
         let rows = shape(win, icon, p);
         if let (Some(g), Some(a)) = (self.gpu.as_mut(), self.gpu_area) {
             let t0 = Instant::now();
-            match g.draw(img, &rows, (a.x, a.y)) {
+            match g.draw(img, &rows, (a.x, a.y), alpha as f32) {
                 Ok(()) => return (0.0, t0.elapsed().as_secs_f64() * 1e3),
                 Err(e) => self.gpu_failed(&e),
             }
@@ -858,7 +885,8 @@ impl Genie {
             raster(&mut bytes[start..], stride, area.x + x0 as f64, area.y + y0 as f64, bw as usize, bh as usize, &rows, img);
         }
         let t1 = Instant::now();
-        sf.present_part(self.hwnd, ((area.x as i32) + x0, (area.y as i32) + y0), (x0, y0), bw, bh);
+        let a8 = (alpha.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+        sf.present_part_alpha(self.hwnd, ((area.x as i32) + x0, (area.y as i32) + y0), (x0, y0), bw, bh, a8);
         ((t1 - t0).as_secs_f64() * 1e3, t1.elapsed().as_secs_f64() * 1e3)
     }
 
@@ -914,6 +942,11 @@ impl Genie {
 
     /// Both rects in screen pixels. False if the overlay is busy.
     fn play(&mut self, img: Arc<Pixmap>, win: R, icon: R, restore: bool, started: Then, done: Then) -> bool {
+        if self.anim.as_ref().is_some_and(|a| a.finished.is_some()) {
+            // the last one is only dissolving into its window: cut that short rather than skip this one
+            self.anim = None;
+            self.hide_overlay();
+        }
         if self.anim.is_some() {
             return false;
         }
@@ -927,7 +960,8 @@ impl Genie {
         }
         self.anim = Some(Anim {
             img, win, icon, restore, duration: if restore { self.secs.1 } else { self.secs.0 }, frame: if prepared { 2 } else { 0 },
-            start: Instant::now(), vsync: None, started, done, finished: None, stats: Stats::default(),
+            front: match &done { Then::Restore(f, _) => Some(f.0 as isize), _ => None },
+            start: Instant::now(), vsync: None, started, done, finished: None, shown: None, stats: Stats::default(),
         });
         true
     }
@@ -937,12 +971,27 @@ impl Genie {
     pub fn frame(&mut self) {
         let Some(mut a) = self.anim.take() else { return };
         if let Some(f) = a.finished {
-            // keep the last frame up a moment so the real window has painted, then hide
-            if f.elapsed() >= Duration::from_millis(if a.restore { 90 } else { 0 }) {
-                self.hide_overlay();
-            } else {
-                self.anim = Some(a);
+            if !a.restore {
+                self.hide_overlay(); // already inside the icon
+                return;
             }
+            // wait (without blocking) until the window is out of the dock, let it paint, then dissolve
+            if a.shown.is_none() {
+                let out = a.front.map_or(true, |h| unsafe { !IsIconic(hwnd_of(h)).as_bool() });
+                if out || f.elapsed().as_secs_f64() > RESTORE_WAIT_MAX {
+                    a.shown = Some(Instant::now());
+                }
+            }
+            let fade = a.shown.map_or(-1.0, |s| s.elapsed().as_secs_f64() - RESTORE_PAINT);
+            if fade >= RESTORE_FADE {
+                self.hide_overlay();
+                return;
+            }
+            if fade > 0.0 {
+                let img = a.img.clone();
+                self.draw_faded(&img, a.win, a.icon, 0.0, 1.0 - smooth(fade / RESTORE_FADE));
+            }
+            self.anim = Some(a);
             return;
         }
         a.frame += 1;
@@ -1187,7 +1236,7 @@ mod bench {
         let t = Instant::now();
         let mut n = 0;
         while t.elapsed() < Duration::from_millis(400) {
-            g.draw(&img, &shape(win, icon, 0.35), (area.x, area.y)).unwrap();
+            g.draw(&img, &shape(win, icon, 0.35), (area.x, area.y), 1.0).unwrap();
             unsafe {
                 let _ = ShowWindow(g.hwnd, SW_SHOWNOACTIVATE);
                 let _ = windows::Win32::Graphics::Dwm::DwmFlush();

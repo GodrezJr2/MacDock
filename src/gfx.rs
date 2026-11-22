@@ -73,10 +73,11 @@ impl Surface {
         }
     }
 
-    /// Push only part of the surface (`src` origin, `w` x `h`) and put the window at `dst` with that size.
-    pub fn present_part(&self, hwnd: HWND, dst: (i32, i32), src: (i32, i32), w: i32, h: i32) {
+    /// Push only part of the surface (`src` origin, `w` x `h`) and put the window at `dst` with that size,
+    /// the whole layer faded by `alpha` (0..=255).
+    pub fn present_part_alpha(&self, hwnd: HWND, dst: (i32, i32), src: (i32, i32), w: i32, h: i32, alpha: u8) {
         unsafe {
-            let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8, ..Default::default() };
+            let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, SourceConstantAlpha: alpha, AlphaFormat: AC_SRC_ALPHA as u8, ..Default::default() };
             let pos = POINT { x: dst.0, y: dst.1 };
             let size = SIZE { cx: w.max(1), cy: h.max(1) };
             let sp = POINT { x: src.0, y: src.1 };
