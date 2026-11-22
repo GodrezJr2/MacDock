@@ -17,6 +17,7 @@ mod fly_cal;
 mod fly_cc;
 mod fly_settings;
 mod fly_tray;
+mod launchpad;
 mod fly_wifi;
 mod flyout;
 mod genie;
@@ -139,6 +140,7 @@ impl App {
         match a {
             Act::Quit => return false,
             Act::OpenSettings => self.open_settings(),
+            Act::OpenLaunchpad => self.open_launchpad(),
             Act::Fullscreen(on) => self.set_fullscreen(on),
             Act::Minimize { fg, wins } => {
                 let icon = self.icon_for(fg);
@@ -202,10 +204,12 @@ impl App {
             menubar::Extra::Ai => Box::new(fly_ai::AiFly::new()),
             menubar::Extra::Calendar => Box::new(fly_cal::CalFly::new()),
             menubar::Extra::Settings => return self.open_settings(),
+            menubar::Extra::Launchpad => Box::new(launchpad::Launchpad::new()),
         };
         let Some(b) = self.bar.as_mut() else { return };
         b.set_open_extra(Some(kind));
-        self.fly = Some(flyout::Flyout::open(kind, content, right_px, b.bottom_px(), b.dpi()));
+        let top = b.bottom_px() + if kind.centred() { (40.0 * b.dpi()) as i32 } else { 0 };
+        self.fly = Some(flyout::Flyout::open(kind, content, right_px, top, b.dpi()));
     }
 
     /// The Settings panel, centred near the top of the screen. It stays up until closed with Esc or a click
@@ -222,6 +226,16 @@ impl App {
             None => ((80.0 * self.dock.dpi) as i32, self.dock.dpi),
         };
         self.fly = Some(flyout::Flyout::open(menubar::Extra::Settings, Box::new(s), 0, top, dpi));
+    }
+
+    /// Launchpad from the dock's menu (works without the menu bar too).
+    fn open_launchpad(&mut self) {
+        if self.bar.is_some() {
+            return self.toggle_flyout(menubar::Extra::Launchpad, 0);
+        }
+        self.close_flyout();
+        let dpi = self.dock.dpi;
+        self.fly = Some(flyout::Flyout::open(menubar::Extra::Launchpad, Box::new(launchpad::Launchpad::new()), 0, (80.0 * dpi) as i32, dpi));
     }
 
     fn on_settings(&mut self, ch: fly_settings::Change) -> bool {
@@ -363,6 +377,7 @@ impl App {
                     self.close_flyout();
                     match cmd {
                         flyout::Cmd::Launch(t) => shell::launch(&t),
+                        flyout::Cmd::Pin(t) => self.dock.pin(&t),
                         flyout::Cmd::OpenWifi => {
                             if let Some((_, r)) = self.bar.as_ref().and_then(|b| b.extra_span(menubar::Extra::Wifi)) {
                                 self.toggle_flyout(menubar::Extra::Wifi, r);

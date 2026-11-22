@@ -78,6 +78,14 @@ pub enum Extra {
     ControlCenter,
     Calendar,
     Settings,
+    Launchpad,
+}
+
+impl Extra {
+    /// A panel of its own in the middle of the screen, not a drop-down under its menu bar item.
+    pub fn centred(self) -> bool {
+        matches!(self, Extra::Settings | Extra::Launchpad)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -89,6 +97,7 @@ enum Item {
     Ai,
     Battery,
     Net,
+    Apps,
     Search,
     Cc,
     Clock,
@@ -586,7 +595,7 @@ impl MenuBar {
     pub fn set_open_extra(&mut self, e: Option<Extra>) {
         let want = e.and_then(|e| {
             self.slots.iter().position(|s| {
-                matches!((s.item, e), (Item::Chevron, Extra::Tray) | (Item::Ai, Extra::Ai) | (Item::Battery, Extra::Battery) | (Item::Net, Extra::Wifi) | (Item::Cc, Extra::ControlCenter) | (Item::Clock, Extra::Calendar))
+                matches!((s.item, e), (Item::Chevron, Extra::Tray) | (Item::Ai, Extra::Ai) | (Item::Battery, Extra::Battery) | (Item::Net, Extra::Wifi) | (Item::Cc, Extra::ControlCenter) | (Item::Clock, Extra::Calendar) | (Item::Apps, Extra::Launchpad))
             })
         });
         if want != self.open {
@@ -606,6 +615,7 @@ impl MenuBar {
             Extra::ControlCenter => Item::Cc,
             Extra::Calendar => Item::Clock,
             Extra::Settings => Item::Logo,
+            Extra::Launchpad => Item::Apps,
         };
         self.slots.iter().find(|s| s.item == item).map(|s| (self.px(s.x), self.px(s.x + s.w)))
     }
@@ -634,6 +644,7 @@ impl MenuBar {
             Item::Net => return Some(BarAct::Flyout(Extra::Wifi, l, r)),
             Item::Cc => return Some(BarAct::Flyout(Extra::ControlCenter, l, r)),
             Item::Search => key(&[VK_LWIN, b'S']),
+            Item::Apps => return Some(BarAct::Flyout(Extra::Launchpad, l, r)),
             Item::Clock => return Some(BarAct::Flyout(Extra::Calendar, l, r)),
         }
         None
@@ -886,6 +897,7 @@ Open the download page?")) {
             }
             Item::Net => 17.0,
             Item::Search => self.text_w("\u{E721}", self.glyph_font(GLYPH_PX)),
+            Item::Apps => self.text_w("\u{E71D}", self.glyph_font(GLYPH_PX)),
             Item::Cc => 17.0,
             Item::Clock => self.text_w(&self.clock, self.font(400)),
         }
@@ -909,7 +921,7 @@ Open the download page?")) {
         if self.battery.is_some() {
             right.push(Item::Battery);
         }
-        right.extend([Item::Net, Item::Search, Item::Cc, Item::Clock]);
+        right.extend([Item::Net, Item::Apps, Item::Search, Item::Cc, Item::Clock]);
         let mut x = self.screen_w - SIDE;
         for it in right.into_iter().rev() {
             let w = self.content_w(it) + PAD_X * 2.0;
@@ -988,6 +1000,7 @@ Open the download page?")) {
                     Net::Off => draw_wifi(&mut content, cx, mid - 6.25 * dpi, 17.0 * dpi, 12.5 * dpi, 0, true),
                 },
                 Item::Search => self.draw_text(&mut content, "\u{E721}", self.glyph_font(GLYPH_PX), cx, mid),
+                Item::Apps => self.draw_text(&mut content, "\u{E71D}", self.glyph_font(GLYPH_PX), cx, mid),
                 Item::Cc => draw_cc(&mut content, cx, mid, dpi),
                 Item::Clock => self.draw_text(&mut content, &self.clock, self.font(400), cx, mid),
             }

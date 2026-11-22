@@ -88,6 +88,7 @@ pub enum Act {
     /// restore these minimized windows (back to front) and bring `front` forward
     Restore { front: HWND, minimized: Vec<HWND> },
     OpenSettings,
+    OpenLaunchpad,
 }
 
 thread_local! {
@@ -1125,6 +1126,17 @@ impl Dock {
         self.refresh(false);
     }
 
+    /// Keep an app (shell:AppsFolder\… or a path) in the dock, at the end of the pinned ones.
+    pub fn pin(&mut self, spec: &str) {
+        if self.cfg.pinned.iter().any(|p| eq_ic(p, spec)) {
+            return;
+        }
+        self.cfg.pinned.push(spec.to_string());
+        self.cfg.save();
+        self.refresh(true);
+        self.wake();
+    }
+
     fn keep(&mut self, i: usize) {
         let Some(l) = self.items[i].launch.clone() else { return };
         self.cfg.pinned.push(l);
@@ -1147,6 +1159,7 @@ impl Dock {
             Hide,
             QuitDock,
             Settings,
+            Launchpad,
             OpenTrash,
             EmptyTrash,
             Activate(HWND),
@@ -1177,6 +1190,7 @@ impl Dock {
                 add(Entry::item("Show Recent Apps").checked(self.cfg.show_recents), Some(Do::ToggleRecents));
                 add(Entry::item("Show Downloads Stack").checked(self.cfg.downloads_stack), Some(Do::ToggleStack));
                 add(Entry::Sep, None);
+                add(Entry::item("Launchpad"), Some(Do::Launchpad));
                 add(Entry::item("Dock Settings…"), Some(Do::Settings));
                 if !self.cfg.menu_bar {
                     add(Entry::Sep, None);
@@ -1237,6 +1251,7 @@ impl Dock {
             Do::Hide => self.set_auto_hide(!self.cfg.auto_hide),
             Do::QuitDock => return Some(Act::Quit),
             Do::Settings => return Some(Act::OpenSettings),
+            Do::Launchpad => return Some(Act::OpenLaunchpad),
             Do::OpenTrash => shell::launch(TRASH),
             Do::EmptyTrash => {
                 unsafe {

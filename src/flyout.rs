@@ -53,6 +53,8 @@ pub enum Cmd {
     Launch(String),
     /// Control Center's Wi-Fi row: swap to the Wi-Fi flyout
     OpenWifi,
+    /// close and keep this app in the dock
+    Pin(String),
 }
 
 /// Drawing context, in DIPs relative to the panel's content box.
@@ -546,7 +548,7 @@ impl Flyout {
 
         // right-align under the anchor, inside the screen
         let win_w = pw as i32;
-        let x = if self.kind == crate::menubar::Extra::Settings {
+        let x = if self.kind.centred() {
             (self.screen_w_px - win_w) / 2 // a window of its own, not under a menu bar item
         } else {
             self.right_px + (MARGIN * s) as i32 - win_w
