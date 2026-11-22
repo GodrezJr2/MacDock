@@ -874,7 +874,7 @@ impl Flyout {
             p.fill(Color::from_rgba8(0x30, 0x30, 0x34, 0xFF));
             Some(p)
         })?;
-        gfx::blur(&mut under, 40.0 * s);
+        gfx::blur(&mut under, 22.0 * s);
         let mut pm = Pixmap::new(pw, ph)?;
         let (gx, gy, gw, gh, r) = (MARGIN * s, MARGIN * s, w * s, panel_h * s, GLASS_R * s);
         if let Some(path) = gfx::rrect(gx, gy + 5.0 * s, gw, gh, r) {
@@ -882,13 +882,16 @@ impl Flyout {
                 pm.draw_pixmap(sx.round() as i32, sy.round() as i32, sh.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
             }
         }
-        let (mut g, lx, ly) = gfx::liquid_glass(&under, gx, gy, gw, gh, r, 18.0 * s, (0.0, 0.0), (0.0, 0.0))?;
+        let (mut g, lx, ly) = gfx::liquid_glass(&under, gx, gy, gw, gh, r, 16.0 * s, (0.0, 0.0), (0.0, 0.0))?;
+        // like the dock: a light grey wash, a touch brighter at the top; just enough shade that white labels
+        // still read over a bright wallpaper
         if let Some(p) = gfx::rrect(gx - lx as f32, gy - ly as f32, gw, gh, r) {
             let mut tint = Paint::default();
-            tint.set_color(Color::from_rgba8(0x18, 0x18, 0x1C, 0x9A));
+            tint.set_color(Color::from_rgba8(0x20, 0x20, 0x24, 0x40));
             tint.anti_alias = true;
             g.fill_path(&p, &tint, FillRule::Winding, Transform::identity(), None);
         }
+        gfx::white_wash(&mut g, gy - ly as f32, gh, 0x20, 0x0E);
         // clear the panel area so the shadow under it doesn't darken the glass
         if let Some(path) = gfx::rrect(gx, gy, gw, gh, r) {
             let mut clear = Paint::default();

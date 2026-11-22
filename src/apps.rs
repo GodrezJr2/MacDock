@@ -97,20 +97,21 @@ fn remember(spec: &str) {
     let _ = std::fs::write(recents_path(), r.join("\n"));
 }
 
-const W: f32 = 640.0;
-const PAD: (f32, f32) = (18.0, 14.0);
+const W: f32 = 560.0;
+const PAD: (f32, f32) = (16.0, 12.0);
 /// the content's fixed height: the window doesn't change size as the list changes
-const H: f32 = 452.0;
+const H: f32 = 372.0;
 const COLS: usize = 7;
-const CHIP_Y: f32 = 48.0;
-const CHIP_H: f32 = 28.0;
-const GRID_Y: f32 = 88.0;
-const CELL_H: f32 = 96.0;
-const ICON: f32 = 58.0;
+const HEAD_LINE: f32 = 31.0;
+const CHIP_Y: f32 = 39.0;
+const CHIP_H: f32 = 21.0;
+const GRID_Y: f32 = 68.0;
+const CELL_H: f32 = 72.0;
+const ICON: f32 = 42.0;
 /// the line between the recent row and the rest
-const DIVIDER_H: f32 = 17.0;
+const DIVIDER_H: f32 = 13.0;
 /// a mouse wheel notch scrolls this far; touchpad units move the list this many DIPs each
-const NOTCH: f32 = 84.0;
+const NOTCH: f32 = 72.0;
 const TOUCH: f32 = 0.55;
 const TOUCH_END_MS: u128 = 90;
 
@@ -164,7 +165,7 @@ impl Apps {
         Apps {
             apps, cat_of: Vec::new(), cats: Vec::new(), recent_specs, query: String::new(), cat: None, recent: Vec::new(),
             shown: Vec::new(), sel: 0, kb: false, scroll: 0.0, target: 0.0, max_scroll: 0.0, chip_scroll: 0.0,
-            chip_max: 0.0, over_chips: false, touch: None, focus: false, focus_t: 0.0, blink: Instant::now(),
+            chip_max: 0.0, over_chips: false, touch: None, focus: true, focus_t: 1.0, blink: Instant::now(),
             changed: None, last_tick: None, motion,
         }
     }
@@ -298,65 +299,57 @@ impl Apps {
 
     fn draw_header(&mut self, ui: &mut Ui) {
         let cw = ui.w;
-        // the window's icon: the Apps grid on a blue tile
-        ui.fill(0.0, 4.0, 28.0, 28.0, 8.0, (ACCENT.0, ACCENT.1, ACCENT.2, 0xFF));
-        ui.fill(0.0, 4.0, 28.0, 14.0, 8.0, white(0x22));
-        for k in 0..9 {
-            let (gx, gy) = (6.5 + (k % 3) as f32 * 5.5, 10.5 + (k / 3) as f32 * 5.5);
-            ui.fill(gx, gy, 4.0, 4.0, 1.2, white(0xFF));
+        let my = 14.0;
+        // the Apps "A": three thin strokes
+        let c = white(0xD9);
+        ui.line(2.5, my + 7.5, 9.0, my - 7.0, 1.6, c);
+        ui.line(9.0, my - 7.0, 15.5, my + 7.5, 1.6, c);
+        ui.line(1.0, my + 3.0, 17.0, my + 3.0, 1.6, c);
+        // the title is the search field; it has the typing from the start, so the caret blinks before it
+        let (fx, fw) = (24.0, cw - 24.0 - 34.0);
+        let hov = ui.hit(ID_SEARCH, fx, 0.0, fw, 28.0);
+        if hov {
+            ui.fill(fx, 0.0, fw, 28.0, 8.0, white(0x0C));
         }
-        // the title is the search field: hover lights it, a click or typing focuses it
-        let (fx, fw) = (36.0, cw - 36.0 - 40.0);
-        let hov = ui.hit(ID_SEARCH, fx, 1.0, fw, 34.0);
-        let f = ease_out(self.focus_t);
-        let bg = (0x1C as f32 * f) as u8 + if hov && !self.focus { 0x12 } else { 0 };
-        ui.fill(fx, 1.0, fw, 34.0, 11.0, white(bg));
-        if f > 0.01 {
-            ui.outline(fx, 1.0, fw, 34.0, 11.0, 1.0, white((0x30 as f32 * f) as u8));
-        }
-        let my = 18.0;
         let caret_on = self.focus && (self.blink.elapsed().as_millis() / BLINK_MS) % 2 == 0;
         let caret = (ACCENT.0, ACCENT.1, ACCENT.2, 255);
-        // the magnifier fades in and the title steps aside for it, smaller and dimmer: a placeholder now
-        let gx = fx + 10.0;
-        if f > 0.01 {
-            ui.glyph(gx + 7.0, my, '\u{E721}', 12.0, white((0xB3 as f32 * f) as u8));
-        }
-        let tx = gx + 22.0 * f;
-        let max = fw - 32.0;
+        let tx = fx + 6.0;
+        let max = fw - 14.0;
         if self.query.is_empty() {
-            let size = 17.0 - 3.0 * f;
-            let weight = if f < 0.5 { 600 } else { 400 };
-            let a = (0xF2 as f32 - 0x72 as f32 * f) as u8;
-            ui.text_mid(tx, my, self.title(), size, weight, white(a), max);
+            // a category picked shows its name; the placeholder dims a little once it has the typing
+            let a = if self.cat.is_some() { 0xF2 } else { (0xF2 as f32 - 0x40 as f32 * ease_out(self.focus_t)) as u8 };
+            ui.text_mid(tx, my, self.title(), 17.0, 400, white(a), max);
             if caret_on {
-                ui.fill(tx - 1.0, my - 8.0, 1.5, 16.0, 0.0, caret);
+                ui.fill(tx - 1.5, my - 9.0, 1.5, 18.0, 0.0, caret);
             }
         } else {
-            let end = ui.text_mid(tx, my, &self.query, 14.0, 400, white(0xF2), max);
+            let end = ui.text_mid(tx, my, &self.query, 17.0, 400, white(0xF5), max);
             if caret_on {
-                ui.fill(tx + end.min(max) + 1.0, my - 8.0, 1.5, 16.0, 0.0, caret);
+                ui.fill(tx + end.min(max) + 1.0, my - 9.0, 1.5, 18.0, 0.0, caret);
             }
         }
         // "…": MacDock's settings (where the classic full-screen Launchpad can be picked)
-        let (mx, mw) = (cw - 32.0, 32.0);
-        let mh = ui.hit(ID_MORE, mx, 2.0, mw, 32.0);
-        if mh {
-            ui.fill(mx, 2.0, mw, 32.0, 16.0, white(if ui.pressed == Some(ID_MORE) { 0x33 } else { 0x1F }));
+        let (mx, mw) = (cw - 26.0, 26.0);
+        if ui.hit(ID_MORE, mx, 1.0, mw, 26.0) {
+            ui.fill(mx, 1.0, mw, 26.0, 13.0, white(if ui.pressed == Some(ID_MORE) { 0x30 } else { 0x1A }));
         }
         for k in 0..3 {
-            ui.circle(mx + 10.0 + 6.0 * k as f32, my, 1.6, white(0xD9));
+            ui.circle(mx + 8.0 + 5.0 * k as f32, my, 1.3, white(0xD9));
         }
+        ui.line(0.0, HEAD_LINE, cw, HEAD_LINE, 1.0, white(0x1F));
     }
 
     fn draw_chips(&mut self, ui: &mut Ui) {
         let cw = ui.w;
-        let widths: Vec<f32> = self.cats.iter().map(|&c| ui.text_w(t(CATS[c].0), 12.5, 500) + 26.0).collect();
-        let total: f32 = widths.iter().sum::<f32>() + 6.0 * (widths.len().saturating_sub(1)) as f32;
+        let widths: Vec<f32> = self.cats.iter().map(|&c| ui.text_w(t(CATS[c].0), 11.0, 400) + 16.0).collect();
+        let gap = 6.0;
+        let total: f32 = widths.iter().sum::<f32>() + gap * (widths.len().saturating_sub(1)) as f32;
         self.chip_max = (total - cw).max(0.0);
         self.chip_scroll = self.chip_scroll.clamp(0.0, self.chip_max);
-        let fade = [0.0, 0.0, if self.chip_scroll > 1.0 { 18.0 } else { 0.0 }, if self.chip_scroll < self.chip_max - 1.0 { 18.0 } else { 0.0 }];
+        let fade = [0.0, 0.0, if self.chip_scroll > 1.0 { 16.0 } else { 0.0 }, if self.chip_scroll < self.chip_max - 1.0 { 16.0 } else { 0.0 }];
         let (cats, sel, scroll) = (self.cats.clone(), self.cat, self.chip_scroll);
+        // when they fit, spread them across the width like macOS does
+        let extra = if self.chip_max <= 0.0 && widths.len() > 1 { (cw - total) / (widths.len() - 1) as f32 } else { 0.0 };
         let mut over = false;
         ui.layer(0.0, CHIP_Y - 2.0, cw, CHIP_H + 4.0, 1.0, 1.0, fade, |ui| {
             let mut x = -scroll;
@@ -367,17 +360,10 @@ impl Apps {
                 over |= hov;
                 let on = sel == Some(c);
                 let pressed = ui.pressed == Some(id);
-                let (bg, fg) = if on {
-                    (white(0xEB), (0x1C, 0x1C, 0x1E, 0xFF))
-                } else {
-                    (white(if pressed { 0x33 } else if hov { 0x26 } else { 0x16 }), white(0xD9))
-                };
-                ui.fill(x, CHIP_Y, w, CHIP_H, CHIP_H / 2.0, bg);
-                if !on {
-                    ui.outline(x, CHIP_Y, w, CHIP_H, CHIP_H / 2.0, 1.0, white(0x14));
-                }
-                ui.text_mid(x + 13.0, CHIP_Y + CHIP_H / 2.0, t(CATS[c].0), 12.5, 500, fg, 0.0);
-                x += w + 6.0;
+                let bg = white(if on { 0x52 } else if pressed { 0x33 } else if hov { 0x28 } else { 0x17 });
+                ui.fill(x, CHIP_Y, w, CHIP_H, 6.0, bg);
+                ui.text_mid(x + 8.0, CHIP_Y + CHIP_H / 2.0, t(CATS[c].0), 11.0, 400, white(if on { 0xFF } else { 0xD9 }), 0.0);
+                x += w + gap + extra;
             }
         });
         self.over_chips = over;
@@ -388,10 +374,10 @@ impl Apps {
         let a = &self.apps[ai];
         let id = ID_APP + i as u32;
         let ix = x + (cell_w - ICON) / 2.0;
-        let iy = y + 6.0;
+        let iy = y + 4.0;
         ui.hit(id, x + 4.0, y, cell_w - 8.0, CELL_H - 4.0);
         if self.kb && i == self.sel {
-            ui.fill(x + 6.0, y, cell_w - 12.0, CELL_H - 6.0, 14.0, white(0x2A));
+            ui.fill(x + 4.0, y - 1.0, cell_w - 8.0, CELL_H - 2.0, 10.0, white(0x2E));
         }
         match &a.icon {
             Some(img) => ui.image(img, ix, iy, ICON, ICON),
@@ -400,9 +386,11 @@ impl Apps {
         if ui.pressed == Some(id) {
             ui.fill(ix + ICON * 0.06, iy + ICON * 0.06, ICON * 0.88, ICON * 0.88, ICON * 0.22, (0, 0, 0, 0x55));
         }
-        let max = cell_w - 10.0;
-        let tw = ui.text_w(&a.name, 11.5, 400).min(max);
-        ui.text(x + (cell_w - tw) / 2.0, iy + ICON + 7.0, &a.name, 11.5, 400, white(0xE6), max);
+        let max = cell_w - 8.0;
+        let tw = ui.text_w(&a.name, 10.5, 400).min(max);
+        let (tx, ty) = (x + (cell_w - tw) / 2.0, iy + ICON + 5.0);
+        ui.text(tx, ty + 0.8, &a.name, 10.5, 400, (0, 0, 0, 0x48), max);
+        ui.text(tx, ty, &a.name, 10.5, 400, white(0xF0), max);
     }
 
     fn draw_grid(&mut self, ui: &mut Ui) {
@@ -426,7 +414,7 @@ impl Apps {
             if !this.recent.is_empty() {
                 let dy = base + 4.0 + CELL_H + DIVIDER_H / 2.0 - 2.0;
                 if dy > GRID_Y - 2.0 && dy < GRID_Y + view {
-                    ui.line(8.0, dy, cw - 8.0, dy, 1.0, white(0x24));
+                    ui.line(0.0, dy, cw, dy, 1.0, white(0x1F));
                 }
             }
             // only the rows in view
