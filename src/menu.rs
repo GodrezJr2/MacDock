@@ -21,7 +21,10 @@ pub enum Entry {
 
 impl Entry {
     pub fn item(text: impl Into<String>) -> Entry {
-        Entry::Item { text: text.into(), gesture: String::new(), enabled: true, checked: false }
+        // every menu shows in the interface language; strings without a translation stay English
+        let text: String = text.into();
+        let text = crate::i18n::t(&text).to_string();
+        Entry::Item { text, gesture: String::new(), enabled: true, checked: false }
     }
     pub fn gesture(mut self, g: &str) -> Entry {
         if let Entry::Item { gesture, .. } = &mut self {

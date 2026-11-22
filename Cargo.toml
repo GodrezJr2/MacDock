@@ -14,6 +14,7 @@ windows-core = "0.58"
 [dependencies.windows]
 version = "0.58"
 features = [
+    "Win32_Globalization",
     "implement",
     "Win32_System_Ole",
     "Win32_System_SystemServices",

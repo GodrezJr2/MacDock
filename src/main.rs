@@ -21,6 +21,7 @@ mod launchpad;
 mod fly_wifi;
 mod flyout;
 mod genie;
+mod i18n;
 mod genie_gpu;
 mod gfx;
 mod menu;
@@ -101,9 +102,11 @@ struct App {
     genie: Option<genie::Genie>,
     bar: Option<menubar::MenuBar>,
     fly: Option<flyout::Flyout>,
+    /// the Settings window, which lives beside the drop-down flyouts
+    win: Option<flyout::Flyout>,
     fullscreen: bool,
-    /// menu bar, widgets, Alt+Tab as this process started them (changing them needs a restart)
-    started: (bool, bool, bool),
+    /// menu bar, widgets, Alt+Tab, Claude login as this process started them (changing them needs a restart)
+    started: [bool; 4],
 }
 
 impl App {
@@ -215,17 +218,17 @@ impl App {
     /// The Settings panel, centred near the top of the screen. It stays up until closed with Esc or a click
     /// outside, so the dock can be watched while sliders move.
     fn open_settings(&mut self) {
-        if self.fly.as_ref().is_some_and(|f| f.kind == menubar::Extra::Settings) {
-            return;
+        if let Some(w) = self.win.as_mut() {
+            return w.raise();
         }
         self.close_flyout();
         let mut s = fly_settings::Settings::new(self.dock.config());
-        s.set_started(self.started.0, self.started.1, self.started.2);
+        s.set_started(self.started);
         let (top, dpi) = match self.bar.as_ref() {
             Some(b) => (b.bottom_px() + (40.0 * b.dpi()) as i32, b.dpi()),
             None => ((80.0 * self.dock.dpi) as i32, self.dock.dpi),
         };
-        self.fly = Some(flyout::Flyout::open(menubar::Extra::Settings, Box::new(s), 0, top, dpi));
+        self.win = Some(flyout::Flyout::open(menubar::Extra::Settings, Box::new(s), 0, top, dpi));
     }
 
     /// Launchpad from the dock's menu (works without the menu bar too).
@@ -248,7 +251,6 @@ impl App {
                 return false;
             }
             Change::OpenConfig => {
-                self.close_flyout();
                 shell::launch(&config::path());
                 return true;
             }
@@ -273,6 +275,12 @@ impl App {
                             if let Some(mut g) = self.genie.take() {
                                 g.stop();
                             }
+                        }
+                    }
+                    Key::Language => {
+                        i18n::set(&c.language);
+                        if let Some(b) = self.bar.as_mut() {
+                            b.redraw();
                         }
                     }
                     Key::HideTaskbar => {
@@ -370,6 +378,16 @@ impl App {
                     Some(menubar::BarAct::Flyout(kind, _, r)) => self.toggle_flyout(kind, r),
                     Some(menubar::BarAct::OpenSettings) => self.open_settings(),
                     None => {}
+                }
+            }
+            Ev::Fly(h, fe) if self.win.as_ref().is_some_and(|w| w.hwnd.0 as isize == h) => {
+                // the Settings window: only its red light (or Esc) ends it
+                if let Some(cmd) = self.win.as_mut().and_then(|w| w.handle(fe)) {
+                    if matches!(cmd, flyout::Cmd::Close) {
+                        if let Some(mut w) = self.win.take() {
+                            w.close();
+                        }
+                    }
                 }
             }
             Ev::Fly(h, fe) => {
@@ -557,6 +575,7 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
         let _ = windows::Win32::System::Ole::OleInitialize(None); // drag and drop onto the dock
     }
     let cfg = Config::load();
+    i18n::set(&cfg.language);
     if cfg.hide_taskbar {
         taskbar::hide();
     }
@@ -569,8 +588,8 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
     }
     let want_widgets = cfg.desktop_widgets;
     let want_switcher = cfg.app_switcher;
-    let started = (cfg.menu_bar, want_widgets, want_switcher);
-    let mut app = App { dock: Dock::new(hwnd, cfg), genie, bar, fly: None, fullscreen: false, started };
+    let started = [cfg.menu_bar, want_widgets, want_switcher, cfg.claude_usage_oauth];
+    let mut app = App { dock: Dock::new(hwnd, cfg), genie, bar, fly: None, win: None, fullscreen: false, started };
     app.apply_genie_timing();
     if let Some(b) = app.bar.as_mut() {
         b.start(); // reserve the top strip before the dock measures the work area
@@ -583,6 +602,9 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
         switcher::start();
     }
     update::start();
+    if std::env::args().any(|a| a == "--settings") {
+        app.open_settings();
+    }
     if let Some(g) = app.genie.as_mut() {
         g.start();
     }

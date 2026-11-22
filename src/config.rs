@@ -48,6 +48,8 @@ pub struct Config {
     pub hide_speed: f64,
     /// Snap instead of animating: magnification, auto-hide and a very short minimize.
     pub reduce_motion: bool,
+    /// Interface language: "auto" (follow Windows), "en" or "id".
+    pub language: String,
     /// Keys we don't know (written by a newer build) survive a save.
     extra: Map<String, Value>,
 }
@@ -123,6 +125,7 @@ impl Default for Config {
             hide_delay_ms: 350.0,
             hide_speed: 1.0,
             reduce_motion: false,
+            language: "auto".into(),
             extra: Map::new(),
         }
     }
@@ -164,6 +167,11 @@ impl Config {
         f("MagnifySpeed", &mut c.magnify_speed, SPEED.0, SPEED.1);
         f("AutoHideDelay", &mut c.hide_delay_ms, HIDE_DELAY_MS.0, HIDE_DELAY_MS.1);
         f("AutoHideSpeed", &mut c.hide_speed, SPEED.0, SPEED.1);
+        if let Some(l) = v.remove("Language").and_then(|x| x.as_str().map(String::from)) {
+            if ["auto", "en", "id"].contains(&l.as_str()) {
+                c.language = l;
+            }
+        }
         if let Some(Value::Array(r)) = v.remove("Recent") {
             c.recent = r.into_iter().filter(|x| x.get("Key").and_then(|k| k.as_str()).is_some()).collect();
         }
@@ -217,6 +225,7 @@ impl Config {
             "AutoHideDelay": self.hide_delay_ms,
             "AutoHideSpeed": self.hide_speed,
             "ReduceMotion": self.reduce_motion,
+            "Language": self.language,
         });
         if let Value::Object(f) = fields {
             m.extend(f);

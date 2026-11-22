@@ -55,6 +55,9 @@ pub enum Cmd {
     OpenWifi,
     /// close and keep this app in the dock
     Pin(String),
+    /// window panels only (traffic lights): minimize, and fill the screen / back
+    Minimize,
+    Zoom,
 }
 
 /// Drawing context, in DIPs relative to the panel's content box.
@@ -307,6 +310,10 @@ pub trait Content {
     fn closing(&mut self) {}
     /// The window exists (workers post WM_FLY_DATA to it).
     fn opened(&mut self, _hwnd: isize) {}
+    /// Window panels: a press here (not on a spot) drags the window, like a title bar.
+    fn drag_area(&self, _x: f32, _y: f32) -> bool {
+        false
+    }
 }
 
 unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -333,13 +340,15 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_KEYDOWN => push(Ev::Fly(h.0 as isize, FlyEv::Key(wp.0 as u32))),
         WM_ACTIVATE if (wp.0 & 0xFFFF) == 0 => push(Ev::Fly(h.0 as isize, FlyEv::Deactivated)),
         WM_TIMER => push(Ev::Fly(h.0 as isize, FlyEv::Tick)),
+        // back from minimized (Alt+Tab, the taskbar): paint the layered surface again
+        WM_SIZE if wp.0 as u32 == SIZE_RESTORED => push(Ev::Fly(h.0 as isize, FlyEv::Tick)),
         WM_FLY_DATA => push(Ev::Fly(h.0 as isize, FlyEv::Data)),
         _ => {}
     }
     DefWindowProcW(h, msg, wp, lp)
 }
 
-fn create_window() -> HWND {
+fn create_window(window: bool) -> HWND {
     unsafe {
         let hinst = GetModuleHandleW(None).unwrap();
         let wc = WNDCLASSW {
@@ -350,10 +359,13 @@ fn create_window() -> HWND {
             ..Default::default()
         };
         RegisterClassW(&wc);
-        CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-            w!("MacDockFlyout"), w!("MacDock Flyout"), WS_POPUP, 0, 0, 1, 1, HWND::default(), HMENU::default(), hinst, None,
-        )
+        // a window panel (Settings) is a normal app window: in Alt+Tab, minimizable, not always on top
+        let (ex, title) = if window {
+            (WS_EX_LAYERED | WS_EX_APPWINDOW, w!("MacDock Settings"))
+        } else {
+            (WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST, w!("MacDock Flyout"))
+        };
+        CreateWindowExW(ex, w!("MacDockFlyout"), title, WS_POPUP | WS_MINIMIZEBOX, 0, 0, 1, 1, HWND::default(), HMENU::default(), hinst, None)
         .unwrap()
     }
 }
@@ -374,16 +386,26 @@ pub struct Flyout {
     surface: Option<Surface>,
     tracking: bool,
     pub stay_open: bool,
+    /// a window panel: stays open, can be dragged, minimized and zoomed to fill the screen
+    window: bool,
+    /// where the user dragged the window to (screen px of its top-left), if anywhere
+    moved: Option<(i32, i32)>,
+    /// filling the screen (the green light)
+    full: bool,
+    /// scale and content origin (DIPs) of the last render, for mapping the mouse
+    view: (f32, f32, f32),
 }
 
 impl Flyout {
     /// Open under the menu bar item whose right edge is `right_px`; `top_px` is the bar's bottom.
     pub fn open(kind: crate::menubar::Extra, content: Box<dyn Content>, right_px: i32, top_px: i32, dpi: f64) -> Flyout {
-        let hwnd = create_window();
+        let window = kind.is_window();
+        let hwnd = create_window(window);
         let screen_w_px = unsafe { GetSystemMetrics(SM_CXSCREEN) };
         let mut f = Flyout {
             hwnd, kind, content, dpi: dpi as f32, right_px, top_px, screen_w_px, pos: (0, 0), mouse: None, hot: None,
-            press: None, spots: Vec::new(), surface: None, tracking: false, stay_open: false,
+            press: None, spots: Vec::new(), surface: None, tracking: false, stay_open: window, window, moved: None,
+            full: false, view: (dpi as f32, 0.0, 0.0),
         };
         f.content.opened(hwnd.0 as isize);
         f.render();
@@ -406,14 +428,41 @@ impl Flyout {
         }
     }
 
-    fn content_origin(&self) -> (f32, f32) {
-        let (px, py) = self.content.padding();
-        (MARGIN + px, MARGIN + py)
+    fn to_content(&self, x: i32, y: i32) -> (f32, f32) {
+        let (s, ox, oy) = self.view;
+        (x as f32 / s - ox, y as f32 / s - oy)
     }
 
-    fn to_content(&self, x: i32, y: i32) -> (f32, f32) {
-        let (ox, oy) = self.content_origin();
-        (x as f32 / self.dpi - ox, y as f32 / self.dpi - oy)
+    /// Bring a minimized window panel back and to the front.
+    pub fn raise(&mut self) {
+        unsafe {
+            if IsIconic(self.hwnd).as_bool() {
+                let _ = ShowWindow(self.hwnd, SW_RESTORE);
+            }
+            let _ = SetForegroundWindow(self.hwnd);
+        }
+        self.render();
+    }
+
+    fn set_full(&mut self, on: bool) {
+        self.full = on;
+        unsafe {
+            // full screen covers the dock and menu bar like a macOS full-screen app; a window sits among apps
+            let z = if on { HWND_TOPMOST } else { HWND_NOTOPMOST };
+            let _ = SetWindowPos(self.hwnd, z, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+        }
+    }
+
+    /// Start a title-bar drag: Windows moves the window until the button comes up.
+    fn drag_window(&mut self) {
+        unsafe {
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
+            SendMessageW(self.hwnd, WM_NCLBUTTONDOWN, WPARAM(HTCAPTION as usize), LPARAM(0));
+            let mut r = windows::Win32::Foundation::RECT::default();
+            if GetWindowRect(self.hwnd, &mut r).is_ok() {
+                self.moved = Some((r.left, r.top));
+            }
+        }
     }
 
     fn spot_at(&self, p: (f32, f32)) -> Option<Spot> {
@@ -462,6 +511,8 @@ impl Flyout {
                 if let Some(s) = self.spot_at(p) {
                     self.press = Some(s.id);
                     self.content.press(s.id, Self::frac(&s, p));
+                } else if self.window && !self.full && self.content.drag_area(p.0, p.1) {
+                    self.drag_window();
                 }
             }
             FlyEv::Up(x, y) => {
@@ -483,6 +534,7 @@ impl Flyout {
             }
             FlyEv::Wheel(d) => self.content.wheel(d),
             FlyEv::Char(c) => cmd = self.content.char(c),
+            FlyEv::Key(0x1B) if self.full => self.set_full(false),
             FlyEv::Key(0x1B) => cmd = Cmd::Close,
             FlyEv::Key(vk) => cmd = self.content.key(vk),
             FlyEv::Deactivated => {
@@ -493,8 +545,17 @@ impl Flyout {
             FlyEv::Tick => self.content.tick(),
             FlyEv::Data => self.content.data(),
         }
-        if !matches!(cmd, Cmd::None) {
-            return Some(cmd);
+        match cmd {
+            Cmd::None => {}
+            Cmd::Minimize => unsafe {
+                self.set_full(false);
+                let _ = ShowWindow(self.hwnd, SW_MINIMIZE);
+            },
+            Cmd::Zoom => {
+                let on = !self.full;
+                self.set_full(on);
+            }
+            cmd => return Some(cmd),
         }
         self.render();
         None
@@ -540,11 +601,15 @@ impl Flyout {
             pm.stroke_path(&p, &paint, &Stroke { width: s, ..Default::default() }, Transform::identity(), None);
         }
         spots.clear();
+        if self.full {
+            return self.render_full(w, panel_h, padx, pady);
+        }
         {
             let mut ui = Ui { pm: &mut pm, s, ox, oy, mouse: self.mouse, pressed: self.press, spots: &mut spots, w: cw };
             self.content.draw(&mut ui);
         }
         self.spots = spots;
+        self.view = (s, ox, oy);
 
         // right-align under the anchor, inside the screen
         let win_w = pw as i32;
@@ -555,6 +620,7 @@ impl Flyout {
         };
         let x = x.min(self.screen_w_px - win_w - (4.0 * s) as i32).max((8.0 * s) as i32);
         let y = self.top_px - (7.0 * s) as i32;
+        let (x, y) = self.moved.unwrap_or((x, y));
         self.pos = (x, y);
         self.content.placed(&self.spots, (x + (ox * s) as i32, y + (oy * s) as i32), s);
 
@@ -565,6 +631,35 @@ impl Flyout {
             let src = &pm.data()[..(pw * total_h * 4) as usize];
             sf.bytes().copy_from_slice(src);
             sf.present(self.hwnd, x, y);
+        }
+    }
+
+    /// Full screen: an opaque backdrop over the whole monitor, the panel's content scaled up in its middle.
+    fn render_full(&mut self, w: f32, panel_h: f32, padx: f32, pady: f32) {
+        let (sw, sh) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+        let Some(mut pm) = Pixmap::new(sw as u32, sh as u32) else { return };
+        pm.fill(Color::from_rgba8(0x1C, 0x1C, 0x1E, 0xFF));
+        let s0 = self.dpi;
+        let z = ((sh as f32 * 0.9) / (panel_h * s0)).min((sw as f32 * 0.9) / (w * s0)).clamp(1.0, 1.6);
+        let s = s0 * z;
+        let ox = (sw as f32 / s - w) / 2.0 + padx;
+        let oy = (sh as f32 / s - panel_h) / 2.0 + pady;
+        let mut spots = Vec::new();
+        {
+            let cw = w - 2.0 * padx;
+            let mut ui = Ui { pm: &mut pm, s, ox, oy, mouse: self.mouse, pressed: self.press, spots: &mut spots, w: cw };
+            self.content.draw(&mut ui);
+        }
+        self.spots = spots;
+        self.view = (s, ox, oy);
+        self.pos = (0, 0);
+        let (pw, ph) = (sw as u32, sh as u32);
+        if self.surface.as_ref().is_none_or(|sf| sf.w != pw || sf.h != ph) {
+            self.surface = Surface::new(pw, ph);
+        }
+        if let Some(sf) = self.surface.as_mut() {
+            sf.bytes().copy_from_slice(pm.data());
+            sf.present(self.hwnd, 0, 0);
         }
     }
 }

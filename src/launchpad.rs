@@ -18,6 +18,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 use crate::flyout::{white, Cmd, Content, Ui, ACCENT, WM_FLY_DATA};
+use crate::i18n::t;
 
 #[derive(Clone)]
 struct App {
@@ -252,7 +253,7 @@ impl Content for Launchpad {
         ui.glyph(sx + 18.0, SEARCH_H / 2.0, '\u{E721}', 13.0, white(0x8C));
         let tx = sx + 34.0;
         if self.query.is_empty() {
-            ui.text_mid(tx, SEARCH_H / 2.0, "Search", 14.0, 400, white(0x73), 0.0);
+            ui.text_mid(tx, SEARCH_H / 2.0, t("Search"), 14.0, 400, white(0x73), 0.0);
             ui.fill(tx - 1.0, 9.0, 1.5, SEARCH_H - 18.0, 0.0, (ACCENT.0, ACCENT.1, ACCENT.2, 255));
         } else {
             let end = ui.text_mid(tx, SEARCH_H / 2.0, &self.query, 14.0, 400, white(0xF2), sw - 50.0);
@@ -264,7 +265,7 @@ impl Content for Launchpad {
         let cell_w = cw / COLS as f32;
         let grid_h = CELL_H * ROWS as f32;
         if self.shown.is_empty() {
-            let msg = if self.apps.is_empty() { "Loading apps…" } else { "No Results" };
+            let msg = t(if self.apps.is_empty() { "Loading apps…" } else { "No Results" });
             let w = ui.text_w(msg, 18.0, 500);
             ui.text_mid((cw - w) / 2.0, top + grid_h / 2.0, msg, 18.0, 500, white(0x80), 0.0);
         }

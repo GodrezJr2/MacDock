@@ -86,6 +86,11 @@ impl Extra {
     pub fn centred(self) -> bool {
         matches!(self, Extra::Settings | Extra::Launchpad)
     }
+
+    /// A window of its own (traffic lights, stays open, can be dragged), not a drop-down.
+    pub fn is_window(self) -> bool {
+        self == Extra::Settings
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -573,6 +578,12 @@ impl MenuBar {
         None
     }
 
+    /// Draw again from scratch (the interface language changed).
+    pub fn redraw(&mut self) {
+        self.dirty = true;
+        self.render();
+    }
+
     /// A menu bar option changed in the Settings panel.
     pub fn set_option(&mut self, o: BarOpt, on: bool) {
         let f = match o {
@@ -658,10 +669,10 @@ impl MenuBar {
         let (entries, acts): (Vec<Entry>, Vec<Do>) = match item {
             Item::Logo => self.system_menu(),
             Item::App => split(vec![
-                (Entry::item(format!("Hide {app}")), Do::HideApp),
+                (Entry::item(crate::i18n::fill("Hide {}", &app)), Do::HideApp),
                 (Entry::item("Hide Others"), Do::HideOthers),
                 (Entry::Sep, Do::None),
-                (Entry::item(format!("Quit {app}")), Do::QuitApp),
+                (Entry::item(crate::i18n::fill("Quit {}", &app)), Do::QuitApp),
             ]),
             Item::Menu("File") => split(vec![
                 (Entry::item("New Window").gesture("Ctrl+N"), Do::Keys(&[VK_CONTROL, b'N'])),
@@ -704,7 +715,7 @@ impl MenuBar {
                 (Entry::item("Mission Control").gesture("Win+Tab"), Do::KeysNow(&[VK_LWIN, 0x09])),
             ]),
             Item::Menu(_) => split(vec![
-                (Entry::item(format!("{app} Help")).gesture("F1"), Do::Keys(&[0x70])),
+                (Entry::item(crate::i18n::fill("{} Help", &app)).gesture("F1"), Do::Keys(&[0x70])),
                 (Entry::item("Windows Tips"), Do::Launch("ms-get-started:")),
             ]),
             _ => return None,
@@ -726,7 +737,7 @@ impl MenuBar {
         split(vec![
             (Entry::item("About This PC"), Do::Launch("ms-settings:about")),
             match crate::update::available() {
-                Some((v, _)) => (Entry::item(format!("Update Available: MacDock {v}…")), Do::OpenUpdate),
+                Some((v, _)) => (Entry::item(crate::i18n::fill("Update Available: MacDock {}…", &v.to_string())), Do::OpenUpdate),
                 None => (Entry::item("Check for MacDock Updates…"), Do::CheckUpdate),
             },
             (Entry::Sep, Do::None),
@@ -888,7 +899,7 @@ Open the download page?")) {
         match it {
             Item::Logo => 13.0,
             Item::App => self.text_w(&self.app_name, self.font(700)),
-            Item::Menu(m) => self.text_w(m, self.font(500)),
+            Item::Menu(m) => self.text_w(crate::i18n::t(m), self.font(500)),
             Item::Chevron => self.text_w("\u{E70E}", self.glyph_font(11.0)),
             Item::Ai => 14.0 + if self.ai_label.is_empty() { 0.0 } else { 5.0 + self.text_w(&self.ai_label, self.font(400)) },
             Item::Battery => {
@@ -978,7 +989,7 @@ Open the download page?")) {
                     }
                 }
                 Item::App => self.draw_text(&mut content, &self.app_name, self.font(700), cx, mid),
-                Item::Menu(m) => self.draw_text(&mut content, m, self.font(500), cx, mid),
+                Item::Menu(m) => self.draw_text(&mut content, crate::i18n::t(m), self.font(500), cx, mid),
                 Item::Chevron => self.draw_text(&mut content, "\u{E70E}", self.glyph_font(11.0), cx, mid),
                 Item::Ai => {
                     draw_ai_ring(&mut content, cx + 7.0 * dpi, mid, 6.0 * dpi, dpi, self.ai_pct, self.ai_label.ends_with("/s"));
