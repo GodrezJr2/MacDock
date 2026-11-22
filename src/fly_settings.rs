@@ -36,6 +36,8 @@ pub enum Key {
     ReduceMotion,
     /// 0 auto, 1 English, 2 Indonesian
     Language,
+    /// 0 the Apps window, 1 the classic full-screen Launchpad
+    LaunchpadStyle,
 }
 
 pub enum Change {
@@ -48,6 +50,10 @@ pub enum Change {
 
 const LANGS: [&str; 3] = ["auto", "en", "id"];
 const LANG_NAMES: [&str; 3] = ["Auto", "English", "Indonesia"];
+const STYLES: [&str; 2] = ["apps", "classic"];
+const STYLE_NAMES: [&str; 2] = ["Apps window", "Full screen"];
+/// the choice rows, in the order their option ids are numbered (ID_CHOICE + 10 * row + option)
+const CHOICES: [Key; 2] = [Key::Language, Key::LaunchpadStyle];
 
 /// Write a change into a config. Returns false if nothing changed.
 pub fn apply(c: &mut Config, k: Key, v: f64) -> bool {
@@ -82,6 +88,12 @@ pub fn apply(c: &mut Config, k: Key, v: f64) -> bool {
             let l = LANGS[(v.round() as usize).min(LANGS.len() - 1)];
             let changed = c.language != l;
             c.language = l.into();
+            return changed;
+        }
+        Key::LaunchpadStyle => {
+            let l = STYLES[(v.round() as usize).min(STYLES.len() - 1)];
+            let changed = c.launchpad_style != l;
+            c.launchpad_style = l.into();
             return changed;
         }
         Key::AutoHide => Some(&mut c.auto_hide),
@@ -194,7 +206,7 @@ fn anim_rows() -> Vec<Row> {
 }
 
 fn general_rows() -> Vec<Row> {
-    vec![Row::Choice(Key::Language, "Language", &LANG_NAMES)]
+    vec![Row::Choice(Key::Language, "Language", &LANG_NAMES), Row::Choice(Key::LaunchpadStyle, "All apps", &STYLE_NAMES)]
 }
 
 pub struct Settings {
@@ -228,6 +240,7 @@ impl Settings {
             Key::HideDelay => c.hide_delay_ms,
             Key::HideSpeed => c.hide_speed,
             Key::Language => LANGS.iter().position(|l| *l == c.language).unwrap_or(0) as f64,
+            Key::LaunchpadStyle => STYLES.iter().position(|l| *l == c.launchpad_style).unwrap_or(0) as f64,
             Key::AutoHide => b(c.auto_hide),
             Key::Recents => b(c.show_recents),
             Key::Downloads => b(c.downloads_stack),
@@ -340,7 +353,8 @@ impl Settings {
                     let mut cx = sx;
                     for (j, o) in opts.iter().enumerate() {
                         let sw = seg_w[j];
-                        let hov = ui.hit(ID_CHOICE + j as u32, cx, sy, sw, sh);
+                        let row = CHOICES.iter().position(|&x| x == k).unwrap_or(0) as u32;
+                        let hov = ui.hit(ID_CHOICE + 10 * row + j as u32, cx, sy, sw, sh);
                         if j == cur {
                             ui.fill(cx + 2.0, sy + 2.0, sw - 4.0, sh - 4.0, 5.5, white(0x5C));
                         } else if hov {
@@ -383,11 +397,11 @@ fn note_h(ui: &Ui, s: &str, w: f32) -> f32 {
     lines as f32 * ui.line_h(11.5, 400) + 16.0
 }
 
-const ALL: [Key; 22] = [
+const ALL: [Key; 23] = [
     Key::IconSize, Key::Magnify, Key::AutoHide, Key::Recents, Key::Downloads, Key::Tiles, Key::Badges,
     Key::HideTaskbar, Key::MenuBar, Key::Widgets, Key::Switcher, Key::BatteryPct, Key::AiUsage, Key::ClaudeOAuth,
     Key::TrayIcons, Key::Genie, Key::GenieMs, Key::MagnifySpeed, Key::HideDelay, Key::HideSpeed, Key::ReduceMotion,
-    Key::Language,
+    Key::Language, Key::LaunchpadStyle,
 ];
 
 fn id_of(k: Key) -> u32 {
@@ -522,7 +536,10 @@ impl Content for Settings {
                 reset_animations(&mut self.cfg);
                 push(Ev::Settings(Change::ResetAnimations));
             }
-            _ if (ID_CHOICE..ID_CHOICE + 8).contains(&id) => self.set(Key::Language, (id - ID_CHOICE) as f64, true),
+            _ if (ID_CHOICE..ID_CHOICE + 10 * CHOICES.len() as u32).contains(&id) => {
+                let (row, opt) = ((id - ID_CHOICE) / 10, (id - ID_CHOICE) % 10);
+                self.set(CHOICES[row as usize], opt as f64, true)
+            }
             _ => {
                 if let Some(k) = Self::key_of(id).filter(|&k| Self::range(k).is_none()) {
                     let v = if self.value(k) >= 0.5 { 0.0 } else { 1.0 };

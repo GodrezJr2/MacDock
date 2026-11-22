@@ -27,6 +27,10 @@ const STAGE_IN_MS: f32 = 240.0;
 /// a panel under the menu bar: fade and grow in, fade out
 const PANEL_IN_MS: f32 = 170.0;
 const PANEL_OUT_MS: u64 = 140;
+/// a glass window (the Apps window): springs up from 90% as it fades in
+const GLASS_IN_MS: f32 = 420.0;
+/// the glass window's corners
+const GLASS_R: f32 = 26.0;
 
 /// false while Reduce motion is on: panels appear and go at once.
 static MOTION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -124,9 +128,10 @@ pub enum Cmd {
     /// window panels only (traffic lights): minimize, and fill the screen / back
     Minimize,
     Zoom,
+    /// close and open MacDock's Settings
+    Settings,
 }
 
-/// Drawing context, in DIPs relative to the panel's content box.
 thread_local! {
     /// Images already scaled to a size, keyed by the source's address, a sample of its pixels and the size:
     /// a full-screen Launchpad draws 35 icons a frame and scaling them each time was most of a frame.
@@ -160,6 +165,7 @@ fn scaled(img: &Pixmap, dw: u32, dh: u32) -> Option<std::rc::Rc<Pixmap>> {
     Some(small)
 }
 
+/// Drawing context, in DIPs relative to the panel's content box.
 pub struct Ui<'a> {
     pm: &'a mut Pixmap,
     s: f32,
@@ -187,6 +193,69 @@ pub struct Spot {
 impl Ui<'_> {
     fn tf(&self) -> Transform {
         Transform::from_row(self.s, 0.0, 0.0, self.s, self.ox * self.s, self.oy * self.s)
+    }
+
+    /// Draw `f` into a layer clipped to (`x`, `y`, `w`, `h`), then put it down at `opacity`, scaled by `zoom`
+    /// about its middle, its edges fading out over `fade` DIPs (top, bottom, left, right: a scroll view's soft
+    /// edges). Spots outside the rect are dropped, and the mouse only counts inside it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn layer(&mut self, x: f32, y: f32, w: f32, h: f32, opacity: f32, zoom: f32, fade: [f32; 4], f: impl FnOnce(&mut Ui)) {
+        let s = self.s;
+        let (dx0, dy0) = (((self.ox + x) * s).floor(), ((self.oy + y) * s).floor());
+        let (dw, dh) = ((w * s).ceil() as u32 + 1, (h * s).ceil() as u32 + 1);
+        let Some(mut pm) = Pixmap::new(dw, dh) else { return };
+        let n0 = self.spots.len();
+        let inside = |p: &(f32, f32)| p.0 >= x && p.0 < x + w && p.1 >= y && p.1 < y + h;
+        {
+            let mut ui = Ui {
+                pm: &mut pm, s, ox: self.ox - dx0 / s, oy: self.oy - dy0 / s, mouse: self.mouse.filter(inside),
+                pressed: self.pressed, spots: &mut *self.spots, w: self.w, fs: self.fs, still: self.still,
+            };
+            f(&mut ui);
+        }
+        let added: Vec<Spot> = self.spots.drain(n0..).collect();
+        for sp in added {
+            let (l, t, r, b) = (sp.x.max(x), sp.y.max(y), (sp.x + sp.w).min(x + w), (sp.y + sp.h).min(y + h));
+            if r > l && b > t {
+                self.spots.push(Spot { id: sp.id, x: l, y: t, w: r - l, h: b - t });
+            }
+        }
+        if opacity <= 0.0 {
+            return;
+        }
+        // soft edges: scale whole rows and columns down (the data is premultiplied, so all four bytes)
+        let smooth = |v: f32| v * v * (3.0 - 2.0 * v);
+        let (fw, fh) = (dw as usize, dh as usize);
+        let data = pm.data_mut();
+        for (k, &f) in fade.iter().enumerate() {
+            let n = (f * s).ceil() as usize;
+            if n == 0 {
+                continue;
+            }
+            for i in 0..n.min(if k < 2 { fh } else { fw }) {
+                let a = smooth((i as f32 + 0.5) / n as f32);
+                let m = (a * 256.0) as u32;
+                if k < 2 {
+                    let row = if k == 0 { i } else { fh - 1 - i };
+                    for b in &mut data[row * fw * 4..(row + 1) * fw * 4] {
+                        *b = ((*b as u32 * m) >> 8) as u8;
+                    }
+                } else {
+                    let col = if k == 2 { i } else { fw - 1 - i };
+                    for row in 0..fh {
+                        let o = (row * fw + col) * 4;
+                        for b in &mut data[o..o + 4] {
+                            *b = ((*b as u32 * m) >> 8) as u8;
+                        }
+                    }
+                }
+            }
+        }
+        let quality = if (zoom - 1.0).abs() > 0.0005 { tiny_skia::FilterQuality::Bilinear } else { tiny_skia::FilterQuality::Nearest };
+        let paint = PixmapPaint { opacity: opacity.min(1.0), quality, ..Default::default() };
+        let (cx, cy) = (dw as f32 / 2.0, dh as f32 / 2.0);
+        let tf = Transform::from_row(zoom, 0.0, 0.0, zoom, dx0 + cx - cx * zoom, dy0 + cy - cy * zoom);
+        self.pm.draw_pixmap(0, 0, pm.as_ref(), &paint, tf, None);
     }
 
     /// Name a clickable spot; returns whether the mouse is over it.
@@ -441,6 +510,15 @@ pub trait Content {
     fn motion(&self) -> bool {
         true
     }
+    /// A floating Liquid Glass window (the Apps window) of this fixed content height in DIPs: centred on the
+    /// screen over a lens of what is behind it, springing in when it opens.
+    fn glass(&self) -> Option<f32> {
+        None
+    }
+    /// Esc: close, unless the panel has something to undo first (a search).
+    fn escape(&mut self) -> Cmd {
+        Cmd::Close
+    }
 }
 
 unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -517,6 +595,8 @@ pub struct Flyout {
     surface: Option<Surface>,
     /// the Launchpad's frame: the backdrop with the content drawn straight over it
     stage_pm: Option<Pixmap>,
+    /// the glass window's body (shadow, lens of the screen behind it, tint), built once when it opens
+    glass: Option<Pixmap>,
     tracking: bool,
     pub stay_open: bool,
     /// a window panel: stays open, can be dragged, minimized and zoomed to fill the screen
@@ -541,7 +621,7 @@ impl Flyout {
         let screen_w_px = unsafe { GetSystemMetrics(SM_CXSCREEN) };
         let mut f = Flyout {
             hwnd, kind, content, dpi: dpi as f32, right_px, top_px, screen_w_px, pos: (0, 0), mouse: None, hot: None,
-            press: None, spots: Vec::new(), surface: None, stage_pm: None, tracking: false, stay_open: window, window, moved: None,
+            press: None, spots: Vec::new(), surface: None, stage_pm: None, glass: None, tracking: false, stay_open: window, window, moved: None,
             full: false, view: (dpi as f32, 0.0, 0.0), stage: false, born: std::time::Instant::now(), anim_timer: false,
         };
         f.content.opened(hwnd.0 as isize);
@@ -698,7 +778,7 @@ impl Flyout {
             FlyEv::HWheel(d) => self.content.hwheel(d),
             FlyEv::Char(c) => cmd = self.content.char(c),
             FlyEv::Key(0x1B) if self.full => self.set_full(false),
-            FlyEv::Key(0x1B) => cmd = Cmd::Close,
+            FlyEv::Key(0x1B) => cmd = self.content.escape(),
             FlyEv::Key(vk) => cmd = self.content.key(vk),
             FlyEv::Deactivated => {
                 if !self.stay_open {
@@ -737,7 +817,7 @@ impl Flyout {
 
     /// Run a frame-rate timer while the open zoom or the content is moving.
     fn keep_ticking(&mut self) {
-        let dur = if self.stage { STAGE_IN_MS } else { PANEL_IN_MS };
+        let dur = if self.stage { STAGE_IN_MS } else if self.content.glass().is_some() { GLASS_IN_MS } else { PANEL_IN_MS };
         let opening = motion() && self.content.motion() && !self.full && self.born.elapsed().as_secs_f32() * 1000.0 < dur + 40.0; // one frame past the end, so the last one is whole
         let want = opening || self.content.animating();
         if want != self.anim_timer {
@@ -785,7 +865,101 @@ impl Flyout {
         sf.present_alpha(self.hwnd, 0, 0, (e * 255.0).round().clamp(1.0, 255.0) as u8);
     }
 
+    /// The glass window: what is on screen behind it, blurred and bent at the rim like a lens, with a dark tint
+    /// so the labels read on any wallpaper. Captured once, before the window first shows.
+    #[allow(clippy::too_many_arguments)]
+    fn build_glass(x: i32, y: i32, pw: u32, ph: u32, w: f32, panel_h: f32, s: f32) -> Option<Pixmap> {
+        let mut under = gfx::capture_screen(x, y, pw, ph).or_else(|| {
+            let mut p = Pixmap::new(pw, ph)?;
+            p.fill(Color::from_rgba8(0x30, 0x30, 0x34, 0xFF));
+            Some(p)
+        })?;
+        gfx::blur(&mut under, 40.0 * s);
+        let mut pm = Pixmap::new(pw, ph)?;
+        let (gx, gy, gw, gh, r) = (MARGIN * s, MARGIN * s, w * s, panel_h * s, GLASS_R * s);
+        if let Some(path) = gfx::rrect(gx, gy + 5.0 * s, gw, gh, r) {
+            if let Some((sh, sx, sy)) = gfx::shadow(&path, 12.0 * s, (0, 0, 0, 0x70)) {
+                pm.draw_pixmap(sx.round() as i32, sy.round() as i32, sh.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+            }
+        }
+        let (mut g, lx, ly) = gfx::liquid_glass(&under, gx, gy, gw, gh, r, 18.0 * s, (0.0, 0.0), (0.0, 0.0))?;
+        if let Some(p) = gfx::rrect(gx - lx as f32, gy - ly as f32, gw, gh, r) {
+            let mut tint = Paint::default();
+            tint.set_color(Color::from_rgba8(0x18, 0x18, 0x1C, 0x9A));
+            tint.anti_alias = true;
+            g.fill_path(&p, &tint, FillRule::Winding, Transform::identity(), None);
+        }
+        // clear the panel area so the shadow under it doesn't darken the glass
+        if let Some(path) = gfx::rrect(gx, gy, gw, gh, r) {
+            let mut clear = Paint::default();
+            clear.blend_mode = tiny_skia::BlendMode::Clear;
+            clear.anti_alias = true;
+            pm.fill_path(&path, &clear, FillRule::Winding, Transform::identity(), None);
+        }
+        pm.draw_pixmap(lx, ly, g.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+        // a hairline rim on top of the lens's own highlight
+        if let Some(p) = gfx::rrect(gx + 0.5 * s, gy + 0.5 * s, gw - s, gh - s, r - 0.5 * s) {
+            let mut paint = Paint::default();
+            paint.set_color(rgba(white(0x26)));
+            paint.anti_alias = true;
+            pm.stroke_path(&p, &paint, &Stroke { width: s, ..Default::default() }, Transform::identity(), None);
+        }
+        Some(pm)
+    }
+
+    fn render_glass(&mut self, ch: f32) {
+        let w = self.content.width() - 2.0 * MARGIN;
+        let (padx, pady) = self.content.padding();
+        let s = self.dpi;
+        let panel_h = ch + 2.0 * pady;
+        let (pw, ph) = (((w + 2.0 * MARGIN) * s).ceil() as u32, ((panel_h + 2.0 * MARGIN) * s).ceil() as u32);
+        let sh = unsafe { GetSystemMetrics(SM_CYSCREEN) };
+        // centred, a little above the middle as macOS places it, and never under the menu bar
+        let x = (self.screen_w_px - pw as i32) / 2;
+        let y = ((sh - ph as i32) / 2 - (24.0 * s) as i32).max(self.top_px - (40.0 * s) as i32).max(0);
+        self.pos = (x, y);
+        if self.glass.as_ref().is_none_or(|g| g.width() != pw || g.height() != ph) {
+            self.glass = Self::build_glass(x, y, pw, ph, w, panel_h, s);
+        }
+        let Some(base) = self.glass.as_ref() else { return };
+        let mut pm = base.clone();
+        let (ox, oy) = (MARGIN + padx, MARGIN + pady);
+        let mut spots = Vec::new();
+        let t = if motion() && self.content.motion() { self.born.elapsed().as_secs_f32() } else { 1.0 };
+        let opening = t * 1000.0 < GLASS_IN_MS;
+        {
+            let mut ui = Ui { pm: &mut pm, s, ox, oy, mouse: self.mouse, pressed: self.press, spots: &mut spots, w: w - 2.0 * padx, fs: s, still: true };
+            self.content.draw(&mut ui);
+        }
+        self.spots = spots;
+        self.view = (s, ox, oy);
+        self.content.placed(&self.spots, (x + (ox * s) as i32, y + (oy * s) as i32), s);
+        if opening {
+            // a damped spring: up from 90%, a hair past full size, settled by ~400 ms; the fade leads it
+            let k = 1.0 - (-t * 14.0).exp() * (t * 16.0).cos();
+            let z = 0.9 + 0.1 * k;
+            let a = (t / 0.16).min(1.0);
+            let a = 1.0 - (1.0 - a) * (1.0 - a);
+            if let Some(mut out) = Pixmap::new(pw, ph) {
+                let (ax, ay) = (pw as f32 / 2.0, ph as f32 / 2.0);
+                let paint = PixmapPaint { opacity: a, quality: tiny_skia::FilterQuality::Bilinear, ..Default::default() };
+                out.draw_pixmap(0, 0, pm.as_ref(), &paint, Transform::from_row(z, 0.0, 0.0, z, ax - ax * z, ay - ay * z), None);
+                pm = out;
+            }
+        }
+        if self.surface.as_ref().is_none_or(|sf| sf.w != pw || sf.h != ph) {
+            self.surface = Surface::new(pw, ph);
+        }
+        if let Some(sf) = self.surface.as_mut() {
+            sf.bytes().copy_from_slice(pm.data());
+            sf.present(self.hwnd, x, y);
+        }
+    }
+
     fn render_panel(&mut self) {
+        if let Some(ch) = self.content.glass() {
+            return self.render_glass(ch);
+        }
         let w = self.content.width() - 2.0 * MARGIN; // the width includes the shadow margin, as in Flyout.cs
         let (padx, pady) = self.content.padding();
         let s = self.dpi;
@@ -913,6 +1087,26 @@ pub fn snapshot_stage(content: &mut dyn Content, w: f32, h: f32, s: f32) -> (u32
     let mut ui = Ui { pm: &mut pm, s, ox: 0.0, oy: 0.0, mouse: None, pressed: None, spots: &mut spots, w, fs: s, still: true };
     content.draw(&mut ui);
     (pw, ph, pm.data().to_vec())
+}
+
+/// Test aid: a glass window the way `render_glass` paints it, over what is on screen in the middle right now.
+#[cfg(test)]
+pub fn snapshot_glass(content: &mut dyn Content, s: f32) -> (u32, u32, Vec<u8>) {
+    let w = content.width() - 2.0 * MARGIN;
+    let (padx, pady) = content.padding();
+    let panel_h = content.glass().unwrap() + 2.0 * pady;
+    let (pw, ph) = (((w + 2.0 * MARGIN) * s).ceil() as u32, ((panel_h + 2.0 * MARGIN) * s).ceil() as u32);
+    let (sw, sh) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+    let (x, y) = ((sw - pw as i32) / 2, (sh - ph as i32) / 2);
+    let mut pm = Flyout::build_glass(x, y, pw, ph, w, panel_h, s).unwrap();
+    let mut spots = Vec::new();
+    let mut ui = Ui { pm: &mut pm, s, ox: MARGIN + padx, oy: MARGIN + pady, mouse: None, pressed: None, spots: &mut spots, w: w - 2.0 * padx, fs: s, still: true };
+    content.draw(&mut ui);
+    // on a mid-grey so the shadow and the rim show
+    let mut out = Pixmap::new(pw, ph).unwrap();
+    out.fill(Color::from_rgba8(0x80, 0x80, 0x80, 255));
+    out.draw_pixmap(0, 0, pm.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+    (pw, ph, out.data().to_vec())
 }
 
 /// Test aid: paint a panel the way `Flyout::render` does, on a dark backdrop, and return (w, h, BGRA).

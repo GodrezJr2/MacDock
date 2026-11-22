@@ -21,19 +21,43 @@ use crate::flyout::{white, Cmd, Content, Ui, ACCENT, WM_FLY_DATA};
 use crate::i18n::t;
 
 #[derive(Clone)]
-struct App {
-    name: String,
+pub(crate) struct App {
+    pub(crate) name: String,
     /// shell:AppsFolder\<id>, what launching and pinning use
-    spec: String,
-    icon: Option<Arc<Pixmap>>,
+    pub(crate) spec: String,
+    pub(crate) icon: Option<Arc<Pixmap>>,
 }
 
-static CATALOG: Mutex<Vec<App>> = Mutex::new(Vec::new());
+pub(crate) static CATALOG: Mutex<Vec<App>> = Mutex::new(Vec::new());
 static LOADING: AtomicBool = AtomicBool::new(false);
 /// the open panel's window, which the worker tells about new data (0 = none)
-static NOTIFY: AtomicIsize = AtomicIsize::new(0);
+pub(crate) static NOTIFY: AtomicIsize = AtomicIsize::new(0);
 
-const ICON_PX: u32 = 96;
+pub(crate) const ICON_PX: u32 = 96;
+
+/// How well an app name (lower case) matches a search (lower case): names starting with it first (0), then
+/// names with a word starting with it (1), then anywhere in the name (2).
+pub(crate) fn rank(n: &str, q: &str) -> Option<u8> {
+    if n.starts_with(q) {
+        Some(0)
+    } else if n.split([' ', '-', '.', '_']).any(|w| w.starts_with(q)) {
+        Some(1)
+    } else if n.contains(q) {
+        Some(2)
+    } else {
+        None
+    }
+}
+
+/// The caret blinks at this half period, as on macOS.
+pub(crate) const BLINK_MS: u128 = 530;
+/// Results fade and settle in this long after the search changes.
+pub(crate) const RESULTS_IN_MS: f32 = 200.0;
+
+pub(crate) fn ease_out(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
+}
 
 fn notify() {
     let h = NOTIFY.load(Ordering::Relaxed);
@@ -83,7 +107,14 @@ fn enumerate() -> Vec<(String, String)> {
 }
 
 /// Re-read the app list (keeping icons already loaded), then fill in missing icons a few at a time.
-fn refresh() {
+/// Test aid: fill the catalog with the real app list and icons, on this thread.
+#[cfg(test)]
+pub(crate) fn load_now() {
+    let apps = enumerate().into_iter().map(|(name, spec)| App { icon: crate::shell::icon(&spec, ICON_PX).map(Arc::new), name, spec }).collect();
+    *CATALOG.lock().unwrap() = apps;
+}
+
+pub(crate) fn refresh() {
     if LOADING.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -145,6 +176,13 @@ pub struct Launchpad {
     screen: (f32, f32),
     last_tick: Option<std::time::Instant>,
     motion: bool,
+    /// the search field takes the typing (clicked or typed into); `focus_t` follows it, 0 -> 1
+    focus: bool,
+    focus_t: f32,
+    /// the caret shows solid from here, then blinks
+    blink: std::time::Instant,
+    /// when the results last changed, for their fade-in
+    changed: Option<std::time::Instant>,
 }
 
 /// Wheel units of touchpad scrolling that move one whole page.
@@ -173,7 +211,8 @@ impl Launchpad {
     fn empty(apps: Vec<App>, motion: bool) -> Launchpad {
         Launchpad {
             apps, query: String::new(), shown: Vec::new(), page: 0, sel: 0, wheel: 0, pos: 0.0, swipe: None,
-            screen: (1536.0, 864.0), last_tick: None, motion,
+            screen: (1536.0, 864.0), last_tick: None, motion, focus: false, focus_t: 0.0,
+            blink: std::time::Instant::now(), changed: None,
         }
     }
 
@@ -192,19 +231,7 @@ impl Launchpad {
                 .apps
                 .iter()
                 .enumerate()
-                .filter_map(|(i, a)| {
-                    let n = a.name.to_lowercase();
-                    let rank = if n.starts_with(&q) {
-                        0
-                    } else if n.split([' ', '-', '.', '_']).any(|w| w.starts_with(&q)) {
-                        1
-                    } else if n.contains(&q) {
-                        2
-                    } else {
-                        return None;
-                    };
-                    Some((rank, i))
-                })
+                .filter_map(|(i, a)| rank(&a.name.to_lowercase(), &q).map(|r| (r, i)))
                 .collect();
             hits.sort();
             self.shown = hits.into_iter().map(|h| h.1).collect();
@@ -230,6 +257,11 @@ impl Launchpad {
 
     fn set_query(&mut self, q: String) {
         self.query = q;
+        self.focus = true;
+        self.blink = std::time::Instant::now();
+        if self.motion {
+            self.changed = Some(std::time::Instant::now());
+        }
         self.page = 0;
         self.sel = 0;
         self.filter();
@@ -308,6 +340,26 @@ impl Launchpad {
         self.go(s / PER_PAGE);
     }
 
+    fn tick_pages(&mut self, now: std::time::Instant) {
+        // a touchpad sends nothing when the fingers lift, so a short silence ends the swipe
+        if self.swipe.as_ref().is_some_and(|s| s.at.elapsed().as_millis() > SWIPE_END_MS) {
+            self.release();
+        }
+        if self.swipe.is_some() {
+            return;
+        }
+        let target = self.page as f32;
+        if (self.pos - target).abs() <= 0.0005 {
+            self.pos = target;
+            self.last_tick = Some(now);
+            return;
+        }
+        let dt = self.last_tick.map_or(0.016, |t| (now - t).as_secs_f32()).min(0.05);
+        self.last_tick = Some(now);
+        // ease out: about 300 ms to settle
+        self.pos = target + (self.pos - target) * (-dt * 14.0).exp();
+    }
+
     /// The grid on screen: left edge, top, cell size, icon size.
     fn grid(&self) -> (f32, f32, f32, f32, f32) {
         let (w, h) = self.screen;
@@ -360,17 +412,27 @@ impl Launchpad {
 }
 
 impl Content for Launchpad {
-    fn width(&self) -> f32 {
-        self.screen.0
-    }
-
-    fn stage(&mut self, w: f32, h: f32) -> bool {
-        self.screen = (w, h);
-        true
-    }
-
     fn animating(&self) -> bool {
-        self.swipe.is_some() || (self.pos - self.page as f32).abs() > 0.0005
+        self.swipe.is_some()
+            || (self.pos - self.page as f32).abs() > 0.0005
+            || (self.focus_t - if self.focus { 1.0 } else { 0.0 }).abs() > 0.001
+            || self.changed.is_some()
+    }
+
+    fn period_ms(&self) -> u32 {
+        BLINK_MS as u32 / 2 // often enough that the caret's blink lands on time
+    }
+
+    fn escape(&mut self) -> Cmd {
+        if !self.query.is_empty() {
+            self.set_query(String::new());
+            Cmd::None
+        } else if self.focus {
+            self.focus = false;
+            Cmd::None
+        } else {
+            Cmd::Close
+        }
     }
 
     fn motion(&self) -> bool {
@@ -378,23 +440,29 @@ impl Content for Launchpad {
     }
 
     fn tick(&mut self) {
-        // a touchpad sends nothing when the fingers lift, so a short silence ends the swipe
-        if self.swipe.as_ref().is_some_and(|s| s.at.elapsed().as_millis() > SWIPE_END_MS) {
-            self.release();
-        }
-        if self.swipe.is_some() {
-            return;
-        }
-        let target = self.page as f32;
-        if (self.pos - target).abs() <= 0.0005 {
-            self.pos = target;
-            return;
-        }
         let now = std::time::Instant::now();
         let dt = self.last_tick.map_or(0.016, |t| (now - t).as_secs_f32()).min(0.05);
-        self.last_tick = Some(now);
-        // ease out: about 300 ms to settle
-        self.pos = target + (self.pos - target) * (-dt * 14.0).exp();
+        let goal = if self.focus { 1.0 } else { 0.0 };
+        if !self.motion {
+            self.focus_t = goal;
+        } else if (self.focus_t - goal).abs() > 0.001 {
+            self.focus_t = goal + (self.focus_t - goal) * (-dt * 16.0).exp();
+        } else {
+            self.focus_t = goal;
+        }
+        if self.changed.is_some_and(|c| c.elapsed().as_secs_f32() * 1000.0 > RESULTS_IN_MS) {
+            self.changed = None;
+        }
+        self.tick_pages(now);
+    }
+
+    fn width(&self) -> f32 {
+        self.screen.0
+    }
+
+    fn stage(&mut self, w: f32, h: f32) -> bool {
+        self.screen = (w, h);
+        true
     }
 
     fn opened(&mut self, hwnd: isize) {
@@ -414,21 +482,34 @@ impl Content for Launchpad {
         // search field, small and centred at the top
         let sx = (w - SEARCH_W) / 2.0;
         let sy = 34.0;
-        ui.hit(ID_SEARCH, sx, sy, SEARCH_W, SEARCH_H);
-        ui.fill(sx, sy, SEARCH_W, SEARCH_H, SEARCH_H / 2.0, white(0x2E));
-        ui.outline(sx, sy, SEARCH_W, SEARCH_H, SEARCH_H / 2.0, 1.0, white(0x2E));
+        let hov = ui.hit(ID_SEARCH, sx, sy, SEARCH_W, SEARCH_H);
+        // empty and idle, the glass and the label sit in the middle; focused, the label slides to the left edge
+        // where the typing starts and the field brightens
+        let f = ease_out(self.focus_t);
+        let lit = if hov && !self.focus { 0x0E } else { 0 };
+        ui.fill(sx, sy, SEARCH_W, SEARCH_H, SEARCH_H / 2.0, white(0x2E + (0x14 as f32 * f) as u8 + lit));
+        ui.outline(sx, sy, SEARCH_W, SEARCH_H, SEARCH_H / 2.0, 1.0, white(0x2E + (0x30 as f32 * f) as u8 + lit));
         let my = sy + SEARCH_H / 2.0;
+        let caret_on = self.focus && (self.blink.elapsed().as_millis() / BLINK_MS) % 2 == 0;
+        let caret = (ACCENT.0, ACCENT.1, ACCENT.2, 255);
         if self.query.is_empty() {
             let label = t("Search");
             let lw = ui.text_w(label, 13.0, 400);
-            let gx = (w - lw - 20.0) / 2.0;
+            let (centre, left) = ((w - lw - 20.0) / 2.0, sx + 10.0);
+            let gx = centre + (left - centre) * f;
+            let a = (0xB3 as f32 - 0x33 as f32 * f) as u8;
             ui.glyph(gx + 6.0, my, '\u{E721}', 11.5, white(0xB3));
-            ui.text_mid(gx + 20.0, my, label, 13.0, 400, white(0xB3), 0.0);
+            ui.text_mid(gx + 20.0, my, label, 13.0, 400, white(a), 0.0);
+            if caret_on {
+                ui.fill(gx + 19.0, my - 7.5, 1.5, 15.0, 0.0, caret);
+            }
         } else {
             ui.glyph(sx + 16.0, my, '\u{E721}', 11.5, white(0xB3));
             let tx = sx + 30.0;
             let end = ui.text_mid(tx, my, &self.query, 13.0, 400, white(0xF2), SEARCH_W - 44.0);
-            ui.fill(tx + end.min(SEARCH_W - 44.0) + 1.0, my - 7.5, 1.5, 15.0, 0.0, (ACCENT.0, ACCENT.1, ACCENT.2, 255));
+            if caret_on {
+                ui.fill(tx + end.min(SEARCH_W - 44.0) + 1.0, my - 7.5, 1.5, 15.0, 0.0, caret);
+            }
         }
 
         let (_, top, _, cell_h, _) = self.grid();
@@ -442,10 +523,18 @@ impl Content for Launchpad {
         let pages_n = self.pages();
         let settled = self.swipe.is_none() && (self.pos - self.page as f32).abs() < 0.02;
         let first = self.pos.floor().max(0.0) as usize;
-        for p in first..(first + 2).min(pages_n) {
-            let dx = (p as f32 - self.pos) * w;
-            if dx.abs() < w {
-                self.draw_page(ui, p, dx, settled && p == self.page);
+        let fresh = self.changed.map(|c| ease_out(c.elapsed().as_secs_f32() * 1000.0 / RESULTS_IN_MS));
+        if let Some(e) = fresh {
+            // new results: the grid fades in and settles from a touch smaller
+            ui.layer(0.0, top - 12.0, w, grid_h + 24.0, 0.25 + 0.75 * e, 0.97 + 0.03 * e, [0.0; 4], |ui| {
+                self.draw_page(ui, self.page, 0.0, true);
+            });
+        } else {
+            for p in first..(first + 2).min(pages_n) {
+                let dx = (p as f32 - self.pos) * w;
+                if dx.abs() < w {
+                    self.draw_page(ui, p, dx, settled && p == self.page);
+                }
             }
         }
 
@@ -471,7 +560,9 @@ impl Content for Launchpad {
             return Cmd::None;
         }
         if id == ID_SEARCH {
-            return Cmd::None; // typing already goes to the field
+            self.focus = true;
+            self.blink = std::time::Instant::now();
+            return Cmd::None;
         }
         match self.app_at(id) {
             Some(a) => Cmd::Launch(a.spec.clone()),

@@ -10,6 +10,7 @@ mod config;
 mod dock;
 mod dropfiles;
 mod ai_usage;
+mod apps;
 mod claude_oauth;
 mod fly_ai;
 mod fly_battery;
@@ -207,7 +208,7 @@ impl App {
             menubar::Extra::Ai => Box::new(fly_ai::AiFly::new()),
             menubar::Extra::Calendar => Box::new(fly_cal::CalFly::new()),
             menubar::Extra::Settings => return self.open_settings(),
-            menubar::Extra::Launchpad => Box::new(launchpad::Launchpad::new(!self.dock.config().reduce_motion)),
+            menubar::Extra::Launchpad => self.all_apps(),
         };
         let Some(b) = self.bar.as_mut() else { return };
         b.set_open_extra(Some(kind));
@@ -238,7 +239,18 @@ impl App {
         }
         self.close_flyout();
         let dpi = self.dock.dpi;
-        self.fly = Some(flyout::Flyout::open(menubar::Extra::Launchpad, Box::new(launchpad::Launchpad::new(!self.dock.config().reduce_motion)), 0, (80.0 * dpi) as i32, dpi));
+        let content = self.all_apps();
+        self.fly = Some(flyout::Flyout::open(menubar::Extra::Launchpad, content, 0, (80.0 * dpi) as i32, dpi));
+    }
+
+    /// Every app, in the style picked in Settings: the Apps window (macOS 26) or the full-screen Launchpad.
+    fn all_apps(&self) -> Box<dyn flyout::Content> {
+        let c = self.dock.config();
+        if c.launchpad_style == "classic" {
+            Box::new(launchpad::Launchpad::new(!c.reduce_motion))
+        } else {
+            Box::new(apps::Apps::new(!c.reduce_motion))
+        }
     }
 
     fn on_settings(&mut self, ch: fly_settings::Change) -> bool {
@@ -397,6 +409,7 @@ impl App {
                     match cmd {
                         flyout::Cmd::Launch(t) => shell::launch(&t),
                         flyout::Cmd::Pin(t) => self.dock.pin(&t),
+                        flyout::Cmd::Settings => self.open_settings(),
                         flyout::Cmd::OpenWifi => {
                             if let Some((_, r)) = self.bar.as_ref().and_then(|b| b.extra_span(menubar::Extra::Wifi)) {
                                 self.toggle_flyout(menubar::Extra::Wifi, r);

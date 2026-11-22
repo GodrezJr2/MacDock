@@ -50,6 +50,8 @@ pub struct Config {
     pub reduce_motion: bool,
     /// Interface language: "auto" (follow Windows), "en" or "id".
     pub language: String,
+    /// All apps: "apps" (the macOS 26 Apps window, the default) or "classic" (the full-screen Launchpad).
+    pub launchpad_style: String,
     /// Keys we don't know (written by a newer build) survive a save.
     extra: Map<String, Value>,
 }
@@ -126,6 +128,7 @@ impl Default for Config {
             hide_speed: 1.0,
             reduce_motion: false,
             language: "auto".into(),
+            launchpad_style: "apps".into(),
             extra: Map::new(),
         }
     }
@@ -170,6 +173,11 @@ impl Config {
         if let Some(l) = v.remove("Language").and_then(|x| x.as_str().map(String::from)) {
             if ["auto", "en", "id"].contains(&l.as_str()) {
                 c.language = l;
+            }
+        }
+        if let Some(l) = v.remove("LaunchpadStyle").and_then(|x| x.as_str().map(String::from)) {
+            if ["apps", "classic"].contains(&l.as_str()) {
+                c.launchpad_style = l;
             }
         }
         if let Some(Value::Array(r)) = v.remove("Recent") {
@@ -226,6 +234,7 @@ impl Config {
             "AutoHideSpeed": self.hide_speed,
             "ReduceMotion": self.reduce_motion,
             "Language": self.language,
+            "LaunchpadStyle": self.launchpad_style,
         });
         if let Value::Object(f) = fields {
             m.extend(f);
