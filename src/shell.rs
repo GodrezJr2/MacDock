@@ -361,9 +361,37 @@ pub fn launch(target: &str) {
             let (exe, arg) = (wide("explorer.exe"), wide(target));
             ShellExecuteW(HWND::default(), PCWSTR(open.as_ptr()), PCWSTR(exe.as_ptr()), PCWSTR(arg.as_ptr()), PCWSTR::null(), SW_SHOWNORMAL);
         } else {
+            // a file type with no app behind it (.json on a stock Windows 10) makes ShellExecute stall ~30 s
+            // and then fail silently, so such a file goes straight to Notepad
+            if std::path::Path::new(target).is_file() && !has_handler(target) {
+                let (exe, arg) = (wide("notepad.exe"), wide(&format!("\"{target}\"")));
+                ShellExecuteW(HWND::default(), PCWSTR(open.as_ptr()), PCWSTR(exe.as_ptr()), PCWSTR(arg.as_ptr()), PCWSTR::null(), SW_SHOWNORMAL);
+                return;
+            }
             let t = wide(target);
             ShellExecuteW(HWND::default(), PCWSTR(open.as_ptr()), PCWSTR(t.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
         }
+    }
+}
+
+/// Whether the file's type has an app registered to open it.
+fn has_handler(path: &str) -> bool {
+    let Some(ext) = std::path::Path::new(path).extension().and_then(|e| e.to_str()) else { return false };
+    if ext.eq_ignore_ascii_case("exe") || ext.eq_ignore_ascii_case("lnk") || ext.eq_ignore_ascii_case("bat") || ext.eq_ignore_ascii_case("cmd") {
+        return true;
+    }
+    let ext = wide(&format!(".{ext}"));
+    let mut n = 0u32;
+    unsafe {
+        let r = windows::Win32::UI::Shell::AssocQueryStringW(
+            windows::Win32::UI::Shell::ASSOCF_INIT_IGNOREUNKNOWN,
+            windows::Win32::UI::Shell::ASSOCSTR_EXECUTABLE,
+            PCWSTR(ext.as_ptr()),
+            PCWSTR::null(),
+            windows::core::PWSTR::null(),
+            &mut n,
+        );
+        r.is_ok() && n > 0
     }
 }
 
@@ -502,5 +530,20 @@ pub fn pick_icon_file(owner: HWND) -> Option<String> {
         let s = p.to_string().ok();
         CoTaskMemFree(Some(p.0 as *const c_void));
         s
+    }
+}
+
+#[cfg(test)]
+mod launch_fallback {
+    #[test]
+    #[ignore]
+    fn unassociated_file_opens_in_notepad() {
+        let p = std::env::current_dir().unwrap().join("target").join("macdock_noassoc.zzqq");
+        std::fs::write(&p, "{}").unwrap();
+        assert!(!super::has_handler(p.to_str().unwrap()));
+        assert!(super::has_handler(r"C:\Windows\win.ini"));
+        let t = std::time::Instant::now();
+        super::launch(p.to_str().unwrap());
+        assert!(t.elapsed().as_secs() < 2, "launch took {:?}", t.elapsed());
     }
 }
