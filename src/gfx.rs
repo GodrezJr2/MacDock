@@ -59,8 +59,13 @@ impl Surface {
 
     /// Push the pixels to the layered window and move/resize it in the same call.
     pub fn present(&self, hwnd: HWND, x: i32, y: i32) {
+        self.present_alpha(hwnd, x, y, 255);
+    }
+
+    /// [`present`](Self::present) with the whole window at `alpha` (fading it costs nothing this way).
+    pub fn present_alpha(&self, hwnd: HWND, x: i32, y: i32, alpha: u8) {
         unsafe {
-            let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8, ..Default::default() };
+            let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, SourceConstantAlpha: alpha, AlphaFormat: AC_SRC_ALPHA as u8, ..Default::default() };
             let pos = POINT { x, y };
             let size = SIZE { cx: self.w as i32, cy: self.h as i32 };
             let src = POINT::default();

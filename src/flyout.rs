@@ -125,6 +125,39 @@ pub enum Cmd {
 }
 
 /// Drawing context, in DIPs relative to the panel's content box.
+thread_local! {
+    /// Images already scaled to a size, keyed by the source's address, a sample of its pixels and the size:
+    /// a full-screen Launchpad draws 35 icons a frame and scaling them each time was most of a frame.
+    static SCALED: std::cell::RefCell<std::collections::HashMap<(usize, u64, u32, u32), std::rc::Rc<Pixmap>>> = Default::default();
+}
+
+fn scaled(img: &Pixmap, dw: u32, dh: u32) -> Option<std::rc::Rc<Pixmap>> {
+    let d = img.data();
+    // the address alone could be reused by another image after this one is dropped
+    let mut sample = (img.width() as u64) << 32 | img.height() as u64;
+    let step = (d.len() / 4 / 32).max(1) * 4;
+    for i in (0..d.len().saturating_sub(3)).step_by(step) {
+        sample = sample.rotate_left(7) ^ u32::from_le_bytes([d[i], d[i + 1], d[i + 2], d[i + 3]]) as u64;
+    }
+    let key = (d.as_ptr() as usize, sample, dw, dh);
+    if let Some(p) = SCALED.with(|m| m.borrow().get(&key).cloned()) {
+        return Some(p);
+    }
+    let mut small = Pixmap::new(dw, dh)?;
+    let tf = Transform::from_scale(dw as f32 / img.width() as f32, dh as f32 / img.height() as f32);
+    let paint = PixmapPaint { quality: tiny_skia::FilterQuality::Bicubic, ..Default::default() };
+    small.draw_pixmap(0, 0, img.as_ref(), &paint, tf, None);
+    let small = std::rc::Rc::new(small);
+    SCALED.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() > 300 {
+            m.clear();
+        }
+        m.insert(key, small.clone());
+    });
+    Some(small)
+}
+
 pub struct Ui<'a> {
     pm: &'a mut Pixmap,
     s: f32,
@@ -134,6 +167,10 @@ pub struct Ui<'a> {
     pub pressed: Option<u32>,
     spots: &'a mut Vec<Spot>,
     pub w: f32, // content width
+    /// scale for text: the same as `s`, except while the Launchpad zooms in (text keeps its size, only moves)
+    fs: f32,
+    /// nothing is moving: scaled images may be remembered and reused
+    still: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -203,19 +240,19 @@ impl Ui<'_> {
     }
 
     fn font(&self, size: f32, weight: i32, icons: bool) -> Font {
-        Font { face: if icons { gfx::ICONS } else { gfx::UI }, px: (size * self.s).round() as i32, weight }
+        Font { face: if icons { gfx::ICONS } else { gfx::UI }, px: (size * self.fs).round() as i32, weight }
     }
 
     pub fn text_w(&self, s: &str, size: f32, weight: i32) -> f32 {
-        gfx::measure(s, self.font(size, weight, false)).0 as f32 / self.s
+        gfx::measure(s, self.font(size, weight, false)).0 as f32 / self.fs
     }
 
     /// Text with its line box's top at y; returns its width. `max_w` > 0 cuts it with an ellipsis.
     pub fn text(&mut self, x: f32, y: f32, s: &str, size: f32, weight: i32, c: (u8, u8, u8, u8), max_w: f32) -> f32 {
         let f = self.font(size, weight, false);
         let mut s = s.to_string();
-        if max_w > 0.0 && gfx::measure(&s, f).0 as f32 / self.s > max_w {
-            while !s.is_empty() && gfx::measure(&format!("{s}…"), f).0 as f32 / self.s > max_w {
+        if max_w > 0.0 && gfx::measure(&s, f).0 as f32 / self.fs > max_w {
+            while !s.is_empty() && gfx::measure(&format!("{s}…"), f).0 as f32 / self.fs > max_w {
                 s.pop();
             }
             s.push('…');
@@ -225,7 +262,7 @@ impl Ui<'_> {
 
     /// Text vertically centred on cy.
     pub fn text_mid(&mut self, x: f32, cy: f32, s: &str, size: f32, weight: i32, c: (u8, u8, u8, u8), max_w: f32) -> f32 {
-        let h = gfx::measure("Ag", self.font(size, weight, false)).1 as f32 / self.s;
+        let h = gfx::measure("Ag", self.font(size, weight, false)).1 as f32 / self.fs;
         self.text(x, cy - h / 2.0, s, size, weight, c, max_w)
     }
 
@@ -234,12 +271,12 @@ impl Ui<'_> {
         let f = self.font(size, 400, true);
         let s = g.to_string();
         let (w, h) = gfx::measure(&s, f);
-        self.draw_text(cx - w as f32 / self.s / 2.0, cy - h as f32 / self.s / 2.0, &s, f, c);
+        self.draw_text(cx - w as f32 / self.fs / 2.0, cy - h as f32 / self.fs / 2.0, &s, f, c);
     }
 
     fn draw_text(&mut self, x: f32, y: f32, s: &str, f: Font, c: (u8, u8, u8, u8)) -> f32 {
         let Some(t) = gfx::text_ex(s, f, (c.0, c.1, c.2)) else { return 0.0 };
-        let w = (t.width() as f32 - 2.0) / self.s;
+        let w = (t.width() as f32 - 2.0) / self.fs;
         let paint = PixmapPaint { opacity: c.3 as f32 / 255.0, ..Default::default() };
         let px = ((self.ox + x) * self.s).round() as i32;
         let py = ((self.oy + y) * self.s).round() as i32;
@@ -249,10 +286,20 @@ impl Ui<'_> {
 
     /// An image (premultiplied BGRA) scaled into the box.
     pub fn image(&mut self, img: &Pixmap, x: f32, y: f32, w: f32, h: f32) {
+        let (dw, dh) = ((w * self.s).round() as u32, (h * self.s).round() as u32);
+        if self.still && dw > 0 && dh > 0 && dw <= 512 && dh <= 512 {
+            if let Some(small) = scaled(img, dw, dh) {
+                let px = ((self.ox + x) * self.s).round() as i32;
+                let py = ((self.oy + y) * self.s).round() as i32;
+                self.pm.draw_pixmap(px, py, (*small).as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+                return;
+            }
+        }
         let sx = w * self.s / img.width() as f32;
         let sy = h * self.s / img.height() as f32;
         let tf = Transform::from_row(sx, 0.0, 0.0, sy, (self.ox + x) * self.s, (self.oy + y) * self.s);
-        let paint = PixmapPaint { quality: tiny_skia::FilterQuality::Bicubic, ..Default::default() };
+        let quality = if self.still { tiny_skia::FilterQuality::Bicubic } else { tiny_skia::FilterQuality::Bilinear };
+        let paint = PixmapPaint { quality, ..Default::default() };
         self.pm.draw_pixmap(0, 0, img.as_ref(), &paint, tf, None);
     }
 
@@ -302,7 +349,7 @@ impl Ui<'_> {
 
     /// Height of one text line at this size.
     pub fn line_h(&self, size: f32, weight: i32) -> f32 {
-        gfx::measure("Ag", self.font(size, weight, false)).1 as f32 / self.s
+        gfx::measure("Ag", self.font(size, weight, false)).1 as f32 / self.fs
     }
 
     /// Word-wrapped text; returns the height used.
@@ -461,6 +508,8 @@ pub struct Flyout {
     press: Option<u32>,
     spots: Vec<Spot>,
     surface: Option<Surface>,
+    /// the Launchpad's frame: the backdrop with the content drawn straight over it
+    stage_pm: Option<Pixmap>,
     tracking: bool,
     pub stay_open: bool,
     /// a window panel: stays open, can be dragged, minimized and zoomed to fill the screen
@@ -485,7 +534,7 @@ impl Flyout {
         let screen_w_px = unsafe { GetSystemMetrics(SM_CXSCREEN) };
         let mut f = Flyout {
             hwnd, kind, content, dpi: dpi as f32, right_px, top_px, screen_w_px, pos: (0, 0), mouse: None, hot: None,
-            press: None, spots: Vec::new(), surface: None, tracking: false, stay_open: window, window, moved: None,
+            press: None, spots: Vec::new(), surface: None, stage_pm: None, tracking: false, stay_open: window, window, moved: None,
             full: false, view: (dpi as f32, 0.0, 0.0), stage: false, born: std::time::Instant::now(), anim_timer: false,
         };
         f.content.opened(hwnd.0 as isize);
@@ -696,44 +745,36 @@ impl Flyout {
     }
 
     /// Full screen over the blurred wallpaper, no panel; zooms down and fades in when it opens.
+    /// The content is drawn straight over a copy of the backdrop at the zoom's scale (no second full-screen
+    /// layer to transform), and the fade is the window's own opacity, so a frame costs about a copy and a draw.
     fn render_stage(&mut self, sw: i32, sh: i32) {
         let (pw, ph) = (sw as u32, sh as u32);
         let s = self.dpi;
-        let Some(mut layer) = Pixmap::new(pw, ph) else { return };
+        let t = if motion() && self.content.motion() { (self.born.elapsed().as_secs_f32() * 1000.0 / STAGE_IN_MS).min(1.0) } else { 1.0 };
+        let e = 1.0 - (1.0 - t).powi(3); // ease out
+        let back = stage_backdrop(pw, ph);
+        if self.stage_pm.as_ref().is_none_or(|p| p.width() != pw || p.height() != ph) {
+            self.stage_pm = Pixmap::new(pw, ph);
+        }
+        let Some(frame) = self.stage_pm.as_mut() else { return };
+        frame.data_mut().copy_from_slice(back.data());
+        // the icons settle from slightly larger, as on macOS: scale about the screen's centre
+        let z = 1.0 + 0.08 * (1.0 - e);
+        let (ox, oy) = (sw as f32 / 2.0 * (1.0 - z) / (s * z), sh as f32 / 2.0 * (1.0 - z) / (s * z));
         let mut spots = Vec::new();
         {
-            let mut ui = Ui { pm: &mut layer, s, ox: 0.0, oy: 0.0, mouse: self.mouse, pressed: self.press, spots: &mut spots, w: sw as f32 / s };
+            let mut ui = Ui { pm: frame, s: s * z, ox, oy, mouse: self.mouse, pressed: self.press, spots: &mut spots, w: sw as f32 / s, fs: s, still: e >= 1.0 };
             self.content.draw(&mut ui);
         }
         self.spots = spots;
         self.view = (s, 0.0, 0.0);
         self.pos = (0, 0);
-        let t = if motion() && self.content.motion() { (self.born.elapsed().as_secs_f32() * 1000.0 / STAGE_IN_MS).min(1.0) } else { 1.0 };
-        let e = 1.0 - (1.0 - t).powi(3); // ease out
-        let back = stage_backdrop(pw, ph);
         if self.surface.as_ref().is_none_or(|sf| sf.w != pw || sf.h != ph) {
             self.surface = Surface::new(pw, ph);
         }
         let Some(sf) = self.surface.as_mut() else { return };
-        let bytes = sf.bytes();
-        if e >= 1.0 {
-            bytes.copy_from_slice(back.data());
-        } else {
-            bytes.fill(0);
-        }
-        let Some(mut pm) = tiny_skia::PixmapMut::from_bytes(bytes, pw, ph) else { return };
-        if e < 1.0 {
-            let fade = PixmapPaint { opacity: e, ..Default::default() };
-            pm.draw_pixmap(0, 0, back.as_ref().as_ref(), &fade, Transform::identity(), None);
-        }
-        // the icons settle from slightly larger, as on macOS
-        let z = 1.0 + 0.08 * (1.0 - e);
-        let (cx, cy) = (sw as f32 / 2.0, sh as f32 / 2.0);
-        let tf = Transform::from_row(z, 0.0, 0.0, z, cx - cx * z, cy - cy * z);
-        let paint = PixmapPaint { opacity: e, quality: if t < 1.0 { tiny_skia::FilterQuality::Bilinear } else { tiny_skia::FilterQuality::Nearest }, ..Default::default() };
-        let tf = if e >= 1.0 { Transform::identity() } else { tf };
-        pm.draw_pixmap(0, 0, layer.as_ref(), &paint, tf, None);
-        sf.present(self.hwnd, 0, 0);
+        sf.bytes().copy_from_slice(frame.data());
+        sf.present_alpha(self.hwnd, 0, 0, (e * 255.0).round().clamp(1.0, 255.0) as u8);
     }
 
     fn render_panel(&mut self) {
@@ -750,7 +791,7 @@ impl Flyout {
         let mut spots = Vec::new();
         let ch = {
             let mut scratch = Pixmap::new(pw, ph_max).unwrap();
-            let mut ui = Ui { pm: &mut scratch, s, ox, oy, mouse: self.mouse, pressed: self.press, spots: &mut spots, w: cw };
+            let mut ui = Ui { pm: &mut scratch, s, ox, oy, mouse: self.mouse, pressed: self.press, spots: &mut spots, w: cw, fs: s, still: true };
             self.content.draw(&mut ui)
         };
         let panel_h = (ch + 2.0 * pady).min(max_h);
@@ -781,7 +822,7 @@ impl Flyout {
         }
         let _ = panel_h;
         {
-            let mut ui = Ui { pm: &mut pm, s, ox, oy, mouse: self.mouse, pressed: self.press, spots: &mut spots, w: cw };
+            let mut ui = Ui { pm: &mut pm, s, ox, oy, mouse: self.mouse, pressed: self.press, spots: &mut spots, w: cw, fs: s, still: true };
             self.content.draw(&mut ui);
         }
         self.spots = spots;
@@ -836,7 +877,7 @@ impl Flyout {
         let mut spots = Vec::new();
         {
             let cw = w - 2.0 * padx;
-            let mut ui = Ui { pm: &mut pm, s, ox, oy, mouse: self.mouse, pressed: self.press, spots: &mut spots, w: cw };
+            let mut ui = Ui { pm: &mut pm, s, ox, oy, mouse: self.mouse, pressed: self.press, spots: &mut spots, w: cw, fs: s, still: true };
             self.content.draw(&mut ui);
         }
         self.spots = spots;
@@ -861,7 +902,7 @@ pub fn snapshot_stage(content: &mut dyn Content, w: f32, h: f32, s: f32) -> (u32
     let back = stage_backdrop(pw, ph);
     let mut pm = (*back).clone();
     let mut spots = Vec::new();
-    let mut ui = Ui { pm: &mut pm, s, ox: 0.0, oy: 0.0, mouse: None, pressed: None, spots: &mut spots, w };
+    let mut ui = Ui { pm: &mut pm, s, ox: 0.0, oy: 0.0, mouse: None, pressed: None, spots: &mut spots, w, fs: s, still: true };
     content.draw(&mut ui);
     (pw, ph, pm.data().to_vec())
 }
@@ -876,7 +917,7 @@ pub fn snapshot(content: &mut dyn Content, s: f32) -> (u32, u32, Vec<u8>) {
     let mut spots = Vec::new();
     let mut scratch = Pixmap::new(pw, (1200.0 * s) as u32).unwrap();
     let ch = {
-        let mut ui = Ui { pm: &mut scratch, s, ox: MARGIN + padx, oy: MARGIN + pady, mouse: None, pressed: None, spots: &mut spots, w: cw };
+        let mut ui = Ui { pm: &mut scratch, s, ox: MARGIN + padx, oy: MARGIN + pady, mouse: None, pressed: None, spots: &mut spots, w: cw, fs: s, still: true };
         content.draw(&mut ui)
     };
     let panel_h = ch + 2.0 * pady;
@@ -889,7 +930,7 @@ pub fn snapshot(content: &mut dyn Content, s: f32) -> (u32, u32, Vec<u8>) {
         paint.anti_alias = true;
         pm.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
     }
-    let mut ui = Ui { pm: &mut pm, s, ox: MARGIN + padx, oy: MARGIN + pady, mouse: None, pressed: None, spots: &mut spots, w: cw };
+    let mut ui = Ui { pm: &mut pm, s, ox: MARGIN + padx, oy: MARGIN + pady, mouse: None, pressed: None, spots: &mut spots, w: cw, fs: s, still: true };
     content.draw(&mut ui);
     (pw, ph, pm.data().to_vec())
 }
