@@ -167,6 +167,9 @@ impl App {
             if let Some(b) = self.bar.as_mut() {
                 b.set_hidden(on);
             }
+            if !on {
+                taskbar::keep_hidden(); // Explorer re-shows it as the fullscreen app leaves
+            }
         }
     }
 
