@@ -26,7 +26,7 @@ use crate::{push, shell, Ev};
 // curved sides and a diagonal shear in the content; 128 keeps both under a pixel and still costs nothing.
 pub(crate) const ROWS: usize = 128;
 const MAX_SNAPS: usize = 8; // windows still on screen
-const MAX_MINIMIZED: usize = 6; // in memory; older ones are read back from disk when needed
+const MAX_MINIMIZED: usize = 6; // in memory (and SNAP_BYTES_MINIMIZED); older ones are read back from disk
 const TIMER_CAPTURE: usize = 1;
 const TIMER_PENDING: usize = 2;
 const TIMER_DISARM: usize = 3;
@@ -327,11 +327,21 @@ struct Snap {
     at: Instant,
 }
 
+/// Snapshot width limit. The restore ends on the snapshot laid exactly over the real window, so it has to be
+/// full resolution: the old 1024 px ones showed as a blurry window that turned sharp when the real one took
+/// over (and the other way round as a minimize began). Unscaled is no slower to grab than shrunk (~21 ms for
+/// 1920x1040, HALFTONE scaling costs as much as it saves).
+const SNAP_W: i32 = 2560;
+/// Memory for snapshots of minimized windows (newest first; older ones come back from disk) and for windows
+/// still on screen; the newest of each kind is always kept. About what 14 shrunk snapshots used to take.
+const SNAP_BYTES_MINIMIZED: usize = 32 << 20;
+const SNAP_BYTES_ON_SCREEN: usize = 24 << 20;
+
 /// Copies a window's pixels straight off the screen (the window in front is what's visible there), shrunk to
-/// at most 1024 px wide by GDI (HALFTONE) so no full-size bitmap is ever allocated.
-fn grab(r: RECT) -> Option<Pixmap> {
+/// at most `max_w` px wide by GDI (HALFTONE) so no bigger bitmap is ever allocated.
+fn grab(r: RECT, max_w: i32) -> Option<Pixmap> {
     let (w, h) = (r.right - r.left, r.bottom - r.top);
-    let dw = w.min(1024);
+    let dw = w.min(max_w);
     let dh = ((h as f64 * dw as f64 / w as f64).round() as i32).max(1);
     unsafe {
         let sdc = GetDC(HWND::default());
@@ -670,7 +680,7 @@ impl Genie {
         let Some(r) = window_rect(h) else { return };
         let rect = R { x: r.left as f64, y: r.top as f64, w: (r.right - r.left) as f64, h: (r.bottom - r.top) as f64 };
         if sync {
-            if let Some(img) = grab(r) {
+            if let Some(img) = grab(r, SNAP_W) {
                 self.store(h.0 as isize, img, rect);
             }
             return;
@@ -682,7 +692,7 @@ impl Genie {
         if std::thread::Builder::new()
             .name("snapshot".into())
             .spawn(move || {
-                let img = grab(RECT { left: rr.0, top: rr.1, right: rr.2, bottom: rr.3 });
+                let img = grab(RECT { left: rr.0, top: rr.1, right: rr.2, bottom: rr.3 }, SNAP_W);
                 if let Ok(mut g) = out.lock() {
                     *g = img;
                 }
@@ -728,10 +738,12 @@ impl Genie {
                 .filter(|(&k, _)| unsafe { IsIconic(hwnd_of(k)) }.as_bool() == want_iconic)
                 .map(|(&k, s)| (k, s.at))
                 .collect();
-            let max = if want_iconic { MAX_MINIMIZED } else { MAX_SNAPS };
-            if v.len() > max {
-                v.sort_by_key(|x| x.1);
-                for (k, _) in &v[..v.len() - max] {
+            let (max, budget) = if want_iconic { (MAX_MINIMIZED, SNAP_BYTES_MINIMIZED) } else { (MAX_SNAPS, SNAP_BYTES_ON_SCREEN) };
+            v.sort_by_key(|x| std::cmp::Reverse(x.1)); // newest first
+            let mut used = 0usize;
+            for (i, (k, _)) in v.iter().enumerate() {
+                used += self.snaps.get(k).map_or(0, |s| s.img.data().len());
+                if i > 0 && (i >= max || used > budget) {
                     self.snaps.remove(k);
                 }
             }
@@ -1184,6 +1196,23 @@ mod bench {
         println!("raster avg {avg:.2} ms, worst {worst:.2} ms");
     }
 
+    /// Cost of a shrunk and a full snapshot of a 1920x1040 area. cargo test --release grab_bench -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn grab_bench() {
+        let r = RECT { left: 0, top: 0, right: 1920, bottom: 1040 };
+        for w in [1024, SNAP_W] {
+            let _ = grab(r, w);
+            let t = Instant::now();
+            let n = 10;
+            let mut px = 0;
+            for _ in 0..n {
+                px = grab(r, w).unwrap().width();
+            }
+            println!("max {w}: {px} px wide, {:.1} ms", t.elapsed().as_secs_f64() * 1e3 / n as f64);
+        }
+    }
+
     /// Frame steps of the DWM refresh clock against Instant::now(), both sampled after DwmFlush plus some
     /// uneven work, as the main loop does. cargo test --release vblank_steps -- --ignored --nocapture
     #[test]
@@ -1245,7 +1274,7 @@ mod bench {
         }
         println!("{n} frames in 400 ms");
         let rc = RECT { left: area.x as i32, top: area.y as i32, right: area.right() as i32, bottom: area.bottom() as i32 };
-        let shot = grab(rc).unwrap();
+        let shot = grab(rc, 4096).unwrap();
         let out = std::env::var("SHOT").unwrap_or("gpu_shot.png".into());
         std::fs::write(&out, shot.data()).unwrap();
         println!("{}x{}", shot.width(), shot.height());
