@@ -73,9 +73,12 @@ Same laptop, same wallpaper, a minute apart.
 ### The genie
 <img src="docs/genie.png" alt="A Visual Studio Code window bending into its dock icon mid-minimize">
 
-The window you minimize is snapshotted and drawn as a 48-row mesh by MacDock's own scanline rasterizer
-(bilinear, anti-aliased edges, rows split across threads), then squeezed and poured into its icon. Restore from the dock plays it backwards. Windows' own minimize
-animation is switched off while MacDock runs and comes back when it quits.
+The window you minimize is snapshotted at full resolution and drawn on the GPU as a 128-row mesh (Direct3D 11,
+4x MSAA, mipmapped), with rounded corners and a soft shadow like the real window, then squeezed and poured into
+its icon. Every frame is timed to the display's refresh, so it steps evenly at 144 Hz. When the dock minimizes
+or restores all of an app's windows, each one gets its own genie, cascading into (and out of) the icon. Restore
+from the dock plays it backwards and dissolves into the real window. Windows' own minimize animation is
+switched off while MacDock runs and comes back when it quits.
 
 </td>
 </tr>
@@ -146,11 +149,10 @@ notification-area icons (Discord, Steam, …).
 - Dock and menu bar are real **AppBars**: maximized windows stop at them.
 - A fullscreen game hides both, puts the render loop to sleep and removes the mouse hook. On the
   author's laptop that measured 0.00% CPU and a 17 MB working set while a game was in front.
-- Idle on the desktop: about 0.4% of one core (4 ms CPU per second) and
-  about 80 MB private memory. Most of that memory is the one Direct3D device the live Liquid Glass and the
-  GPU genie share (the Intel iGPU driver alone reserves ~50 MB for it); the 13 MB of earlier versions had no
-  live glass. Nothing redraws unless something is moving (see
-  [Rust vs the old C# build](#rust-vs-the-old-c-build)).
+- Idle on the desktop: 0.03% of the CPU (about 1% of one core) and about 90 MB private memory. Most of that
+  memory is the one Direct3D device the live Liquid Glass and the GPU genie share (the Intel iGPU driver alone
+  reserves ~50 MB for it); the 13 MB of 0.1 had no live glass. Nothing redraws unless something is moving
+  (see [Performance](#performance)).
 
 ## Install
 
@@ -175,7 +177,7 @@ what changed in each version is in [CHANGELOG.md](CHANGELOG.md).
 
 The first build takes a few minutes because it compiles the dependencies.
 
-The result is one ~1 MB exe with no runtime to install; copy it wherever you like.
+The result is one ~1.7 MB exe with no runtime to install; copy it wherever you like.
 
 MacDock hides the Windows taskbar while it runs and restores it when you quit.
 
@@ -229,9 +231,11 @@ a second, so a video playing behind the dock costs about 0.1 s of CPU per second
 
 For a title-bar minimize, a low-level mouse hook (on its own thread) sees the press on the minimize button
 and MacDock pre-draws the first frame from a fresh snapshot; on release the overlay is shown from the hook
-itself, so the animation is already up when the window disappears. Only the mesh's bounding box is redrawn
-and pushed to the screen each frame. Snapshots are shrunk off the UI thread and saved to
-disk, so windows minimized before a restart still animate on restore.
+itself, so the animation is already up when the window disappears. The mesh is drawn into a DirectComposition
+swap chain, and animation time comes from DWM's vblank clock rather than when the frame happened to run, so
+no frame lands early or late. Windows covered by others are read with `PrintWindow` (about 12-22 ms each, in
+parallel) so a minimize-all can animate them too. Snapshots of minimized windows are saved to disk, so windows
+minimized before a restart still animate on restore.
 </details>
 
 <details>
@@ -260,19 +264,27 @@ are read off the UI thread, and a sleeping NVIDIA GPU is left asleep instead of 
   tray host registers its own `Shell_TrayWnd`. The host only runs while that flyout is open.
 - GPU power needs an NVIDIA GPU; without one the breakdown shows CPU and the rest.
 
-## Rust vs the old C# build
+## Performance
 
 MacDock started as C# / WPF on .NET 10 and was rewritten in Rust (plain Win32, tiny-skia, WinRT through the
-`windows` crate) to make it lighter. Same features, same `config.json`. Measured on the same laptop and screen,
-20 s idle plus a 10 s scripted pointer sweep over the dock:
+`windows` crate) to make it lighter. Measured on the same laptop (32 logical cores, on AC power): a fresh start,
+20 s idle, then a 10 s scripted pointer sweep over the dock. CPU is a share of the whole machine, as Task
+Manager shows it.
 
-| | C# / WPF | Rust |
-| --- | --- | --- |
-| Private memory | 320-379 MB | 12.9 MB |
-| CPU idle | 0.04-0.6% | 0% |
-| CPU while magnifying | 2.0-2.3% | 1.65% |
-| Threads | 21-26 | 11 |
-| On disk | 30 MB + .NET runtime | 1.1 MB exe |
+| | C# / WPF | Rust 0.1 | Rust 0.4.2 |
+| --- | --- | --- | --- |
+| Private memory | 320-379 MB | 12.9 MB | 91.7 MB |
+| CPU idle | 0.04-0.6% | 0% | 0.03% |
+| CPU while magnifying | 2.0-2.3% | 1.65% | 1.38% |
+| Threads | 21-26 | 11 | 38 |
+| On disk | 30 MB + .NET runtime | 1.1 MB exe | 1.66 MB exe |
+
+0.4.2 does a lot more than 0.1: live Liquid Glass and the GPU genie (one Direct3D device, most of the memory),
+the Alt+Tab switcher and its keyboard hook, desktop widgets, the Apps window and Spotlight. Each of those that
+waits on Windows runs on its own thread, which is where the extra threads come from.
+
+The genie, from `genie.log` on a 144 Hz panel with a 1920x960 window: a minimize runs 68-78 frames at 7.0-7.9 ms
+apart on average, and presenting a frame costs the CPU about 0.1 ms (the mesh is drawn on the GPU).
 
 The C# version is kept at the tag [`csharp-final`](https://github.com/GodrezJr2/MacDock/tree/csharp-final).
 
