@@ -4,8 +4,9 @@
 //! selects on hover and switches on click. A quick Alt+Tab tap switches to the previous app without ever
 //! showing the panel.
 //!
-//! Runs on its own thread: a low-level keyboard hook (WH_KEYBOARD_LL) has to answer fast, so it never shares a
-//! thread with dock frames. The hook only swallows keys and posts messages; the window does the work.
+//! Runs on its own thread, and the low-level keyboard hook (WH_KEYBOARD_LL) on another one that does nothing
+//! else, since it must answer within Windows' timeout. The hook only swallows keys and posts messages; the
+//! window's thread does the work.
 //! The glass is a one-time screen capture under the panel, blurred, through gfx::liquid_glass, with a dark veil.
 
 use std::collections::HashMap;
@@ -265,8 +266,12 @@ impl Switcher {
     }
 
     fn end(&mut self) {
-        ACTIVE.store(false, Ordering::Relaxed);
         unsafe {
+            // a new Alt+Tab may already be waiting (the hook runs on its own thread): leave its session on
+            let mut m = MSG::default();
+            if !PeekMessageW(&mut m, self.hwnd, WM_SW_TAB, WM_SW_TAB, PM_NOREMOVE).as_bool() {
+                ACTIVE.store(false, Ordering::Relaxed);
+            }
             let _ = KillTimer(self.hwnd, TIMER_SHOW);
             let _ = KillTimer(self.hwnd, TIMER_POLL);
             if self.shown {
@@ -528,6 +533,22 @@ pub fn start() {
             s.collect();
             s.apps.clear();
         });
+        hook_thread();
+        let mut msg = MSG::default();
+        while GetMessageW(&mut msg, HWND::default(), 0, 0).as_bool() {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    });
+}
+
+/// The keyboard hook on a thread of its own that does nothing else. Windows calls a low-level hook through
+/// its thread's message loop and passes the key on when the hook does not answer in time; while the switcher
+/// thread was busy (listing windows, loading icons, capturing the glass, switching apps) a quick second
+/// Alt+Tab reached Windows and opened its own switcher. Windows also drops a hook that keeps timing out.
+fn hook_thread() {
+    std::thread::spawn(|| unsafe {
+        let hinst = GetModuleHandleW(None).unwrap();
         let Ok(hook) = SetWindowsHookExW(WH_KEYBOARD_LL, Some(kb_proc), hinst, 0) else { return };
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, HWND::default(), 0, 0).as_bool() {
