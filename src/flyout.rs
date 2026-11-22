@@ -46,10 +46,9 @@ fn motion() -> bool {
 /// The blurred, dimmed wallpaper behind full-screen panels, kept for the next open (screen px).
 static BACKDROP: std::sync::Mutex<Option<std::sync::Arc<Pixmap>>> = std::sync::Mutex::new(None);
 
-/// The wallpaper changed: build the full-screen backdrop again next time.
+/// The wallpaper changed: build the full-screen backdrop again next time it is needed.
 pub fn forget_backdrop() {
     *BACKDROP.lock().unwrap() = None;
-    warm_backdrop();
 }
 
 /// Build the backdrop on a worker (decoding and blurring the wallpaper takes ~150 ms) so the Launchpad's first frame doesn't wait.
@@ -895,29 +894,15 @@ impl Flyout {
     fn glass_body(under: &Pixmap, pw: u32, ph: u32, w: f32, panel_h: f32, s: f32) -> Option<Pixmap> {
         let mut pm = Pixmap::new(pw, ph)?;
         let (gx, gy, gw, gh, r) = (MARGIN * s, MARGIN * s, w * s, panel_h * s, GLASS_R * s);
-        if let Some(path) = gfx::rrect(gx, gy + 5.0 * s, gw, gh, r) {
-            if let Some((sh, sx, sy)) = gfx::shadow(&path, 12.0 * s, (0, 0, 0, 0x70)) {
-                pm.draw_pixmap(sx.round() as i32, sy.round() as i32, sh.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
-            }
+        if let Some((sh, sx, sy)) = gfx::rrect_shadow(gx, gy + 5.0 * s, gw, gh, r, 12.0 * s, (0, 0, 0, 0x70)) {
+            // straight row blends (tiny-skia's general pipeline took several ms for these two big copies)
+            gfx::blit_over(&mut pm.as_mut(), &sh, sx.round() as i32, sy.round() as i32);
         }
         let (mut g, lx, ly) = gfx::liquid_glass(under, gx, gy, gw, gh, r, 16.0 * s, (0.0, 0.0), (0.0, 0.0))?;
         // like the dock: a light grey wash, a touch brighter at the top; just enough shade that white labels
-        // still read over a bright wallpaper
-        if let Some(p) = gfx::rrect(gx - lx as f32, gy - ly as f32, gw, gh, r) {
-            let mut tint = Paint::default();
-            tint.set_color(Color::from_rgba8(0x20, 0x20, 0x24, 0x40));
-            tint.anti_alias = true;
-            g.fill_path(&p, &tint, FillRule::Winding, Transform::identity(), None);
-        }
-        gfx::white_wash(&mut g, gy - ly as f32, gh, 0x20, 0x0E);
-        // clear the panel area so the shadow under it doesn't darken the glass
-        if let Some(path) = gfx::rrect(gx, gy, gw, gh, r) {
-            let mut clear = Paint::default();
-            clear.blend_mode = tiny_skia::BlendMode::Clear;
-            clear.anti_alias = true;
-            pm.fill_path(&path, &clear, FillRule::Winding, Transform::identity(), None);
-        }
-        pm.draw_pixmap(lx, ly, g.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+        // still read over a bright wallpaper. The glass is opaque inside, so the shadow under it never shows.
+        gfx::shade_wash(&mut g, gy - ly as f32, gh, (0x20, 0x20, 0x24, 0x40), 0x20, 0x0E);
+        gfx::blit_over(&mut pm.as_mut(), &g, lx, ly);
         // a hairline rim on top of the lens's own highlight
         if let Some(p) = gfx::rrect(gx + 0.5 * s, gy + 0.5 * s, gw - s, gh - s, r - 0.5 * s) {
             let mut paint = Paint::default();
@@ -1176,3 +1161,34 @@ pub fn snapshot(content: &mut dyn Content, s: f32) -> (u32, u32, Vec<u8>) {
     (pw, ph, pm.data().to_vec())
 }
 
+
+#[cfg(test)]
+mod glass_bench {
+    /// How long cutting Spotlight's glass takes at its tallest (it is re-cut every frame while it grows).
+    #[test]
+    #[ignore]
+    fn glass_cut_time() {
+        let s = 1.25;
+        let (w, h) = (660.0, 400.0);
+        let (pw, ph) = (((w + 2.0 * super::MARGIN) * s) as u32, ((h + 2.0 * super::MARGIN) * s) as u32);
+        let t = std::time::Instant::now();
+        let under = super::Flyout::glass_under(400, 300, pw, ph, s).unwrap();
+        let cap = t.elapsed();
+        let _ = super::Flyout::glass_body(&under, pw, ph, w, 60.0, s); // the shadow's base, once
+        let t = std::time::Instant::now();
+        for k in 0..20 {
+            let _ = super::Flyout::glass_body(&under, pw, ph, w, 60.0 + k as f32 * 17.0, s);
+        }
+        println!("capture+blur {:?}, cut {:?} per frame", cap, t.elapsed() / 20);
+        let (gx, gy, gw, gh, r) = (super::MARGIN * s, super::MARGIN * s, w * s, 300.0 * s, super::GLASS_R * s);
+        let t = std::time::Instant::now();
+        let _ = crate::gfx::rrect_shadow(gx, gy, gw, gh, r, 12.0 * s, (0, 0, 0, 0x70));
+        println!("shadow {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        let (mut g, _, _) = crate::gfx::liquid_glass(&under, gx, gy, gw, gh, r, 16.0 * s, (0.0, 0.0), (0.0, 0.0)).unwrap();
+        println!("lens {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        crate::gfx::white_wash(&mut g, gy, gh, 0x20, 0x0E);
+        println!("wash {:?}", t.elapsed());
+    }
+}

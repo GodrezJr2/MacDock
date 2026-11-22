@@ -323,6 +323,43 @@ pub fn shadow(path: &Path, radius: f32, rgba: (u8, u8, u8, u8)) -> Option<(Pixma
     Some((pm, ox, oy))
 }
 
+type ShadowKey = (u32, u32, u32, (u8, u8, u8, u8));
+thread_local! {
+    static RR_SHADOW: std::cell::RefCell<Option<(ShadowKey, Pixmap, f32, f32)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A rounded rect's soft shadow at any height, cheaply: a short one is blurred once per width and corner, and a
+/// taller one is its top half, its middle row repeated, then its bottom half (rows clear of the corners and the
+/// blur are all alike). Spotlight's glass grows every frame; blurring the whole shadow each time took ~20 ms.
+pub fn rrect_shadow(x: f32, y: f32, w: f32, h: f32, r: f32, radius: f32, rgba: (u8, u8, u8, u8)) -> Option<(Pixmap, f32, f32)> {
+    let pad = (radius * 2.0).ceil() + 2.0;
+    let h0 = (2.0 * (r + pad) + 4.0).ceil();
+    if h <= h0 {
+        return shadow(&rrect(x, y, w, h, r)?, radius, rgba);
+    }
+    let key = (w.to_bits(), r.to_bits(), radius.to_bits(), rgba);
+    RR_SHADOW.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.as_ref().is_none_or(|e| e.0 != key) {
+            let (pm, ox, oy) = shadow(&rrect(0.0, 0.0, w, h0, r)?, radius, rgba)?;
+            *c = Some((key, pm, ox, oy));
+        }
+        let (_, base, ox, oy) = c.as_ref()?;
+        let extra = (h - h0).round() as usize;
+        let (bw, bh) = (base.width() as usize, base.height() as usize);
+        let mut out = Pixmap::new(bw as u32, (bh + extra) as u32)?;
+        let (src, dst) = (base.data(), out.data_mut());
+        let row = bw * 4;
+        let m = bh / 2;
+        dst[..m * row].copy_from_slice(&src[..m * row]);
+        for k in 0..extra {
+            dst[(m + k) * row..(m + k + 1) * row].copy_from_slice(&src[m * row..(m + 1) * row]);
+        }
+        dst[(m + extra) * row..].copy_from_slice(&src[m * row..]);
+        Some((out, x + ox, y + oy))
+    })
+}
+
 /// Three box blurs ≈ a gaussian with sigma ≈ radius / 2. Works on premultiplied data, all four channels.
 /// `src` over `dst` at (x, y), premultiplied; opaque pixels are copied straight.
 pub fn blit_over(dst: &mut tiny_skia::PixmapMut, src: &Pixmap, x: i32, y: i32) {
@@ -363,6 +400,30 @@ pub fn white_wash(pm: &mut Pixmap, top: f32, h: f32, a0: u8, a1: u8) {
             let k = 255 - s;
             for c in &mut px[..3] {
                 *c = (s + (*c as u32 * k + 127) / 255).min(cov) as u8;
+            }
+        }
+    }
+}
+
+/// `white_wash` with a shade laid down first (`shade` = colour and alpha), in the same single pass: a glass
+/// window's tint and wash, which as two tiny-skia fills cost a few ms a frame while Spotlight grows.
+pub fn shade_wash(pm: &mut Pixmap, top: f32, h: f32, shade: (u8, u8, u8, u8), a0: u8, a1: u8) {
+    let w = pm.width() as usize;
+    let sa = shade.3 as u32;
+    for (row, line) in pm.data_mut().chunks_exact_mut(w * 4).enumerate() {
+        let u = ((row as f32 + 0.5 - top) / h.max(1.0)).clamp(0.0, 1.0);
+        let a = (a0 as f32 + (a1 as f32 - a0 as f32) * u).round() as u32;
+        for px in line.chunks_exact_mut(4) {
+            let cov = px[3] as u32;
+            if cov == 0 {
+                continue;
+            }
+            let t = sa * cov / 255;
+            let s = a * cov / 255;
+            // pixels are BGRA: the shade's blue goes first
+            for (c, sc) in px[..3].iter_mut().zip([shade.2, shade.1, shade.0]) {
+                let v = (sc as u32 * t + *c as u32 * (255 - t) + 127) / 255;
+                *c = (s + (v * (255 - s) + 127) / 255).min(cov) as u8;
             }
         }
     }

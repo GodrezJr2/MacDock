@@ -620,7 +620,9 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
     let started = [cfg.menu_bar, want_widgets, want_switcher, cfg.claude_usage_oauth];
     let mut app = App { dock: Dock::new(hwnd, cfg), genie, bar, fly: None, win: None, fullscreen: false, started };
     app.apply_genie_timing();
-    flyout::warm_backdrop();
+    if app.dock.config().launchpad_style == "classic" {
+        flyout::warm_backdrop(); // only the full-screen Launchpad draws over it (~8 MB at 1080p)
+    }
     if let Some(b) = app.bar.as_mut() {
         b.start(); // reserve the top strip before the dock measures the work area
     }
