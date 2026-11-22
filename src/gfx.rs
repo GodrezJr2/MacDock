@@ -85,6 +85,14 @@ impl Surface {
     }
 }
 
+/// Change only a layered window's overall opacity, keeping its pixels (safe from any thread).
+pub fn set_alpha(hwnd: HWND, alpha: u8) {
+    unsafe {
+        let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, SourceConstantAlpha: alpha, AlphaFormat: AC_SRC_ALPHA as u8, ..Default::default() };
+        let _ = UpdateLayeredWindow(hwnd, HDC::default(), None, None, HDC::default(), None, COLORREF(0), Some(&blend), ULW_ALPHA);
+    }
+}
+
 /// What is on screen at (x, y, w, h) right now (screen px), opaque.
 pub fn capture_screen(x: i32, y: i32, w: u32, h: u32) -> Option<Pixmap> {
     let mut sf = Surface::new(w, h)?;

@@ -314,6 +314,7 @@ impl App {
 
     fn apply_genie_timing(&mut self) {
         let c = self.dock.config();
+        flyout::set_motion(!c.reduce_motion);
         let secs = (c.genie_secs(false), c.genie_secs(true));
         if let Some(g) = self.genie.as_mut() {
             g.secs = secs;

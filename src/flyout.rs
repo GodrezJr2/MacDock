@@ -24,6 +24,20 @@ const TIMER_TICK: usize = 1;
 const TIMER_ANIM: usize = 2;
 /// how long a full-screen panel takes to zoom and fade in
 const STAGE_IN_MS: f32 = 240.0;
+/// a panel under the menu bar: fade and grow in, fade out
+const PANEL_IN_MS: f32 = 170.0;
+const PANEL_OUT_MS: u64 = 140;
+
+/// false while Reduce motion is on: panels appear and go at once.
+static MOTION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_motion(on: bool) {
+    MOTION.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn motion() -> bool {
+    MOTION.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// The blurred, dimmed wallpaper behind full-screen panels, kept for the next open (screen px).
 static BACKDROP: std::sync::Mutex<Option<std::sync::Arc<Pixmap>>> = std::sync::Mutex::new(None);
@@ -463,6 +477,8 @@ impl Flyout {
             full: false, view: (dpi as f32, 0.0, 0.0), stage: false, born: std::time::Instant::now(), anim_timer: false,
         };
         f.content.opened(hwnd.0 as isize);
+        // the animation starts once it can be seen: setting up the content can take a while (Control Center)
+        f.born = std::time::Instant::now();
         f.render();
         unsafe {
             let _ = ShowWindow(hwnd, SW_SHOW);
@@ -479,8 +495,28 @@ impl Flyout {
     pub fn close(&mut self) {
         self.content.closing();
         unsafe {
-            let _ = DestroyWindow(self.hwnd);
+            let _ = KillTimer(self.hwnd, TIMER_ANIM);
+            if !motion() || IsIconic(self.hwnd).as_bool() {
+                let _ = DestroyWindow(self.hwnd);
+                return;
+            }
+            // fade out like a macOS menu: clicks go through it meanwhile, and its own thread destroys it after
+            let ex = GetWindowLongW(self.hwnd, GWL_EXSTYLE);
+            SetWindowLongW(self.hwnd, GWL_EXSTYLE, ex | WS_EX_TRANSPARENT.0 as i32);
         }
+        let h = self.hwnd.0 as isize;
+        std::thread::spawn(move || {
+            let hwnd = HWND(h as *mut _);
+            let steps = 8u64;
+            for i in 1..=steps {
+                std::thread::sleep(std::time::Duration::from_millis(PANEL_OUT_MS / steps));
+                let a = 1.0 - i as f32 / steps as f32;
+                gfx::set_alpha(hwnd, (a * a * 255.0) as u8);
+            }
+            unsafe {
+                let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
+        });
     }
 
     fn to_content(&self, x: i32, y: i32) -> (f32, f32) {
@@ -632,7 +668,8 @@ impl Flyout {
 
     /// Run a frame-rate timer while the open zoom or the content is moving.
     fn keep_ticking(&mut self) {
-        let opening = self.stage && self.content.motion() && self.born.elapsed().as_secs_f32() * 1000.0 < STAGE_IN_MS;
+        let dur = if self.stage { STAGE_IN_MS } else { PANEL_IN_MS };
+        let opening = motion() && self.content.motion() && !self.full && self.born.elapsed().as_secs_f32() * 1000.0 < dur + 40.0; // one frame past the end, so the last one is whole
         let want = opening || self.content.animating();
         if want != self.anim_timer {
             self.anim_timer = want;
@@ -659,7 +696,7 @@ impl Flyout {
         self.spots = spots;
         self.view = (s, 0.0, 0.0);
         self.pos = (0, 0);
-        let t = if self.content.motion() { (self.born.elapsed().as_secs_f32() * 1000.0 / STAGE_IN_MS).min(1.0) } else { 1.0 };
+        let t = if motion() && self.content.motion() { (self.born.elapsed().as_secs_f32() * 1000.0 / STAGE_IN_MS).min(1.0) } else { 1.0 };
         let e = 1.0 - (1.0 - t).powi(3); // ease out
         let Some(mut pm) = Pixmap::new(pw, ph) else { return };
         let back = stage_backdrop(pw, ph);
@@ -747,6 +784,19 @@ impl Flyout {
         if self.surface.as_ref().is_none_or(|sf| sf.w != pw || sf.h != total_h) {
             self.surface = Surface::new(pw, total_h);
         }
+        // opening: fade in and grow from 96% towards the menu bar item (or the middle, for centred panels)
+        let t = if motion() && self.moved.is_none() { (self.born.elapsed().as_secs_f32() * 1000.0 / PANEL_IN_MS).min(1.0) } else { 1.0 };
+        if t < 1.0 {
+            let e = 1.0 - (1.0 - t).powi(3);
+            let z = 0.96 + 0.04 * e;
+            let ax = if self.kind.centred() { pw as f32 / 2.0 } else { pw as f32 - MARGIN * s };
+            let ay = if self.kind.centred() { total_h as f32 / 2.0 } else { MARGIN * s };
+            if let Some(mut out) = Pixmap::new(pw, ph_max) {
+                let paint = PixmapPaint { opacity: e, quality: tiny_skia::FilterQuality::Bilinear, ..Default::default() };
+                out.draw_pixmap(0, 0, pm.as_ref(), &paint, Transform::from_row(z, 0.0, 0.0, z, ax - ax * z, ay - ay * z), None);
+                pm = out;
+            }
+        }
         if let Some(sf) = self.surface.as_mut() {
             let src = &pm.data()[..(pw * total_h * 4) as usize];
             sf.bytes().copy_from_slice(src);
@@ -824,3 +874,4 @@ pub fn snapshot(content: &mut dyn Content, s: f32) -> (u32, u32, Vec<u8>) {
     content.draw(&mut ui);
     (pw, ph, pm.data().to_vec())
 }
+
