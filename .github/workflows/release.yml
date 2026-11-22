@@ -1,5 +1,5 @@
 # Pushing a tag like v0.1.1 builds macdock.exe and publishes it as a GitHub release.
-# Release notes come from the annotated tag message (git tag -a v0.1.1 -m "...").
+# Release notes are the version's section of CHANGELOG.md (tools/release-notes.ps1); the run stops early without one.
 name: Release
 
 on:
@@ -30,6 +30,7 @@ jobs:
           $tag = "${{ github.ref_name }}".TrimStart('v')
           $ver = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
           if ($tag -ne $ver) { throw "Tag v$tag does not match Cargo.toml version $ver" }
+          ./tools/release-notes.ps1 $tag | Out-Null # fails here, before the build, if CHANGELOG.md has no notes
 
       - name: Build
         run: cargo build --release --locked
@@ -47,7 +48,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "${{ github.ref_name }}"
+          ./tools/release-notes.ps1 $tag | Set-Content -Encoding utf8 notes.md
           gh release create $tag `
             target\release\macdock.exe target\release\macdock.exe.sha256 `
             --title "MacDock $($tag.TrimStart('v'))" `
-            --notes-from-tag
+            --notes-file notes.md

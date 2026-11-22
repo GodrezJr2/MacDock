@@ -155,7 +155,8 @@ notification-area icons (Discord, Steam, …).
 ## Install
 
 **Download:** grab `macdock.exe` from the [latest release](https://github.com/GodrezJr2/MacDock/releases/latest)
-and run it. Windows 11 only, nothing else to install. Each release is built by GitHub Actions from its tag.
+and run it. Windows 11 only, nothing else to install. Each release is built by GitHub Actions from its tag;
+what changed in each version is in [CHANGELOG.md](CHANGELOG.md).
 
 **Build from source:** you need Windows 11 and Rust. Follow these steps in order:
 
