@@ -908,7 +908,7 @@ Open the download page?")) {
             }
             Item::Net => 17.0,
             Item::Search => self.text_w("\u{E721}", self.glyph_font(GLYPH_PX)),
-            Item::Apps => self.text_w("\u{E71D}", self.glyph_font(GLYPH_PX)),
+            Item::Apps => self.text_w("\u{F0E2}", self.glyph_font(GLYPH_PX)),
             Item::Cc => 17.0,
             Item::Clock => self.text_w(&self.clock, self.font(400)),
         }
@@ -1011,7 +1011,7 @@ Open the download page?")) {
                     Net::Off => draw_wifi(&mut content, cx, mid - 6.25 * dpi, 17.0 * dpi, 12.5 * dpi, 0, true),
                 },
                 Item::Search => self.draw_text(&mut content, "\u{E721}", self.glyph_font(GLYPH_PX), cx, mid),
-                Item::Apps => self.draw_text(&mut content, "\u{E71D}", self.glyph_font(GLYPH_PX), cx, mid),
+                Item::Apps => self.draw_text(&mut content, "\u{F0E2}", self.glyph_font(GLYPH_PX), cx, mid),
                 Item::Cc => draw_cc(&mut content, cx, mid, dpi),
                 Item::Clock => self.draw_text(&mut content, &self.clock, self.font(400), cx, mid),
             }
