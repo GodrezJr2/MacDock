@@ -125,6 +125,7 @@ const SEARCH_W: f32 = 240.0;
 const SEARCH_H: f32 = 30.0;
 const ID_APP: u32 = 1; // ids 1..=PER_PAGE: the cells of the page shown
 const ID_DOT: u32 = 100; // 100.. the page dots
+const ID_SEARCH: u32 = 90; // the search field: a click there must not count as the background
 
 pub struct Launchpad {
     apps: Vec<App>,
@@ -136,13 +137,29 @@ pub struct Launchpad {
     sel: usize,
     /// a scroll in progress: wheel notches add up until a page turn
     wheel: i32,
+    /// where the pages are, in pages (2.4 = 40% of the way from page 2 to page 3); eases to `page`
+    pos: f32,
+    /// a touchpad swipe in progress: the pages follow the fingers until they stop
+    swipe: Option<Swipe>,
     /// the screen in DIPs
     screen: (f32, f32),
-    /// a page turn in progress: the page we came from and how far the slide still has to go (1 -> 0)
-    from: usize,
-    slide: f32,
     last_tick: Option<std::time::Instant>,
     motion: bool,
+}
+
+/// Wheel units of touchpad scrolling that move one whole page.
+const SWIPE_UNITS: f32 = 700.0;
+/// No touchpad input for this long means the fingers have lifted.
+const SWIPE_END_MS: u128 = 90;
+
+struct Swipe {
+    /// the page the swipe began on
+    start: usize,
+    /// where the fingers alone would put the pages, before the edges hold them back
+    raw: f32,
+    at: std::time::Instant,
+    /// pages per second, for a flick
+    vel: f32,
 }
 
 impl Launchpad {
@@ -155,8 +172,8 @@ impl Launchpad {
 
     fn empty(apps: Vec<App>, motion: bool) -> Launchpad {
         Launchpad {
-            apps, query: String::new(), shown: Vec::new(), page: 0, sel: 0, wheel: 0, screen: (1536.0, 864.0), from: 0,
-            slide: 0.0, last_tick: None, motion,
+            apps, query: String::new(), shown: Vec::new(), page: 0, sel: 0, wheel: 0, pos: 0.0, swipe: None,
+            screen: (1536.0, 864.0), last_tick: None, motion,
         }
     }
 
@@ -195,7 +212,8 @@ impl Launchpad {
         let pages = self.pages();
         self.page = self.page.min(pages - 1);
         self.sel = self.sel.min(self.shown.len().saturating_sub(1));
-        self.slide = 0.0;
+        self.pos = self.page as f32;
+        self.swipe = None;
     }
 
     fn pages(&self) -> usize {
@@ -223,10 +241,52 @@ impl Launchpad {
         if p == self.page {
             return;
         }
+        self.page = p;
         if self.motion {
-            self.from = self.page;
-            self.slide = 1.0;
             self.last_tick = None;
+        } else {
+            self.pos = p as f32;
+        }
+    }
+
+    /// Touchpad scroll (`d` in wheel units, positive = towards the next page): the pages follow it.
+    fn swipe_by(&mut self, d: f32) {
+        let last = (self.pages() - 1) as f32;
+        let now = std::time::Instant::now();
+        let fresh = self.swipe.is_none();
+        let sw = self.swipe.get_or_insert(Swipe { start: self.page, raw: self.pos, at: now, vel: 0.0 });
+        let dt = (now - sw.at).as_secs_f32().max(0.004);
+        sw.at = now;
+        let step = d / SWIPE_UNITS;
+        if !fresh {
+            // pages per second, smoothed; the first step has no time before it to measure against
+            sw.vel = sw.vel * 0.6 + step / dt * 0.4;
+        }
+        // one page per swipe, as on macOS: the fingers can pull up to the neighbour and no further
+        let lo = (sw.start as f32 - 1.0).max(0.0);
+        let hi = (sw.start as f32 + 1.0).min(last);
+        sw.raw = (sw.raw + step).clamp(lo - 0.5, hi + 0.5);
+        // past the first or last page it gives a little, like a rubber band
+        let over = if sw.raw < lo { sw.raw - lo } else if sw.raw > hi { sw.raw - hi } else { 0.0 };
+        self.pos = sw.raw.clamp(lo, hi) + over * 0.3;
+        self.last_tick = None;
+    }
+
+    /// The fingers stopped: settle on the page they pulled to, or the next one if they flicked.
+    fn release(&mut self) {
+        let Some(sw) = self.swipe.take() else { return };
+        let last = self.pages() as i32 - 1;
+        let moved = self.pos - sw.start as f32;
+        let dir = if moved > 0.12 || sw.vel > 1.2 {
+            1
+        } else if moved < -0.12 || sw.vel < -1.2 {
+            -1
+        } else {
+            0
+        };
+        let p = (sw.start as i32 + dir).clamp(0, last) as usize;
+        if p != self.page {
+            self.sel = p * PER_PAGE;
         }
         self.page = p;
     }
@@ -310,7 +370,7 @@ impl Content for Launchpad {
     }
 
     fn animating(&self) -> bool {
-        self.slide > 0.0
+        self.swipe.is_some() || (self.pos - self.page as f32).abs() > 0.0005
     }
 
     fn motion(&self) -> bool {
@@ -318,17 +378,23 @@ impl Content for Launchpad {
     }
 
     fn tick(&mut self) {
-        if self.slide <= 0.0 {
+        // a touchpad sends nothing when the fingers lift, so a short silence ends the swipe
+        if self.swipe.as_ref().is_some_and(|s| s.at.elapsed().as_millis() > SWIPE_END_MS) {
+            self.release();
+        }
+        if self.swipe.is_some() {
+            return;
+        }
+        let target = self.page as f32;
+        if (self.pos - target).abs() <= 0.0005 {
+            self.pos = target;
             return;
         }
         let now = std::time::Instant::now();
         let dt = self.last_tick.map_or(0.016, |t| (now - t).as_secs_f32()).min(0.05);
         self.last_tick = Some(now);
         // ease out: about 300 ms to settle
-        self.slide *= (-dt * 14.0).exp();
-        if self.slide < 0.002 {
-            self.slide = 0.0;
-        }
+        self.pos = target + (self.pos - target) * (-dt * 14.0).exp();
     }
 
     fn opened(&mut self, hwnd: isize) {
@@ -348,6 +414,7 @@ impl Content for Launchpad {
         // search field, small and centred at the top
         let sx = (w - SEARCH_W) / 2.0;
         let sy = 34.0;
+        ui.hit(ID_SEARCH, sx, sy, SEARCH_W, SEARCH_H);
         ui.fill(sx, sy, SEARCH_W, SEARCH_H, SEARCH_H / 2.0, white(0x2E));
         ui.outline(sx, sy, SEARCH_W, SEARCH_H, SEARCH_H / 2.0, 1.0, white(0x2E));
         let my = sy + SEARCH_H / 2.0;
@@ -371,14 +438,15 @@ impl Content for Launchpad {
             let mw = ui.text_w(msg, 20.0, 500);
             ui.text_mid((w - mw) / 2.0, top + grid_h / 2.0, msg, 20.0, 500, white(0xB3), 0.0);
         }
-        if self.slide > 0.0 {
-            // the old page leaves to one side while the new one comes in from the other
-            let dir = if self.page > self.from { 1.0 } else { -1.0 };
-            let off = self.slide * w * dir;
-            self.draw_page(ui, self.from, off - w * dir, false);
-            self.draw_page(ui, self.page, off, true);
-        } else {
-            self.draw_page(ui, self.page, 0.0, true);
+        // every page within reach of `pos`, side by side; only the settled one takes clicks
+        let pages_n = self.pages();
+        let settled = self.swipe.is_none() && (self.pos - self.page as f32).abs() < 0.02;
+        let first = self.pos.floor().max(0.0) as usize;
+        for p in first..(first + 2).min(pages_n) {
+            let dx = (p as f32 - self.pos) * w;
+            if dx.abs() < w {
+                self.draw_page(ui, p, dx, settled && p == self.page);
+            }
         }
 
         // page dots
@@ -402,6 +470,9 @@ impl Content for Launchpad {
             self.go((id - ID_DOT) as usize);
             return Cmd::None;
         }
+        if id == ID_SEARCH {
+            return Cmd::None; // typing already goes to the field
+        }
         match self.app_at(id) {
             Some(a) => Cmd::Launch(a.spec.clone()),
             None => Cmd::None,
@@ -416,10 +487,24 @@ impl Content for Launchpad {
     }
 
     fn wheel(&mut self, delta: i32) {
+        // a touchpad scrolls in small steps; a mouse wheel in whole notches of 120
+        if self.motion && (delta % 120 != 0 || self.swipe.is_some()) {
+            self.swipe_by(-delta as f32);
+            return;
+        }
         self.wheel += delta;
         if self.wheel.abs() >= 120 {
             self.turn(if self.wheel < 0 { 1 } else { -1 });
             self.wheel = 0;
+        }
+    }
+
+    fn hwheel(&mut self, delta: i32) {
+        // fingers moving left scroll right, which brings in the next page
+        if self.motion {
+            self.swipe_by(delta as f32);
+        } else {
+            self.wheel(-delta);
         }
     }
 
@@ -499,6 +584,70 @@ mod tests {
         assert_eq!(l.page, 2);
         l.turn(5);
         assert_eq!(l.page, 2);
+    }
+
+    fn swipe_pad() -> Launchpad {
+        let names: Vec<String> = (0..80).map(|i| format!("App {i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let mut l = pad(&refs);
+        l.motion = true;
+        l
+    }
+
+    /// Lift the fingers and let the pages settle.
+    fn settle(l: &mut Launchpad) {
+        if let Some(s) = l.swipe.as_mut() {
+            s.at -= std::time::Duration::from_millis(200);
+        }
+        for _ in 0..200 {
+            l.tick();
+            l.last_tick = l.last_tick.map(|t| t - std::time::Duration::from_millis(16));
+        }
+    }
+
+    #[test]
+    fn touchpad_swipe_follows_and_snaps() {
+        let mut l = swipe_pad();
+        // a slow drag halfway: the pages sit where the fingers are
+        for _ in 0..5 {
+            l.wheel(-70);
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        assert!((l.pos - 0.5).abs() < 0.01, "pos {}", l.pos);
+        assert!(l.animating());
+        settle(&mut l);
+        assert_eq!(l.page, 1);
+        assert_eq!(l.pos, 1.0);
+
+        // a small slow pull springs back
+        for _ in 0..2 {
+            l.hwheel(-20);
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
+        settle(&mut l);
+        assert_eq!(l.page, 1);
+
+        // a long drag still turns only one page
+        for _ in 0..30 {
+            l.hwheel(120 + 1);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(l.pos < 2.2, "pos {}", l.pos); // the last page: only the rubber band past it
+        settle(&mut l);
+        assert_eq!(l.page, 2);
+
+        // past the last page it gives a little, then comes back
+        for _ in 0..4 {
+            l.hwheel(100);
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        assert!(l.pos > 2.0 && l.pos < 2.2, "pos {}", l.pos);
+        settle(&mut l);
+        assert_eq!((l.page, l.pos), (2, 2.0));
+
+        // a mouse wheel notch still turns a page at once
+        l.wheel(120);
+        assert_eq!(l.page, 1);
     }
 
     /// Real app list rendered to target/launchpad.png (cargo test launchpad_snapshot -- --ignored).

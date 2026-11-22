@@ -102,6 +102,8 @@ pub enum FlyEv {
     Up(i32, i32),
     RightUp(i32, i32),
     Wheel(i32),
+    /// horizontal wheel: a sideways two-finger swipe on a touchpad (positive = towards the right)
+    HWheel(i32),
     Char(char),
     Key(u32),
     Deactivated,
@@ -403,6 +405,7 @@ pub trait Content {
     /// Mouse over a spot changed (the tray forwards it to the app).
     fn hover(&mut self, _id: Option<u32>) {}
     fn wheel(&mut self, _delta: i32) {}
+    fn hwheel(&mut self, _delta: i32) {}
     fn char(&mut self, _c: char) -> Cmd {
         Cmd::None
     }
@@ -455,6 +458,10 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_RBUTTONUP => push(Ev::Fly(h.0 as isize, FlyEv::RightUp(x, y))),
         WM_MOUSEWHEEL => push(Ev::Fly(h.0 as isize, FlyEv::Wheel(((wp.0 >> 16) & 0xFFFF) as i16 as i32))),
+        WM_MOUSEHWHEEL => {
+            push(Ev::Fly(h.0 as isize, FlyEv::HWheel(((wp.0 >> 16) & 0xFFFF) as i16 as i32)));
+            return LRESULT(1); // handled, so the driver doesn't fall back to other messages
+        }
         WM_CHAR => {
             if let Some(c) = char::from_u32(wp.0 as u32) {
                 push(Ev::Fly(h.0 as isize, FlyEv::Char(c)));
@@ -688,6 +695,7 @@ impl Flyout {
                 }
             }
             FlyEv::Wheel(d) => self.content.wheel(d),
+            FlyEv::HWheel(d) => self.content.hwheel(d),
             FlyEv::Char(c) => cmd = self.content.char(c),
             FlyEv::Key(0x1B) if self.full => self.set_full(false),
             FlyEv::Key(0x1B) => cmd = Cmd::Close,
