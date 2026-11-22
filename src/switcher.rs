@@ -313,10 +313,16 @@ impl Switcher {
     }
 
     fn commit(&mut self) {
-        let target = self.apps.get(self.sel).and_then(|a| a.wins.first().copied());
+        let wins = self.apps.get(self.sel).map(|a| a.wins.clone()).unwrap_or_default();
         self.end();
-        if let Some(h) = target {
-            shell::activate(h);
+        let Some(&front) = wins.first() else { return };
+        // A dock click minimizes all of an app's windows together, and this switcher shows one icon per app:
+        // bring them all back the way the dock does, else only the front one returns and the rest look lost.
+        // Windows minimized one by one while others stay open are left alone.
+        if wins.len() > 1 && wins.iter().all(|&h| unsafe { IsIconic(h).as_bool() }) {
+            crate::genie::restore_all(front, &wins);
+        } else {
+            shell::activate(front);
         }
     }
 
