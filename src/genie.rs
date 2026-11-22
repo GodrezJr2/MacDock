@@ -18,7 +18,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::genie_gpu::Gpu;
+use crate::genie_gpu::{Gpu, Look};
 use crate::gfx::Surface;
 use crate::{push, shell, Ev};
 
@@ -147,11 +147,65 @@ impl R {
     fn bottom(&self) -> f64 {
         self.y + self.h
     }
+    fn grow(&self, m: f64) -> R {
+        R { x: self.x - m, y: self.y - m, w: self.w + 2.0 * m, h: self.h + 2.0 * m }
+    }
     fn union(&self, o: &R) -> R {
         let (l, t) = (self.x.min(o.x), self.y.min(o.y));
         R { x: l, y: t, w: self.right().max(o.right()) - l, h: self.bottom().max(o.bottom()) - t }
     }
 }
+
+/// Windows 11 rounds window corners (build 22000 on); Windows 10 does not.
+fn rounded_corners() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
+        let mut buf = [0u16; 16];
+        let mut len = (buf.len() * 2) as u32;
+        let r = unsafe {
+            RegGetValueW(HKEY_LOCAL_MACHINE, w!("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"), w!("CurrentBuildNumber"), RRF_RT_REG_SZ, None, Some(buf.as_mut_ptr() as *mut _), Some(&mut len))
+        };
+        let n = buf.iter().position(|&c| c == 0).unwrap_or(0);
+        r.is_ok() && String::from_utf16_lossy(&buf[..n]).parse::<u32>().is_ok_and(|b| b >= 22000)
+    })
+}
+
+/// The look of a window at `win` (screen pixels) the way DWM draws it: rounded corners on Windows 11 and a
+/// soft shadow, scaled to its monitor's DPI. A maximized window (it fills the work area) has neither.
+fn look_of(win: R) -> Look {
+    use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+    let rc = RECT { left: win.x as i32, top: win.y as i32, right: win.right() as i32, bottom: win.bottom() as i32 };
+    let (mut s, mut maxed) = (1.0f32, false);
+    unsafe {
+        let mon = MonitorFromRect(&rc, MONITOR_DEFAULTTONEAREST);
+        let (mut dx, mut dy) = (0u32, 0u32);
+        if GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut dx, &mut dy).is_ok() && dx > 0 {
+            s = dx as f32 / 96.0;
+        }
+        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if GetMonitorInfoW(mon, &mut mi).as_bool() {
+            let w = mi.rcWork;
+            maxed = rc.left <= w.left + 1 && rc.top <= w.top + 1 && rc.right >= w.right - 1 && rc.bottom >= w.bottom - 1;
+        }
+    }
+    if maxed {
+        return Look::flat(win.w, win.h);
+    }
+    let (sigma, drop) = (SHADOW_SIGMA * s, SHADOW_DROP * s);
+    Look {
+        w: win.w as f32, h: win.h as f32, margin: (drop + 3.0 * sigma).ceil(),
+        radius: if rounded_corners() { CORNER * s } else { 0.0 }, sigma, shadow: SHADOW_ALPHA, drop,
+    }
+}
+
+/// Windows 11's window corner radius and (roughly) its active-window shadow, at 100% scale.
+const CORNER: f32 = 8.0;
+const SHADOW_SIGMA: f32 = 10.0;
+const SHADOW_DROP: f32 = 4.0;
+const SHADOW_ALPHA: f32 = 0.32;
+/// The most any look grows a window by (at 300% scale), so the overlay always has room for the shadow.
+const MARGIN_MAX: f64 = 3.0 * (SHADOW_DROP as f64 + 3.0 * SHADOW_SIGMA as f64) + 1.0;
 
 fn smooth(x: f64) -> f64 {
     let x = x.clamp(0.0, 1.0);
@@ -920,6 +974,7 @@ impl Genie {
 
     /// Make sure the surface covers `area` (screen pixels).
     fn ensure_surface(&mut self, area: R) {
+        let area = area.grow(MARGIN_MAX); // room for the shadows
         if !self.gpu_tried {
             self.gpu_tried = true;
             match Gpu::new() {
@@ -983,8 +1038,11 @@ impl Genie {
         let Some(&(img, win, p)) = set.last() else { return (0.0, 0.0) };
         if let (Some(g), Some(a)) = (self.gpu.as_mut(), self.gpu_area) {
             let t0 = Instant::now();
-            let rows: Vec<Vec<(f64, f64, f64)>> = set.iter().map(|&(_, w, p)| shape(w, icon, p)).collect();
-            let meshes: Vec<(&Arc<Pixmap>, &[(f64, f64, f64)])> = set.iter().zip(&rows).map(|(&(i, _, _), r)| (i, r.as_slice())).collect();
+            let looks: Vec<Look> = set.iter().map(|&(_, w, _)| look_of(w)).collect();
+            let rows: Vec<Vec<(f64, f64, f64)>> =
+                set.iter().zip(&looks).map(|(&(_, w, p), k)| shape(w.grow(k.margin as f64), icon, p)).collect();
+            let meshes: Vec<(&Arc<Pixmap>, &[(f64, f64, f64)], Look)> =
+                set.iter().zip(&rows).zip(&looks).map(|((&(i, _, _), r), &k)| (i, r.as_slice(), k)).collect();
             match g.draw_many(&meshes, (a.x, a.y), alpha as f32) {
                 Ok(()) => return (0.0, t0.elapsed().as_secs_f64() * 1e3),
                 Err(e) => self.gpu_failed(&e),
@@ -1476,12 +1534,16 @@ mod bench {
             .collect();
         println!("{} windows grabbed", items.len());
         let icon = R { x: 900.0, y: 1000.0, w: 64.0, h: 64.0 };
-        let area = items.iter().fold(icon, |a, it| a.union(&it.1));
+        let area = items.iter().fold(icon, |a, it| a.union(&it.1)).grow(MARGIN_MAX);
         let mut g = Gpu::new().expect("gpu");
         g.set_area(area.x as i32, area.y as i32, area.w as u32 + 2, area.h as u32 + 2).unwrap();
         let ps = [0.15, 0.4, 0.65];
-        let rows: Vec<Vec<(f64, f64, f64)>> = items.iter().enumerate().map(|(i, it)| shape(it.1, icon, ps[i % 3])).collect();
-        let meshes: Vec<(&Arc<Pixmap>, &[(f64, f64, f64)])> = items.iter().zip(&rows).map(|(it, r)| (&it.0, r.as_slice())).collect();
+        let ps = std::env::var("PS").ok().and_then(|v| v.parse::<f64>().ok()).map_or(ps, |v| [v; 3]);
+        let looks: Vec<Look> = items.iter().map(|it| look_of(it.1)).collect();
+        let rows: Vec<Vec<(f64, f64, f64)>> =
+            items.iter().zip(&looks).enumerate().map(|(i, (it, k))| shape(it.1.grow(k.margin as f64), icon, ps[i % 3])).collect();
+        let meshes: Vec<(&Arc<Pixmap>, &[(f64, f64, f64)], Look)> =
+            items.iter().zip(&rows).zip(&looks).map(|((it, r), &k)| (&it.0, r.as_slice(), k)).collect();
         let t = Instant::now();
         while t.elapsed() < Duration::from_millis(400) {
             g.draw_many(&meshes, (area.x, area.y), 1.0).unwrap();
@@ -1493,6 +1555,50 @@ mod bench {
         let rc = RECT { left: area.x as i32, top: area.y as i32, right: area.right() as i32, bottom: area.bottom() as i32 };
         let shot = grab(rc, 4096).unwrap();
         let out = std::env::var("SHOT").unwrap_or("multi_shot.png".into());
+        crate::gfx::save_png(&out, shot.width(), shot.height(), shot.data());
+        println!("{}x{} -> {out}", shot.width(), shot.height());
+    }
+
+    /// A white window with a grey 1 px border over a light backdrop, dressed (corners, shadow) at progress
+    /// $PS, grabbed off the screen to $SHOT, to look at the corners and the shadow up close.
+    #[test]
+    #[ignore]
+    fn look_shot() {
+        let solid = |w: u32, h: u32, c: u8, border: bool| {
+            let mut pm = Pixmap::new(w, h).unwrap();
+            let d = pm.data_mut();
+            for y in 0..h {
+                for x in 0..w {
+                    let e = border && (x == 0 || y == 0 || x == w - 1 || y == h - 1);
+                    let v = if e { 150 } else { c };
+                    let i = ((y * w + x) * 4) as usize;
+                    d[i..i + 4].copy_from_slice(&[v, v, v, 255]);
+                }
+            }
+            Arc::new(pm)
+        };
+        let win = R { x: 400.0, y: 200.0, w: 800.0, h: 500.0 };
+        let icon = R { x: 760.0, y: 1000.0, w: 64.0, h: 64.0 };
+        let area = win.union(&icon).grow(MARGIN_MAX);
+        let (bg, img) = (solid(area.w as u32, area.h as u32, 225, false), solid(800, 500, 255, true));
+        let p = std::env::var("PS").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+        let k = look_of(win);
+        println!("{k:?}");
+        let back = vec![(area.x, area.right(), area.y), (area.x, area.right(), area.bottom())];
+        let rows = shape(win.grow(k.margin as f64), icon, p);
+        let mut g = Gpu::new().expect("gpu");
+        g.set_area(area.x as i32, area.y as i32, area.w as u32, area.h as u32).unwrap();
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_millis(400) {
+            g.draw_many(&[(&bg, &back, Look::flat(area.w, area.h)), (&img, &rows, k)], (area.x, area.y), 1.0).unwrap();
+            unsafe {
+                let _ = ShowWindow(g.hwnd, SW_SHOWNOACTIVATE);
+                let _ = windows::Win32::Graphics::Dwm::DwmFlush();
+            }
+        }
+        let rc = RECT { left: area.x as i32, top: area.y as i32, right: area.right() as i32, bottom: area.bottom() as i32 };
+        let shot = grab(rc, 4096).unwrap();
+        let out = std::env::var("SHOT").unwrap_or("look_shot.png".into());
         crate::gfx::save_png(&out, shot.width(), shot.height(), shot.data());
         println!("{}x{} -> {out}", shot.width(), shot.height());
     }
