@@ -269,13 +269,14 @@ are read off the UI thread, and a sleeping NVIDIA GPU is left asleep instead of 
 MacDock started as C# / WPF on .NET 10 and was rewritten in Rust (plain Win32, tiny-skia, WinRT through the
 `windows` crate) to make it lighter. Measured on the same laptop (32 logical cores, on AC power): a fresh start,
 20 s idle, then a 10 s scripted pointer sweep over the dock. CPU is a share of the whole machine, as Task
-Manager shows it.
+Manager shows it; with 32 cores that number is small, so the brackets give the same load as a share of one core
+(on a 4-core laptop, Task Manager would show about 8 times the first number).
 
 | | C# / WPF | Rust 0.1 | Rust 0.4.2 |
 | --- | --- | --- | --- |
 | Private memory | 320-379 MB | 12.9 MB | 91.7 MB |
-| CPU idle | 0.04-0.6% | 0% | 0.03% |
-| CPU while magnifying | 2.0-2.3% | 1.65% | 1.38% |
+| CPU idle | 0.04-0.6% (1-19% of a core) | 0% | 0.03% (1% of a core) |
+| CPU while magnifying | 2.0-2.3% (64-74% of a core) | 1.65% (53% of a core) | 1.38% (44% of a core) |
 | Threads | 21-26 | 11 | 38 |
 | On disk | 30 MB + .NET runtime | 1.1 MB exe | 1.66 MB exe |
 
