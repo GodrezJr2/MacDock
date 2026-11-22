@@ -1,5 +1,5 @@
 //! Genie minimize/restore (port of Genie.cs). Keeps recent snapshots of app windows and, when one minimizes
-//! or comes back from the dock, bends the snapshot into the dock icon: a 48-row strip mesh rasterized on the
+//! or comes back from the dock, bends the snapshot into the dock icon: a 128-row strip mesh rasterized on the
 //! CPU (bilinear, all cores) into a click-through layered overlay. Only the mesh's bounding box is drawn and
 //! pushed each frame (UpdateLayeredWindow with a source point), so the cost follows what is on screen.
 
@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use tiny_skia::{IntSize, Pixmap};
 use windows::core::w;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
+use windows::Win32::Graphics::Dwm::{DwmGetCompositionTimingInfo, DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS, DWM_TIMING_INFO};
+use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
@@ -21,7 +22,9 @@ use crate::genie_gpu::Gpu;
 use crate::gfx::Surface;
 use crate::{push, shell, Ev};
 
-pub(crate) const ROWS: usize = 48;
+// Rows of the strip mesh. The GPU draws each strip as two affine triangles, so few rows show as kinks in the
+// curved sides and a diagonal shear in the content; 128 keeps both under a pixel and still costs nothing.
+pub(crate) const ROWS: usize = 128;
 const MAX_SNAPS: usize = 8; // windows still on screen
 const MAX_MINIMIZED: usize = 6; // in memory; older ones are read back from disk when needed
 const TIMER_CAPTURE: usize = 1;
@@ -129,12 +132,41 @@ fn smooth(x: f64) -> f64 {
     x * x * (3.0 - 2.0 * x)
 }
 
+/// Quintic ease: like `smooth` but its acceleration also starts and ends at zero, so the slide eases into the
+/// icon without the small jolt smoothstep has where it lands.
+fn smoother(x: f64) -> f64 {
+    let x = x.clamp(0.0, 1.0);
+    x * x * x * (x * (x * 6.0 - 15.0) + 10.0)
+}
+
+/// The display refresh a frame presented now will show at, and the refresh period, both in seconds on the QPC
+/// clock. Animation time taken from it advances in exact refresh steps, so the motion stays even however late
+/// in the loop the frame is drawn (Instant::now() there jitters by a millisecond or two, which at genie speed
+/// is several pixels of stutter). None when DWM gives no timing.
+fn next_vblank() -> Option<(f64, f64)> {
+    unsafe {
+        let mut ti = DWM_TIMING_INFO { cbSize: std::mem::size_of::<DWM_TIMING_INFO>() as u32, ..Default::default() };
+        DwmGetCompositionTimingInfo(HWND::default(), &mut ti).ok()?;
+        let (mut now, mut freq) = (0i64, 0i64);
+        QueryPerformanceCounter(&mut now).ok()?;
+        QueryPerformanceFrequency(&mut freq).ok()?;
+        let (vb, per) = (ti.qpcVBlank as f64, ti.qpcRefreshPeriod as f64);
+        if per <= 0.0 || freq <= 0 || vb <= 0.0 {
+            return None;
+        }
+        // floor, not round: a stale qpcVBlank (DWM not updated it yet) then still lands on the right refresh
+        let k = ((now as f64 - vb) / per).floor().max(0.0);
+        let f = freq as f64;
+        Some(((vb + (k + 1.0) * per) / f, per / f))
+    }
+}
+
 /// Genie: first the sides bend into a funnel towards the icon (squeeze), then every row slides down and piles
 /// up at the icon's bottom edge (slide). p = 0 is the window, p = 1 is fully inside the icon.
 /// Returns (left, right, y) per row edge, screen pixels.
 fn shape(win: R, icon: R, p: f64) -> Vec<(f64, f64, f64)> {
     let squeeze = smooth(p / 0.45);
-    let slide = smooth((p - 0.22) / 0.78);
+    let slide = smoother((p - 0.22) / 0.78);
     let travel = icon.bottom() - win.y;
     let funnel = (icon.y - win.y).max(1.0);
     (0..=ROWS)
@@ -504,6 +536,8 @@ struct Anim {
     duration: f64,
     frame: u32,
     start: Instant,
+    /// (first, last) refresh time of the motion on the DWM clock; None falls back to `start`
+    vsync: Option<(f64, f64)>,
     started: Then,
     done: Then,
     finished: Option<Instant>,
@@ -893,7 +927,7 @@ impl Genie {
         }
         self.anim = Some(Anim {
             img, win, icon, restore, duration: if restore { self.secs.1 } else { self.secs.0 }, frame: if prepared { 2 } else { 0 },
-            start: Instant::now(), started, done, finished: None, stats: Stats::default(),
+            start: Instant::now(), vsync: None, started, done, finished: None, stats: Stats::default(),
         });
         true
     }
@@ -916,8 +950,25 @@ impl Genie {
             LOOP.with(|c| c.set((0.0, 0.0, 0)));
             std::mem::replace(&mut a.started, Then::Nothing).run();
             a.start = Instant::now();
+            a.vsync = next_vblank().map(|(v, _)| (v, v));
         }
-        let t = if a.frame < 3 { 0.0 } else { (a.start.elapsed().as_secs_f64() / a.duration).min(1.0) };
+        let elapsed = match (a.frame >= 3, a.vsync) {
+            (false, _) => 0.0,
+            (true, Some((first, last))) => match next_vblank() {
+                Some((v, per)) => {
+                    // never repeat or reverse a refresh step, even if DWM's clock hiccups
+                    let v = if a.frame > 3 && v < last + per * 0.5 { last + per } else { v };
+                    a.vsync = Some((first, v));
+                    v - first
+                }
+                None => {
+                    a.vsync = None;
+                    a.start.elapsed().as_secs_f64()
+                }
+            },
+            (true, None) => a.start.elapsed().as_secs_f64(),
+        };
+        let t = (elapsed / a.duration).min(1.0);
         let p = if a.restore { 1.0 - t } else { t };
         let img = a.img.clone();
         let (rt, pt) = self.draw(&img, a.win, a.icon, p);
@@ -1082,6 +1133,32 @@ mod bench {
         }
         let avg = t0.elapsed().as_secs_f64() * 1000.0 / frames as f64;
         println!("raster avg {avg:.2} ms, worst {worst:.2} ms");
+    }
+
+    /// Frame steps of the DWM refresh clock against Instant::now(), both sampled after DwmFlush plus some
+    /// uneven work, as the main loop does. cargo test --release vblank_steps -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn vblank_steps() {
+        let (mut vs, mut is) = (Vec::new(), Vec::new());
+        for i in 0..240 {
+            unsafe {
+                let _ = windows::Win32::Graphics::Dwm::DwmFlush();
+            }
+            let spin = Instant::now();
+            while spin.elapsed() < Duration::from_micros((i * 7919 % 2500) as u64) {}
+            vs.push(next_vblank().unwrap().0);
+            is.push(Instant::now());
+        }
+        let per = next_vblank().unwrap().1 * 1e3;
+        let dev = |d: Vec<f64>| {
+            let m = d.iter().map(|x| (x - per).abs()).fold(0.0, f64::max);
+            let skips = d.iter().filter(|x| **x > per * 1.5).count();
+            (m, skips)
+        };
+        let v = dev(vs.windows(2).map(|w| (w[1] - w[0]) * 1e3).collect());
+        let i = dev(is.windows(2).map(|w| (w[1] - w[0]).as_secs_f64() * 1e3).collect());
+        println!("refresh {per:.3} ms; vblank clock: max step error {:.3} ms ({} skips); Instant: {:.3} ms ({} skips)", v.0, v.1, i.0, i.1);
     }
 
     /// Puts a GPU genie frame (p = 0.35) on screen for a moment and saves a screen grab of it.
