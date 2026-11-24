@@ -109,6 +109,7 @@ struct App {
     /// the Settings window, which lives beside the drop-down flyouts
     win: Option<flyout::Flyout>,
     fullscreen: bool,
+    explorer_pid: Option<u32>,
     /// menu bar, widgets, Alt+Tab, Claude login as this process started them (changing them needs a restart)
     started: [bool; 4],
 }
@@ -351,6 +352,19 @@ impl App {
         match e {
             Ev::Dock(de) => {
                 if let DockEv::Refresh = de {
+                    if let Some(pid) = taskbar::explorer_pid() {
+                        if self.explorer_pid != Some(pid) {
+                            self.explorer_pid = Some(pid);
+                            if let Some(b) = self.bar.as_mut() {
+                                b.shell_restarted();
+                            }
+                            self.dock.shell_restarted();
+                        }
+                        if let Some(b) = self.bar.as_mut() {
+                            b.ensure_reservation();
+                        }
+                        self.dock.ensure_reservation();
+                    }
                     // Explorer's ABN_FULLSCREENAPP is unreliable with its taskbar hidden: ask on every refresh
                     let fs = foreground_is_fullscreen();
                     if fs != self.fullscreen {
@@ -618,7 +632,7 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
     let want_widgets = cfg.desktop_widgets;
     let want_switcher = cfg.app_switcher;
     let started = [cfg.menu_bar, want_widgets, want_switcher, cfg.claude_usage_oauth];
-    let mut app = App { dock: Dock::new(hwnd, cfg), genie, bar, fly: None, win: None, fullscreen: false, started };
+    let mut app = App { dock: Dock::new(hwnd, cfg), genie, bar, fly: None, win: None, fullscreen: false, explorer_pid: taskbar::explorer_pid(), started };
     app.apply_genie_timing();
     if app.dock.config().launchpad_style == "classic" {
         flyout::warm_backdrop(); // only the full-screen Launchpad draws over it (~8 MB at 1080p)

@@ -392,6 +392,18 @@ impl MenuBar {
         }
     }
 
+    /// Explorer owns AppBar registrations; a new shell starts with an empty list.
+    pub fn shell_restarted(&mut self) {
+        self.appbar = false;
+        self.reserve();
+    }
+
+    pub fn ensure_reservation(&mut self) {
+        if !self.appbar {
+            self.reserve();
+        }
+    }
+
     fn unreserve(&mut self) {
         if self.appbar {
             let mut d = self.appbar_data();

@@ -483,7 +483,9 @@ impl Dock {
         let mut d = self.appbar_data();
         unsafe {
             if !self.appbar {
-                SHAppBarMessage(ABM_NEW, &mut d);
+                if SHAppBarMessage(ABM_NEW, &mut d) == 0 {
+                    return;
+                }
                 self.appbar = true;
             }
             d.rc.left = 0;
@@ -493,6 +495,20 @@ impl Dock {
             SHAppBarMessage(ABM_QUERYPOS, &mut d);
             d.rc.top = d.rc.bottom - t;
             SHAppBarMessage(ABM_SETPOS, &mut d);
+        }
+    }
+
+    /// Explorer owns AppBar registrations; a new shell starts with an empty list.
+    pub fn shell_restarted(&mut self) {
+        self.appbar = false;
+        if !self.cfg.auto_hide {
+            self.reserve();
+        }
+    }
+
+    pub fn ensure_reservation(&mut self) {
+        if !self.appbar && !self.cfg.auto_hide {
+            self.reserve();
         }
     }
 

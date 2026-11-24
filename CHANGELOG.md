@@ -6,6 +6,12 @@ Each release on GitHub uses its section from this file as its notes.
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-11-24
+
+### Fixed
+- Restore the dock and menu bar's reserved screen space after Windows Explorer restarts, so maximized windows
+  no longer slide behind them.
+
 ## [0.4.2] - 2026-11-22
 
 ### Changed
