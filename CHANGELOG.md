@@ -6,6 +6,15 @@ Each release on GitHub uses its section from this file as its notes.
 
 ## [Unreleased]
 
+### Fixed
+- Settings no longer runs off the bottom of short screens (1080p at 150% scale is 720 DIPs tall): the window stops above
+  the dock and its content scrolls with the mouse wheel or the touchpad, edges fading where there is more. (#7)
+- Moving the mouse over Settings no longer repaints the whole window on every move, only when the row under it
+  changes, so the dock stays smooth beside it on integrated graphics. (#7)
+- Quitting or restarting MacDock could leave its process spinning at 100% of a CPU core, impossible to end and
+  blocking every later start until Windows restarted. MacDock now ends its process itself once its clean-up is done,
+  and a new start only waits for a copy that is really still running.
+
 ## [0.4.4] - 2026-11-25
 
 ### Added

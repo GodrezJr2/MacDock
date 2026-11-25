@@ -42,7 +42,7 @@ mod widgets;
 use std::cell::RefCell;
 
 use windows::core::w;
-use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, HWND, RECT};
+use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::Threading::CreateMutexW;
@@ -680,17 +680,21 @@ fn main() {
     }));
     // one dock at a time; the C# build uses the same name, so the two never run together
     // after "Restart MacDock" the old process may still be shutting down: wait for it a few seconds
-    let tries = if std::env::args().any(|a| a == "--restart") { 50 } else { 1 };
+    let tries = if std::env::args().any(|a| a == "--restart") { 200 } else { 1 }; // up to 20 s
+    // Owning the mutex is what counts, not its name existing: a copy stuck on its way out (one thread caught in a
+    // driver, 25 Nov 2026) still holds the name open after the thread that owned it is gone, and that is
+    // WAIT_ABANDONED here, free to take, where testing the name alone kept every new copy out until a reboot.
     let mut _single = None;
     for i in 0..tries {
-        let m = unsafe { CreateMutexW(None, true, w!("MacDock.Singleton")) };
-        if unsafe { GetLastError() } != ERROR_ALREADY_EXISTS {
-            _single = Some(m);
-            break;
-        }
-        if let Ok(h) = m {
+        if let Ok(m) = unsafe { CreateMutexW(None, false, w!("MacDock.Singleton")) } {
+            use windows::Win32::Foundation::{WAIT_ABANDONED, WAIT_OBJECT_0};
+            let w = unsafe { windows::Win32::System::Threading::WaitForSingleObject(m, 0) };
+            if w == WAIT_OBJECT_0 || w == WAIT_ABANDONED {
+                _single = Some(Ok::<_, windows::core::Error>(m));
+                break;
+            }
             unsafe {
-                let _ = windows::Win32::Foundation::CloseHandle(h);
+                let _ = windows::Win32::Foundation::CloseHandle(m);
             }
         }
         if i + 1 < tries {
@@ -829,5 +833,21 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
         dropfiles::unregister(hwnd);
         taskbar::restore(false);
         let _ = DestroyWindow(hwnd);
+    }
+    // Our own clean-up is done (taskbar back, AppBars removed, config saved as it changed), so end here without the
+    // DLL detach a return from main runs. On 25 Nov 2026 a quit for an update left this thread spinning at 100% of
+    // a core in user mode after main returned, unkillable ("no running instance of the task") and holding the
+    // mutex, so neither the update nor any later start could run until a reboot. ExitProcess kills the other
+    // threads before DLL_PROCESS_DETACH, and a graphics driver's detach waiting on one of them is the usual way
+    // that happens. Release the mutex first so a restart waiting on it starts at once.
+    if let Some(Ok(m)) = _single {
+        unsafe {
+            let _ = windows::Win32::System::Threading::ReleaseMutex(m);
+            let _ = windows::Win32::Foundation::CloseHandle(m);
+        }
+    }
+    unsafe {
+        use windows::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+        let _ = TerminateProcess(GetCurrentProcess(), 0);
     }
 }
