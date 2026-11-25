@@ -38,6 +38,12 @@ pub struct Config {
     pub secondary_docks: bool,
     /// macOS-style widgets on the desktop (clock, date, battery, system).
     pub desktop_widgets: bool,
+    /// Desktop widgets items in 4 slots: "clock", "digital_clock", "date", "battery", "system", "none"
+    pub widget_items: Vec<String>,
+    /// Widget screen position: "top-right", "top-left", "bottom-right", "bottom-left", "custom"
+    pub widget_position: String,
+    /// Custom widget offset (X, Y) screen coordinates when dragged freely
+    pub widget_offset: Option<(i32, i32)>,
     /// macOS-style Alt+Tab: one icon per app in a frosted panel (replaces the Windows switcher).
     pub app_switcher: bool,
     /// How long the Genie minimize takes, in ms (restoring takes a little less).
@@ -126,6 +132,9 @@ impl Default for Config {
             show_recents: true,
             downloads_stack: true,
             desktop_widgets: true,
+            widget_items: vec!["clock".into(), "date".into(), "battery".into(), "system".into()],
+            widget_position: "top-right".into(),
+            widget_offset: None,
             app_switcher: true,
             battery_percent: false,
             secondary_docks: true,
@@ -211,6 +220,27 @@ impl Config {
         if let Some(x) = v.remove("Magnify").and_then(|x| x.as_f64()) {
             c.magnify = x.clamp(MAGNIFY.0, MAGNIFY.1);
         }
+        if let Some(Value::Array(items)) = v.remove("WidgetItems") {
+            let loaded: Vec<String> = items.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+            if !loaded.is_empty() {
+                c.widget_items = loaded;
+            }
+        }
+        while c.widget_items.len() < 4 {
+            c.widget_items.push("none".into());
+        }
+        if let Some(pos) = v.remove("WidgetPosition").and_then(|x| x.as_str().map(String::from)) {
+            if ["top-right", "top-left", "bottom-right", "bottom-left", "custom"].contains(&pos.as_str()) {
+                c.widget_position = pos;
+            }
+        }
+        if let Some(Value::Array(arr)) = v.remove("WidgetOffset") {
+            if arr.len() >= 2 {
+                if let (Some(x), Some(y)) = (arr[0].as_i64(), arr[1].as_i64()) {
+                    c.widget_offset = Some((x as i32, y as i32));
+                }
+            }
+        }
         c.extra = v;
         // docks set up before the Apps item existed get it once, after Finder (File Explorer) as on macOS;
         // removed later, it stays removed
@@ -252,6 +282,9 @@ impl Config {
             "BatteryPercent": self.battery_percent,
             "SecondaryDocks": self.secondary_docks,
             "DesktopWidgets": self.desktop_widgets,
+            "WidgetItems": self.widget_items,
+            "WidgetPosition": self.widget_position,
+            "WidgetOffset": self.widget_offset.map(|(x, y)| vec![x, y]),
             "AppSwitcher": self.app_switcher,
             "GenieDuration": self.genie_ms,
             "MagnifySpeed": self.magnify_speed,
@@ -268,9 +301,56 @@ impl Config {
     }
 
     pub fn save(&self) {
+        let mut val = self.to_value();
+        // Preserve any widget fields that may have been saved to disk by the widget window,
+        // so saving from the dock does not overwrite user's widget position/items with stale in-memory values.
+        if let Some(Value::Object(disk_map)) = std::fs::read_to_string(path())
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(s.trim_start_matches('\u{feff}')).ok())
+        {
+            if let Value::Object(ref mut m) = val {
+                for key in ["WidgetItems", "WidgetPosition", "WidgetOffset"] {
+                    if let Some(v) = disk_map.get(key) {
+                        m.insert(key.to_string(), v.clone());
+                    }
+                }
+            }
+        }
         let _ = std::fs::create_dir_all(dir());
-        if let Ok(s) = serde_json::to_string_pretty(&self.to_value()) {
+        if let Ok(s) = serde_json::to_string_pretty(&val) {
             let _ = std::fs::write(path(), s);
+        }
+    }
+
+    /// Save widget customization and position without touching or overwriting other dock settings.
+    pub fn save_widget_layout(items: &[String], position: &str, offset: Option<(i32, i32)>) {
+        let mut disk_val = std::fs::read_to_string(path())
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(s.trim_start_matches('\u{feff}')).ok())
+            .unwrap_or_else(|| Config::default().to_value());
+        if let Value::Object(ref mut m) = disk_val {
+            m.insert("WidgetItems".into(), json!(items));
+            m.insert("WidgetPosition".into(), json!(position));
+            m.insert("WidgetOffset".into(), json!(offset.map(|(x, y)| vec![x, y])));
+        }
+        let _ = std::fs::create_dir_all(dir());
+        if let Ok(s) = serde_json::to_string_pretty(&disk_val) {
+            let _ = std::fs::write(path(), s);
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn widget_item(&self, slot: usize) -> &str {
+        if slot < self.widget_items.len() {
+            &self.widget_items[slot]
+        } else {
+            match slot {
+                0 => "clock",
+                1 => "date",
+                2 => "battery",
+                3 => "system",
+                _ => "none",
+            }
         }
     }
 }
@@ -292,5 +372,22 @@ mod tests {
         assert_eq!(Config::from_value(Some(json!({ "SecondaryDocks": "false", "AppsInDock": true }))).unwrap().secondary_docks, true);
         let legacy_saved = legacy.to_value();
         assert_eq!(legacy_saved["SecondaryDocks"], Value::Bool(true));
+    }
+
+    #[test]
+    fn widgets_default_and_round_trip() {
+        let default = Config::default();
+        assert_eq!(default.widget_items, vec!["clock", "date", "battery", "system"]);
+        assert_eq!(default.widget_position, "top-right");
+        assert_eq!(default.widget_offset, None);
+
+        let parsed = Config::from_value(Some(json!({
+            "WidgetItems": ["digital_clock", "system", "none", "battery"],
+            "WidgetPosition": "bottom-left",
+            "WidgetOffset": [150, 300]
+        }))).unwrap();
+        assert_eq!(parsed.widget_items, vec!["digital_clock", "system", "none", "battery"]);
+        assert_eq!(parsed.widget_position, "bottom-left");
+        assert_eq!(parsed.widget_offset, Some((150, 300)));
     }
 }
