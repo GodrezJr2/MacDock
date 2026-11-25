@@ -6,6 +6,18 @@ Each release on GitHub uses its section from this file as its notes.
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-11-25
+
+### Added
+- Docks on secondary monitors: every extra display gets its own dock, with its own reserved screen space and drag-and-drop.
+  On by default; turn it off with **Docks on secondary monitors** in Settings (`SecondaryDocks` in config.json). (#5)
+
+### Fixed
+- Pinned shortcuts for different browser profiles (Brave, Chrome with `--profile-directory`) each show only their own
+  profile's windows and running indicator, instead of all of them landing on the first pin. (#4)
+- Alt+Tab no longer crashes MacDock when only one app is open and its name is long.
+- MacDock only talks to the real Explorer taskbar when reserving screen space, never to another window that borrows its name.
+
 ## [0.4.3] - 2026-11-24
 
 ### Fixed
