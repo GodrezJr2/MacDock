@@ -77,6 +77,28 @@ fn paint(rgb: (u8, u8, u8), a: u8) -> Paint<'static> {
     p
 }
 
+/// The selected app's name for a panel this wide: at most 39 characters, then cut with an ellipsis
+/// until it fits `room` px. A name wider than the panel has nowhere to go, so it is shortened instead.
+fn fit_name(name: &str, font: Font, room: f32) -> (String, Option<Pixmap>) {
+    let mut keep: Vec<char> = name.chars().take(39).collect();
+    let mut text: String =
+        if name.chars().count() > 39 { keep.iter().chain(Some(&'…')).collect() } else { keep.iter().collect() };
+    let mut t = gfx::text_ex(&text, font, (255, 255, 255));
+    while keep.len() > 1 && t.as_ref().is_some_and(|p| p.width() as f32 > room) {
+        keep.pop();
+        text = keep.iter().chain(Some(&'…')).collect();
+        t = gfx::text_ex(&text, font, (255, 255, 255));
+    }
+    (text, t)
+}
+
+/// The x of the selected app's name: centred under its icon, kept `12 * s` inside the panel edges.
+/// `.max(left)` on the right edge keeps a name as wide as the panel from clamping with min > max.
+fn name_x(centre: f32, tw: f32, px: f32, pw: f32, s: f32) -> f32 {
+    let left = px + 12.0 * s;
+    (centre - tw / 2.0).clamp(left, (px + pw - 12.0 * s - tw).max(left))
+}
+
 fn app_key(w: &AppWindow) -> String {
     match (&w.aumid, &w.exe) {
         (Some(a), _) => format!("aumid:{}", a.to_lowercase()),
@@ -229,13 +251,15 @@ impl Switcher {
                 pm.draw_pixmap(0, 0, ic.as_ref(), &paint, t, None);
             }
         }
-        // the selected app's name, centred under it, kept inside the panel
+        // the selected app's name, centred under it, kept inside the panel. With one app the panel is
+        // barely wider than its icon, so a long name is cut to fit first: the room to place it in must
+        // come out positive, and one that is not is a panic (`min > max`, 25 Nov 2026).
         if let Some(a) = self.apps.get(self.sel) {
-            let name: String = if a.name.chars().count() > 40 { a.name.chars().take(39).chain(Some('…')).collect() } else { a.name.clone() };
-            if let Some(t) = gfx::text_ex(&name, Font { face: gfx::UI, px: (14.0 * s).round() as i32, weight: 600 }, (255, 255, 255)) {
-                let (px, _, pw, _) = self.panel();
-                let tw = t.width() as f32;
-                let x = (sx + cell / 2.0 - tw / 2.0).clamp(px + 12.0 * s, px + pw - 12.0 * s - tw);
+            let (px, _, pw, _) = self.panel();
+            let font = Font { face: gfx::UI, px: (14.0 * s).round() as i32, weight: 600 };
+            let (_, t) = fit_name(&a.name, font, (pw - 24.0 * s).max(1.0));
+            if let Some(t) = t {
+                let x = name_x(sx + cell / 2.0, t.width() as f32, px, pw, s);
                 let y = sy + cell + (NAME_H * s - t.height() as f32) / 2.0;
                 pm.draw_pixmap(x.round() as i32, y.round() as i32, t.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
             }
@@ -563,4 +587,31 @@ fn hook_thread() {
         }
         let _ = UnhookWindowsHookEx(hook);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 125% display scale, the laptop screen: the panel inset is 40 DIPs and the name sits 12 DIPs in
+    const S: f32 = 1.25;
+    const PX: f32 = 40.0 * S;
+
+    #[test]
+    fn name_x_keeps_a_long_name_inside_a_one_app_panel() {
+        // the 25 Nov 2026 crash: one app comes to a 185 px panel, its name to 165 px, and
+        // `clamp(px + 12s, px + pw - 12s - tw)` was `clamp(65.0, 55.0)`
+        let pw = 185.0;
+        assert_eq!(name_x(PX + 16.0 * S + 72.5, 165.0, PX, pw, S), 65.0);
+        // a name wider than the whole panel lands on the left inset instead of panicking
+        assert_eq!(name_x(PX + 100.0, 300.0, PX, pw, S), 65.0);
+    }
+
+    #[test]
+    fn name_x_centres_a_short_name_and_stops_at_both_edges() {
+        let pw = 500.0;
+        assert_eq!(name_x(PX + 100.0, 100.0, PX, pw, S), PX + 50.0); // room to centre: untouched
+        assert_eq!(name_x(PX + 20.0, 100.0, PX, pw, S), 65.0); // hugging the left edge
+        assert_eq!(name_x(PX + 460.0, 100.0, PX, pw, S), 435.0); // hugging the right edge
+    }
 }
