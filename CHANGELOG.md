@@ -6,6 +6,8 @@ Each release on GitHub uses its section from this file as its notes.
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-11-25
+
 ### Fixed
 - Settings no longer runs off the bottom of short screens (1080p at 150% scale is 720 DIPs tall): the window stops above
   the dock and its content scrolls with the mouse wheel or the touchpad, edges fading where there is more. (#7)
