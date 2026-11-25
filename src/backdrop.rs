@@ -151,17 +151,20 @@ fn windows_under(region: &RECT) -> Vec<(isize, RECT)> {
 }
 
 impl Backdrop {
-    pub fn new(notify: HWND) -> Option<Backdrop> {
+    pub fn new(notify: HWND, primary: bool) -> Option<Backdrop> {
         unsafe {
             if !GraphicsCaptureSession::IsSupported().ok()? {
                 return None;
             }
             let (dev, ctx) = crate::gfx::d3d()?; // shared with the GPU genie, multithread-protected
             let rt: IDirect3DDevice = CreateDirect3D11DeviceFromDXGIDevice(&dev.cast::<IDXGIDevice>().ok()?).ok()?.cast().ok()?;
-            NOTIFY.set(notify.0 as isize);
-            // window opened, closed, moved, raised, minimized or restored
-            for (a, b) in [(0x0003u32, 0x0003u32), (0x0016, 0x0017), (0x8001, 0x8003), (0x800B, 0x800B)] {
-                SetWinEventHook(a, b, None, Some(on_event), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+            // The primary window broadcasts layout changes; capture frame notifications stay per dock.
+            if primary {
+                NOTIFY.set(notify.0 as isize);
+                // window opened, closed, moved, raised, minimized or restored
+                for (a, b) in [(0x0003u32, 0x0003u32), (0x0016, 0x0017), (0x8001, 0x8003), (0x800B, 0x800B)] {
+                    SetWinEventHook(a, b, None, Some(on_event), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+                }
             }
             Some(Backdrop {
                 dev, ctx, rt, caps: HashMap::new(), order: Vec::new(), notify: notify.0 as isize,

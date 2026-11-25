@@ -13,11 +13,10 @@ use tiny_skia::{
 };
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
-use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTOPRIMARY};
+use crate::display::Display;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
-use windows::Win32::UI::Shell::{SHAppBarMessage, SHEmptyRecycleBinW, ABE_BOTTOM, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, APPBARDATA};
+use windows::Win32::UI::Shell::{SHEmptyRecycleBinW, ABE_BOTTOM, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, APPBARDATA};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::badges;
@@ -82,7 +81,7 @@ pub enum DockEv {
 /// What the dock wants done by the app around it.
 pub enum Act {
     Quit,
-    Fullscreen(bool),
+    Fullscreen,
     /// minimize these windows (the genie animates `fg` into its icon first)
     Minimize { fg: HWND, wins: Vec<HWND> },
     /// restore these minimized windows (back to front) and bring `front` forward
@@ -92,7 +91,8 @@ pub enum Act {
 }
 
 thread_local! {
-    static TRACKING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TRACKING: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+    static PRIMARY_HWND: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
     static SHELLHOOK: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
@@ -101,62 +101,62 @@ fn fresh_used(layer: &Option<([u32; 6], Pixmap, i32, i32)>, key: &[u32; 6]) -> b
 }
 
 
-fn ev(e: DockEv) {
-    push(Ev::Dock(e));
+fn ev(h: HWND, e: DockEv) {
+    push(Ev::Dock(h, e));
 }
 
 unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     match msg {
         WM_MOUSEMOVE => {
-            if !TRACKING.get() {
+            if TRACKING.get() != h.0 as isize {
                 let mut t = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: h, dwHoverTime: 0 };
                 let _ = TrackMouseEvent(&mut t);
-                TRACKING.set(true);
+                TRACKING.set(h.0 as isize);
             }
-            ev(DockEv::Wake);
+            ev(h, DockEv::Wake);
         }
         WM_MOUSELEAVE => {
-            TRACKING.set(false);
-            ev(DockEv::Wake);
+            if TRACKING.get() == h.0 as isize { TRACKING.set(0); }
+            ev(h, DockEv::Wake);
         }
-        WM_LBUTTONDOWN => ev(DockEv::Down),
-        WM_LBUTTONUP => ev(DockEv::Up),
-        WM_RBUTTONUP => ev(DockEv::RightUp),
+        WM_LBUTTONDOWN => ev(h, DockEv::Down),
+        WM_LBUTTONUP => ev(h, DockEv::Up),
+        WM_RBUTTONUP => ev(h, DockEv::RightUp),
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
         WM_TIMER => match w.0 {
-            TIMER_REFRESH => ev(DockEv::Refresh),
-            TIMER_DISPLAY => ev(DockEv::DisplaySettled),
-            TIMER_EDGE => ev(DockEv::Edge),
-            TIMER_TOASTS => ev(DockEv::Toasts),
+            TIMER_REFRESH => ev(h, DockEv::Refresh),
+            TIMER_DISPLAY => ev(h, DockEv::DisplaySettled),
+            TIMER_EDGE => ev(h, DockEv::Edge),
+            TIMER_TOASTS => ev(h, DockEv::Toasts),
             TIMER_BACKDROP_RECHECK => {
                 let _ = KillTimer(h, TIMER_BACKDROP_RECHECK);
-                ev(DockEv::BackdropRecheck);
+                ev(h, DockEv::BackdropRecheck);
             }
             TIMER_BACKDROP => {
                 let _ = KillTimer(h, TIMER_BACKDROP);
-                ev(DockEv::BackdropTick);
+                ev(h, DockEv::BackdropTick);
             }
             _ => {}
         },
-        WM_DISPLAYCHANGE => ev(DockEv::DisplayChanged),
+        WM_DISPLAYCHANGE => ev(h, DockEv::DisplayChanged),
         // we size the window ourselves on every frame; don't let Windows apply its suggested rect
         WM_DPICHANGED => {
-            ev(DockEv::DisplayChanged);
+            ev(h, DockEv::DisplayChanged);
             return LRESULT(0);
         }
-        WM_SETTINGCHANGE if w.0 == SPI_SETDESKWALLPAPER => ev(DockEv::Wallpaper),
-        CB_APPBAR => ev(DockEv::AppBar(w.0, l.0)),
-        crate::backdrop::WM_BACKDROP => ev(DockEv::Backdrop(w.0 == 1)),
+        WM_SETTINGCHANGE if w.0 == SPI_SETDESKWALLPAPER => ev(h, DockEv::Wallpaper),
+        CB_APPBAR => ev(h, DockEv::AppBar(w.0, l.0)),
+        crate::backdrop::WM_BACKDROP => ev(h, DockEv::Backdrop(w.0 == 1)),
         // the session is ending and we may not get another chance: put the taskbar back now
         WM_ENDSESSION if w.0 != 0 => {
             taskbar::restore(false);
             crate::genie::restore_system_animation();
         }
-        WM_DESTROY => PostQuitMessage(0),
+        WM_DESTROY if PRIMARY_HWND.get() == h.0 as isize => PostQuitMessage(0),
         // HSHELL_FLASH: an app flashes its taskbar button (FlashWindowEx) asking for attention
         m if m != 0 && m == SHELLHOOK.get() => {
             if w.0 & 0x7FFF == HSHELL_FLASH & 0x7FFF {
-                ev(DockEv::Flash(l.0));
+                ev(h, DockEv::Flash(l.0));
             }
         }
         _ => {}
@@ -191,6 +191,7 @@ struct Item {
     name: String,
     launch: Option<String>,
     aumid: Option<String>,
+    profile_directory: Option<String>,
     exe: Option<String>,
     trash: bool,
     stack: bool,       // the Downloads stack
@@ -218,7 +219,7 @@ struct Item {
 impl Item {
     fn new(key: String, name: String, icon: Option<Rc<Pixmap>>, presence: f64) -> Item {
         Item {
-            key, name, launch: None, aumid: None, exe: None, trash: false, stack: false, sep_before: false, icon, wins: Vec::new(),
+            key, name, launch: None, aumid: None, profile_directory: None, exe: None, trash: false, stack: false, sep_before: false, icon, wins: Vec::new(),
             scale: 1.0, presence, leaving: false, x: 0.0, size: 0.0, bounce_t: 0.0,
             launching: false, launch_started: Instant::now(), wins_at_launch: 0,
             attention: false, attention_bounce: false, attention_started: Instant::now(),
@@ -234,17 +235,28 @@ impl Item {
         self.key.starts_with("pin:")
     }
 
-    fn owns(&self, w: &AppWindow) -> bool {
-        if let (Some(a), Some(b)) = (&self.aumid, &w.aumid) {
-            if eq_ic(a, b) {
-                return true;
+    fn match_score(&self, w: &AppWindow) -> Option<u8> {
+        let same_exe = self.exe.as_deref().zip(w.exe.as_deref())
+            .is_some_and(|(a, b)| eq_ic(a, b) || launcher_of(a, b));
+        if let Some(profile) = &self.profile_directory {
+            if !same_exe { return None; }
+            if let Some(actual) = &w.profile_directory {
+                return eq_ic(profile, actual).then_some(4);
+            }
+            // Chromium also uses normalized profile directory names in window AppIDs.
+            if let Some((_, suffix)) = w.window_aumid.as_deref().and_then(|s| s.rsplit_once('.')) {
+                if eq_ic(&profile.replace(' ', ""), suffix) { return Some(4); }
             }
         }
-        if let (Some(a), Some(b)) = (&self.exe, &w.exe) {
-            return eq_ic(a, b) || launcher_of(a, b);
+        if let Some(pin) = &self.aumid {
+            if w.window_aumid.as_deref().is_some_and(|id| eq_ic(pin, id)) { return Some(3); }
+            if w.window_aumid.is_none() && w.aumid.as_deref().is_some_and(|id| eq_ic(pin, id)) { return Some(2); }
         }
-        false
+        if self.profile_directory.is_some() && (w.window_aumid.is_some() || w.profile_directory.is_some()) { return None; }
+        if same_exe { return Some(1); }
+        None
     }
+
 }
 
 /// The Apps icon, drawn: nine coloured squares on a light tile, the way macOS 26 draws it. A full square at
@@ -289,6 +301,25 @@ fn apps_icon() -> Option<Pixmap> {
 
 /// Squirrel apps are pinned through …\App\Update.exe while their windows belong to …\App\app-1.2.3\App.exe:
 /// the launcher's folder owns everything below it (same rule as DockItem.LauncherOf).
+fn best_pinned_match(items: &[Item], w: &AppWindow) -> Option<usize> {
+    let (mut high, mut owner) = (0, None);
+    for (i, it) in items.iter().enumerate().filter(|(_, it)| it.pinned()) {
+        if let Some(score) = it.match_score(w) {
+            if score > high { high = score; owner = Some(i); }
+            else if score == high { owner = None; }
+        }
+    }
+    owner
+}
+
+fn running_identity(w: &AppWindow) -> String {
+    if let Some(profile) = &w.profile_directory {
+        let app = w.aumid.as_deref().or(w.exe.as_deref()).unwrap_or("unknown");
+        return format!("{}#profile:{}", app, profile).to_lowercase();
+    }
+    w.aumid.clone().or(w.exe.clone()).unwrap_or_else(|| w.pid.to_string()).to_lowercase()
+}
+
 fn launcher_of(pinned: &str, running: &str) -> bool {
     let p = std::path::Path::new(pinned);
     let (Some(dir), Some(file)) = (p.parent(), p.file_name()) else { return false };
@@ -308,13 +339,7 @@ pub fn approach(v: f64, target: f64, k: f64) -> f64 {
 
 /// Primary screen size in DIPs and its scale. Read fresh each time: monitors come and go.
 pub fn primary_screen() -> (f64, f64, f64) {
-    unsafe {
-        let (pw, ph) = (GetSystemMetrics(SM_CXSCREEN) as f64, GetSystemMetrics(SM_CYSCREEN) as f64);
-        let mon = MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY);
-        let (mut dx, mut dy) = (96u32, 96u32);
-        let dpi = if GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut dx, &mut dy).is_ok() && dx > 0 { dx as f64 / 96.0 } else { 1.0 };
-        (pw / dpi, ph / dpi, dpi)
-    }
+    Display::primary().dimensions()
 }
 
 fn now_secs(t: Instant, base: Instant) -> f64 {
@@ -326,6 +351,8 @@ fn now_secs(t: Instant, base: Instant) -> f64 {
 pub struct Dock {
     pub hwnd: HWND,
     pub cfg: Config,
+    pub display: Display,
+    pub config_dirty: bool,
     shell: Shell,
     pub dpi: f64,
     screen_w: f64,
@@ -366,6 +393,7 @@ pub struct Dock {
     sig: String,
     refreshes: u32,
     appbar: bool,
+    reserved: Option<windows::Win32::Foundation::RECT>,
     // auto-hide
     hide: f64,
     peek_until: Instant,
@@ -397,24 +425,25 @@ impl Dock {
         self.b() + PAD * 2.0
     }
     fn win_x(&self) -> f64 {
-        (self.screen_w - self.win_w) / 2.0
+        self.display.rect.left as f64 / self.dpi + (self.screen_w - self.win_w) / 2.0
     }
     fn win_y(&self) -> f64 {
-        self.screen_h - self.win_h
+        self.reserved.unwrap_or(self.display.rect).bottom as f64 / self.dpi - self.win_h
     }
     fn icon_px(&self) -> u32 {
         (self.cfg.icon_size * self.cfg.magnify * self.dpi).ceil() as u32
     }
 
-    pub fn new(hwnd: HWND, cfg: Config) -> Dock {
-        let (screen_w, screen_h, dpi) = primary_screen();
+    pub fn new(hwnd: HWND, cfg: Config, display: Display) -> Dock {
+        if display.primary { PRIMARY_HWND.set(hwnd.0 as isize); }
+        let (screen_w, screen_h, dpi) = display.dimensions();
         let now = Instant::now();
         Dock {
-            hwnd, cfg, shell: Shell::default(), dpi, screen_w, screen_h, fit_b: f64::MAX,
-            win_w: 1.0, win_h: 1.0, items: Vec::new(), icons: HashMap::new(), surface: None, drawn: Vec::new(), frost: None, glass: None, light_glass: false, backdrop: crate::backdrop::Backdrop::new(hwnd), backdrop_gen: 0, bd_due: (false, false), bd_last: 0.0, bd_timer: false, behind: None, glass_layer: None, over: None, wall_strip: None,
+            hwnd, cfg, display, config_dirty: false, shell: Shell::default(), dpi, screen_w, screen_h, fit_b: f64::MAX,
+            win_w: 1.0, win_h: 1.0, items: Vec::new(), icons: HashMap::new(), surface: None, drawn: Vec::new(), frost: None, glass: None, light_glass: false, backdrop: crate::backdrop::Backdrop::new(hwnd, display.primary), backdrop_gen: 0, bd_due: (false, false), bd_last: 0.0, bd_timer: false, behind: None, glass_layer: None, over: None, wall_strip: None,
             label: None, label_alpha: 0.0, menu_up: false, drag_files: false, label_at: (0.0, 0.0, 0.0, 0.0), hovered: None, plate_left: 0.0,
             plate_w: 0.0, seps: Vec::new(), running_now: HashMap::new(), clock: now, last_t: 0.0, awake: false, hidden: false,
-            sig: String::new(), refreshes: 0, appbar: false,
+            sig: String::new(), refreshes: 0, appbar: false, reserved: None,
             hide: 0.0, peek_until: now, last_near: now,
             pressed: None, press_pt: (0.0, 0.0), dragging: false, drag_out: false, drag_x: 0.0,
             last_app: unsafe { GetForegroundWindow() },
@@ -479,35 +508,36 @@ impl Dock {
     /// Reserve the strip at the bottom so maximized windows stop above the dock.
     fn reserve(&mut self) {
         let t = ((self.plate_h() + BOTTOM_GAP * 2.0) * self.dpi).round() as i32;
-        let (sw, sh) = ((self.screen_w * self.dpi).round() as i32, (self.screen_h * self.dpi).round() as i32);
         let mut d = self.appbar_data();
         unsafe {
             if !self.appbar {
-                if SHAppBarMessage(ABM_NEW, &mut d) == 0 {
+                if crate::taskbar::appbar_message(ABM_NEW, &mut d) == 0 {
                     return;
                 }
                 self.appbar = true;
             }
-            d.rc.left = 0;
-            d.rc.right = sw;
-            d.rc.top = sh - t;
-            d.rc.bottom = sh;
-            SHAppBarMessage(ABM_QUERYPOS, &mut d);
+            d.rc = self.display.bottom_strip(t);
+            crate::taskbar::appbar_message(ABM_QUERYPOS, &mut d);
             d.rc.top = d.rc.bottom - t;
-            SHAppBarMessage(ABM_SETPOS, &mut d);
+            let requested = d.rc;
+            if self.reserved != Some(requested) && crate::taskbar::appbar_message(ABM_SETPOS, &mut d) != 0 {
+                self.reserved = Some(d.rc);
+                self.wake();
+            }
         }
     }
 
     /// Explorer owns AppBar registrations; a new shell starts with an empty list.
     pub fn shell_restarted(&mut self) {
         self.appbar = false;
+        self.reserved = None;
         if !self.cfg.auto_hide {
             self.reserve();
         }
     }
 
     pub fn ensure_reservation(&mut self) {
-        if !self.appbar && !self.cfg.auto_hide {
+        if self.reserved.is_none() && !self.cfg.auto_hide {
             self.reserve();
         }
     }
@@ -516,9 +546,10 @@ impl Dock {
         if self.appbar {
             let mut d = self.appbar_data();
             unsafe {
-                SHAppBarMessage(ABM_REMOVE, &mut d);
+                crate::taskbar::appbar_message(ABM_REMOVE, &mut d);
             }
             self.appbar = false;
+            self.reserved = None;
         }
     }
 
@@ -532,8 +563,25 @@ impl Dock {
     /// dock's next save doesn't write the old value back.
     pub fn update_config(&mut self, f: impl FnOnce(&mut Config)) -> &Config {
         f(&mut self.cfg);
-        self.cfg.save();
+        self.persist();
         &self.cfg
+    }
+
+    fn persist(&mut self) {
+        self.cfg.save();
+        self.config_dirty = true;
+    }
+
+    pub fn mirror_config(&mut self, cfg: &Config, relayout: bool) {
+        let old = std::mem::replace(&mut self.cfg, cfg.clone());
+        self.settings_changed(&old, relayout);
+        if old.pinned != cfg.pinned || old.recent != cfg.recent || old.icon_overrides != cfg.icon_overrides {
+            self.refresh(false);
+            for i in 0..self.items.len() {
+                let key = &self.items[i].key;
+                if old.icon_overrides.get(key) != cfg.icon_overrides.get(key) { self.reload_icon(i); }
+            }
+        }
     }
 
     pub fn config(&self) -> &Config {
@@ -545,7 +593,7 @@ impl Dock {
     pub fn settings_changed(&mut self, old: &Config, relayout: bool) {
         if old.auto_hide != self.cfg.auto_hide {
             let on = self.cfg.auto_hide;
-            self.set_auto_hide(on);
+            self.apply_auto_hide(on);
         }
         if old.badges != self.cfg.badges {
             unsafe {
@@ -579,7 +627,11 @@ impl Dock {
 
     pub fn set_auto_hide(&mut self, on: bool) {
         self.cfg.auto_hide = on;
-        self.cfg.save();
+        self.persist();
+        self.apply_auto_hide(on);
+    }
+
+    fn apply_auto_hide(&mut self, on: bool) {
         unsafe {
             if on {
                 self.unreserve();
@@ -592,13 +644,13 @@ impl Dock {
         self.wake();
     }
 
-    /// The pointer is on the bottom edge of the primary screen (where the hidden dock waits).
+    /// The pointer is on the bottom edge of this screen (where the hidden dock waits).
     fn at_bottom_edge(&self) -> bool {
         let mut p = POINT::default();
         unsafe {
             let _ = GetCursorPos(&mut p);
         }
-        p.y as f64 >= (self.screen_h * self.dpi).round() - 2.0 && p.x >= 0 && (p.x as f64) < (self.screen_w * self.dpi).round()
+        self.display.at_bottom(p)
     }
 
     /// Show the dock for a moment even when hidden: a genie aiming at it, an app asking for attention.
@@ -619,9 +671,9 @@ impl Dock {
 
     // -------------------------------------------------------------- display changes
 
-    fn apply_display(&mut self) {
+    pub fn apply_display(&mut self) {
         self.drawn.clear();
-        (self.screen_w, self.screen_h, self.dpi) = primary_screen();
+        (self.screen_w, self.screen_h, self.dpi) = self.display.dimensions();
         self.fit_b = f64::MAX;
         self.fit_icons();
         if !self.cfg.auto_hide {
@@ -674,6 +726,7 @@ impl Dock {
     }
 
     pub fn set_fullscreen_hidden(&mut self, on: bool) {
+        if self.hidden == on { return; }
         self.hidden = on;
         self.drawn.clear();
         unsafe {
@@ -741,6 +794,9 @@ impl Dock {
         } else if spec.to_lowercase().ends_with(".lnk") {
             it.aumid = shell::item_aumid(spec);
             it.exe = shell::link_target(spec);
+            let (shortcut_aumid, profile) = shell::shortcut_identity(spec);
+            it.aumid = shortcut_aumid.or(it.aumid);
+            it.profile_directory = profile;
         } else {
             it.exe = Some(spec.to_string());
         }
@@ -799,11 +855,10 @@ impl Dock {
         // recent apps: an unpinned app that was running and is gone joins the front of the list
         let mut cur: HashMap<String, serde_json::Value> = HashMap::new();
         for w in &wins {
-            if next.iter().any(|i| i.owns(w)) {
+            if best_pinned_match(&next, w).is_some() {
                 continue;
             }
-            let id = w.aumid.clone().or(w.exe.clone()).unwrap_or_else(|| w.pid.to_string());
-            let key = format!("run:{}", id.to_lowercase());
+            let key = format!("run:{}", running_identity(w));
             if cur.contains_key(&key) {
                 continue;
             }
@@ -822,16 +877,18 @@ impl Dock {
         }
         let quit: Vec<serde_json::Value> = self.running_now.drain().map(|(_, r)| r).filter(|r| r["Launch"].is_string()).collect();
         self.running_now = cur;
-        let pinned_l: Vec<String> = self.cfg.pinned.iter().map(|p| p.to_lowercase()).collect();
-        let before = self.cfg.recent.clone();
-        for r in quit {
-            self.cfg.recent.retain(|x| x["Key"] != r["Key"]);
-            self.cfg.recent.insert(0, r);
-        }
-        self.cfg.recent.retain(|x| !x["Launch"].as_str().is_some_and(|l| pinned_l.contains(&l.to_lowercase())));
-        self.cfg.recent.truncate(3);
-        if self.cfg.recent != before {
-            self.cfg.save();
+        if self.display.primary {
+            let pinned_l: Vec<String> = self.cfg.pinned.iter().map(|p| p.to_lowercase()).collect();
+            let before = self.cfg.recent.clone();
+            for r in quit {
+                self.cfg.recent.retain(|x| x["Key"] != r["Key"]);
+                self.cfg.recent.insert(0, r);
+            }
+            self.cfg.recent.retain(|x| !x["Launch"].as_str().is_some_and(|l| pinned_l.contains(&l.to_lowercase())));
+            self.cfg.recent.truncate(3);
+            if self.cfg.recent != before {
+                self.persist();
+            }
         }
         if self.cfg.show_recents {
             for r in self.cfg.recent.clone() {
@@ -846,12 +903,15 @@ impl Dock {
         }
 
         for w in wins {
-            if let Some(owner) = next.iter_mut().find(|i| i.owns(&w)) {
-                owner.wins.push(w);
+            if let Some(owner) = best_pinned_match(&next, &w) {
+                next[owner].wins.push(w);
                 continue;
             }
-            let id = w.aumid.clone().or(w.exe.clone()).unwrap_or_else(|| w.pid.to_string());
-            let key = format!("run:{}", id.to_lowercase());
+            let key = format!("run:{}", running_identity(&w));
+            if let Some(existing) = next.iter_mut().find(|i| i.key == key) {
+                existing.wins.push(w);
+                continue;
+            }
             let mut it = old.remove(&key).unwrap_or_else(|| self.running_item(key, &w));
             it.wins.clear();
             it.wins.push(w);
@@ -1033,10 +1093,7 @@ impl Dock {
         if h.0.is_null() || h == unsafe { GetForegroundWindow() } {
             return;
         }
-        let pid = shell::window_pid(h);
-        let (exe, aumid) = self.shell.process_info(pid);
-        let probe = AppWindow { hwnd: h, pid, exe, aumid, title: String::new() };
-        let Some(it) = self.items.iter_mut().find(|i| !i.leaving && !i.trash && !i.stack && (i.wins.iter().any(|x| x.hwnd == h) || i.owns(&probe))) else { return };
+        let Some(it) = self.items.iter_mut().find(|i| !i.leaving && i.wins.iter().any(|w| w.hwnd == h)) else { return };
         if it.attention {
             return;
         }
@@ -1125,7 +1182,7 @@ impl Dock {
                 self.unpin(idx);
             } else {
                 self.cfg.pinned = self.items.iter().filter(|i| i.pinned() && !i.leaving).filter_map(|i| i.launch.clone()).collect();
-                self.cfg.save();
+                self.persist();
             }
             return None;
         }
@@ -1188,7 +1245,7 @@ impl Dock {
     fn unpin(&mut self, i: usize) {
         let Some(l) = self.items[i].launch.clone() else { return };
         self.cfg.pinned.retain(|p| !eq_ic(p, &l));
-        self.cfg.save();
+        self.persist();
         self.items[i].leaving = true;
         self.refresh(false);
     }
@@ -1199,7 +1256,7 @@ impl Dock {
             return;
         }
         self.cfg.pinned.push(spec.to_string());
-        self.cfg.save();
+        self.persist();
         self.refresh(true);
         self.wake();
     }
@@ -1207,7 +1264,7 @@ impl Dock {
     fn keep(&mut self, i: usize) {
         let Some(l) = self.items[i].launch.clone() else { return };
         self.cfg.pinned.push(l);
-        self.cfg.save();
+        self.persist();
         // it reappears as a pinned item right away, in the same spot of the running list's order
         self.items.remove(i);
         self.refresh(true);
@@ -1355,36 +1412,36 @@ impl Dock {
                 if let Some(path) = shell::pick_icon_file(self.hwnd) {
                     let key = self.items[i].key.clone();
                     self.cfg.icon_overrides.insert(key, path.into());
-                    self.cfg.save();
+                    self.persist();
                     self.reload_icon(i);
                 }
             }
             Do::ToggleRecents => {
                 self.cfg.show_recents = !self.cfg.show_recents;
-                self.cfg.save();
+                self.persist();
                 self.refresh(false);
             }
             Do::ToggleStack => {
                 self.cfg.downloads_stack = !self.cfg.downloads_stack;
-                self.cfg.save();
+                self.persist();
                 self.refresh(false);
             }
             Do::HideStack => {
                 self.cfg.downloads_stack = false;
-                self.cfg.save();
+                self.persist();
                 self.items[i].leaving = true;
                 self.refresh(false);
             }
             Do::ForgetRecent => {
                 let key = self.items[i].key.clone();
                 self.cfg.recent.retain(|r| r["Key"] != key.as_str());
-                self.cfg.save();
+                self.persist();
                 self.refresh(false);
             }
             Do::ResetIcon => {
                 let key = self.items[i].key.clone();
                 self.cfg.icon_overrides.remove(&key);
-                self.cfg.save();
+                self.persist();
                 self.reload_icon(i);
             }
         }
@@ -1647,7 +1704,7 @@ impl Dock {
                     )
                 })
                 .collect();
-            crate::dropfiles::set_zones(zones);
+            crate::dropfiles::set_zones(self.hwnd, zones);
         }
 
         let want = if self.hovered.is_some() && !self.menu_up { 1.0 } else { 0.0 };
@@ -1786,7 +1843,7 @@ impl Dock {
                     let (sx, sy) = ((self.screen_w * dpi) as f32 / g.width() as f32, (self.screen_h * dpi) as f32 / g.height() as f32);
                     strip.draw_pixmap(
                         0, 0, g.as_ref(), &PixmapPaint { quality: FilterQuality::Bilinear, ..Default::default() },
-                        Transform::from_scale(sx, sy).post_translate(-region.left as f32, -region.top as f32), None,
+                        Transform::from_scale(sx, sy).post_translate((self.display.rect.left - region.left) as f32, (self.display.rect.top - region.top) as f32), None,
                     );
                     self.wall_strip = Some((region, glass_id, strip));
                 }
@@ -1833,7 +1890,7 @@ impl Dock {
                 paint.anti_alias = true;
                 paint.shader = Pattern::new(
                     fr.as_ref(), SpreadMode::Pad, FilterQuality::Bilinear, 1.0,
-                    Transform::from_scale(fx, fy).post_translate(-(win_x as f32), -((win_y + slide) as f32)),
+                    Transform::from_scale(fx, fy).post_translate((self.display.rect.left as f64 / dpi - win_x) as f32, (self.display.rect.top as f64 / dpi - win_y - slide) as f32),
                 );
                 pm.fill_path(plate, &paint, FillRule::Winding, base, None);
             }
@@ -2018,21 +2075,21 @@ impl Dock {
             DockEv::Up => return self.on_up(),
             DockEv::RightUp => return self.context_menu(),
             DockEv::Refresh => {
-                if self.cfg.hide_taskbar {
+                if self.display.primary && self.cfg.hide_taskbar {
                     taskbar::keep_hidden();
                 }
                 if !self.hidden {
                     crate::ensure_no_activate(self.hwnd);
                     self.refresh(false);
                     // safety net for window changes no event told us about
-                    ev(DockEv::BackdropRecheck);
+                    ev(self.hwnd, DockEv::BackdropRecheck);
                 }
             }
             DockEv::Toasts => self.poll_toasts(),
             DockEv::DragFiles(on) => {
                 self.drag_files = on;
                 if !on {
-                    crate::dropfiles::set_zones(Vec::new());
+                    crate::dropfiles::set_zones(self.hwnd, Vec::new());
                 }
                 self.wake();
             }
@@ -2086,7 +2143,7 @@ impl Dock {
                     self.reserve();
                 }
             }
-            DockEv::AppBar(ABN_FULLSCREENAPP, on) => return Some(Act::Fullscreen(on != 0)),
+            DockEv::AppBar(ABN_FULLSCREENAPP, _) => return Some(Act::Fullscreen),
             DockEv::AppBar(..) => {}
         }
         None
@@ -2106,6 +2163,104 @@ fn downloads_dir() -> Option<String> {
         }
         let s = format!("{}\\Downloads", std::env::var("USERPROFILE").ok()?);
         std::path::Path::new(&s).is_dir().then_some(s)
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires an interactive Windows desktop with an extended display"]
+    fn secondary_window_lands_on_its_monitor() {
+        use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONULL};
+        use windows::Win32::UI::HiDpi::{SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+        unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2); }
+        let screens = crate::display::secondary();
+        assert!(!screens.is_empty(), "connect a second monitor in Extend mode");
+        for screen in screens {
+            let hwnd = create_window();
+            let mut cfg = Config::default();
+            cfg.auto_hide = true;
+            let mut dock = Dock::new(hwnd, cfg, screen);
+            // Render while hidden (never show, register an AppBar or change user settings).
+            dock.fit_window();
+            dock.frame();
+            let mut rect = windows::Win32::Foundation::RECT::default();
+            unsafe { GetWindowRect(hwnd, &mut rect).unwrap(); }
+            let actual = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL) };
+            assert_eq!(actual, screen.id);
+            assert_eq!(rect.bottom, screen.rect.bottom);
+            assert!(((rect.left + rect.right) - (screen.rect.left + screen.rect.right)).abs() <= 2);
+            unsafe { DestroyWindow(hwnd).unwrap(); }
+        }
+    }
+}
+
+#[cfg(test)]
+mod item_identity_tests {
+    use super::{best_pinned_match, launcher_of, Item};
+    use crate::shell::AppWindow;
+    use windows::Win32::Foundation::HWND;
+
+    fn item(key: &str, aumid: Option<&str>, exe: Option<&str>) -> Item {
+        let mut item = Item::new(key.to_string(), key.to_string(), None, 1.0);
+        item.aumid = aumid.map(str::to_string);
+        item.exe = exe.map(str::to_string);
+        if key.ends_with("brave-default") { item.profile_directory = Some("Default".into()); }
+        if key.ends_with("brave-work") { item.profile_directory = Some("Profile 1".into()); }
+        item
+    }
+
+    fn window(aumid: Option<&str>, exe: Option<&str>) -> AppWindow {
+        AppWindow {
+            hwnd: HWND::default(), pid: 1,
+            exe: exe.map(str::to_string), aumid: aumid.map(str::to_string), window_aumid: aumid.map(str::to_string), profile_directory: None, title: String::new(),
+        }
+    }
+
+    #[test]
+    fn window_aumid_beats_shared_process_executable() {
+        let items = [
+            item("pin:brave-default", Some("Brave.Default"), Some(r"C:\\Brave\\brave.exe")),
+            item("pin:brave-work", Some("Brave.Work"), Some(r"C:\\Brave\\brave.exe")),
+        ];
+        let mut work = window(Some("Brave.Default"), Some(r"C:\\Brave\\brave.exe"));
+        work.window_aumid = Some("Brave.Default".into());
+        work.profile_directory = Some("Profile 1".into());
+        assert_eq!(best_pinned_match(&items, &work), Some(1));
+        let mut default = window(Some("Brave.Default"), Some(r"C:\\Brave\\brave.exe"));
+        default.profile_directory = Some("Default".into());
+        assert_eq!(best_pinned_match(&items, &default), Some(0));
+    }
+
+    #[test]
+    fn shared_executable_fallback_is_unpinned_when_identity_is_ambiguous() {
+        let items = [
+            item("pin:brave-default", Some("Brave.Default"), Some(r"C:\\Brave\\brave.exe")),
+            item("pin:brave-work", Some("Brave.Work"), Some(r"C:\\Brave\\brave.exe")),
+        ];
+        assert_eq!(best_pinned_match(&items, &window(None, Some(r"C:\\Brave\\brave.exe"))), None);
+    }
+
+    #[test]
+    fn profile_match_requires_same_executable_and_unambiguous_profile() {
+        let mut different_app = window(None, Some(r"C:\\Other\\app.exe"));
+        different_app.profile_directory = Some("Profile 1".into());
+        let items = [
+            item("pin:brave-default", None, Some(r"C:\\Brave\\brave.exe")),
+            item("pin:brave-work", None, Some(r"C:\\Brave\\brave.exe")),
+        ];
+        assert_eq!(best_pinned_match(&items, &different_app), None);
+        let mut work = window(None, Some(r"C:\\Brave\\brave.exe"));
+        work.profile_directory = Some("Profile 1".into());
+        assert_eq!(best_pinned_match(&items, &work), Some(1));
+    }
+
+    #[test]
+    fn launcher_fallback_still_matches_squirrel_apps() {
+        assert!(launcher_of(r"C:\\App\\Update.exe", r"C:\\App\\app-1.2.3\\App.exe"));
+        assert!(!launcher_of(r"C:\\App\\Update.exe", r"C:\\Other\\App.exe"));
     }
 }
 

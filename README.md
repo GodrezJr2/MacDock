@@ -204,6 +204,7 @@ Settings live in `%APPDATA%\MacDock\config.json`, created on first run.
 | `HideTaskbar` | `true` | Hide the Windows taskbar while MacDock runs |
 | `DesktopWidgets` | `true` | Clock, date, battery and system widgets on the desktop |
 | `DownloadsStack` | `true` | Downloads folder item next to the Trash |
+| `SecondaryDocks` | `true` | Show docks on secondary monitors (also toggleable in Settings) |
 | `DownloadsFolder` | your Downloads | Folder the stack lists, if it is not the Windows Downloads folder |
 | `ShowRecents` | `true` | The last 3 apps you quit, after a divider |
 | `AppSwitcher` | `true` | macOS-style Alt+Tab (off = the Windows switcher) |
@@ -259,7 +260,7 @@ are read off the UI thread, and a sleeping NVIDIA GPU is left asleep instead of 
 
 - Built and tested on one machine: a Windows 11 laptop at 2560×1600, 125% scale, with an NVIDIA GPU.
   Other setups may show rough edges; issues are welcome.
-- Dock and menu bar live on the primary monitor; other monitors have no taskbar while MacDock runs.
+- The menu bar lives on the primary monitor. Docks appear on secondary monitors when **Docks on secondary monitors** is enabled in Settings; other monitors have no taskbar while MacDock runs.
 - While the `^` tray flyout is open, a WinUI 3 app started at that moment can fail to start, because the
   tray host registers its own `Shell_TrayWnd`. The host only runs while that flyout is open.
 - GPU power needs an NVIDIA GPU; without one the breakdown shows CPU and the rest.

@@ -34,6 +34,8 @@ pub struct Config {
     pub downloads_stack: bool,
     /// The battery percentage next to the battery icon (off like macOS; still shown at 20% or less).
     pub battery_percent: bool,
+    /// Show a dock on secondary monitors, in addition to the primary monitor.
+    pub secondary_docks: bool,
     /// macOS-style widgets on the desktop (clock, date, battery, system).
     pub desktop_widgets: bool,
     /// macOS-style Alt+Tab: one icon per app in a frosted panel (replaces the Windows switcher).
@@ -126,6 +128,7 @@ impl Default for Config {
             desktop_widgets: true,
             app_switcher: true,
             battery_percent: false,
+            secondary_docks: true,
             genie_ms: 560.0,
             magnify_speed: 1.0,
             hide_delay_ms: 350.0,
@@ -140,12 +143,18 @@ impl Default for Config {
 
 impl Config {
     pub fn load() -> Config {
-        let mut c = Config::default();
-        let Some(Value::Object(mut v)) = std::fs::read_to_string(path()).ok().and_then(|s| serde_json::from_str::<Value>(s.trim_start_matches('\u{feff}')).ok()) else {
+        let Some(c) = Self::from_value(std::fs::read_to_string(path()).ok().and_then(|s| serde_json::from_str::<Value>(s.trim_start_matches('\u{feff}')).ok())) else {
+            let mut c = Config::default();
             c.extra.insert("AppsInDock".into(), Value::Bool(true));
             c.save();
             return c;
         };
+        c
+    }
+
+    fn from_value(value: Option<Value>) -> Option<Config> {
+        let mut c = Config::default();
+        let Some(Value::Object(mut v)) = value else { return None };
         let mut b = |k: &str, d: &mut bool| {
             if let Some(x) = v.remove(k).and_then(|x| x.as_bool()) {
                 *d = x;
@@ -163,6 +172,7 @@ impl Config {
         b("ShowRecents", &mut c.show_recents);
         b("DownloadsStack", &mut c.downloads_stack);
         b("BatteryPercent", &mut c.battery_percent);
+        b("SecondaryDocks", &mut c.secondary_docks);
         b("DesktopWidgets", &mut c.desktop_widgets);
         b("AppSwitcher", &mut c.app_switcher);
         b("ReduceMotion", &mut c.reduce_motion);
@@ -211,7 +221,7 @@ impl Config {
             c.extra.insert("AppsInDock".into(), Value::Bool(true));
             c.save();
         }
-        c
+        Some(c)
     }
 
     /// A string setting this build has no field for (read-only, kept as it is on save).
@@ -219,7 +229,7 @@ impl Config {
         self.extra.get(key).and_then(|v| v.as_str()).map(String::from)
     }
 
-    pub fn save(&self) {
+    fn to_value(&self) -> Value {
         let mut m = self.extra.clone();
         let fields = json!({
             "Pinned": self.pinned,
@@ -240,6 +250,7 @@ impl Config {
             "ShowRecents": self.show_recents,
             "DownloadsStack": self.downloads_stack,
             "BatteryPercent": self.battery_percent,
+            "SecondaryDocks": self.secondary_docks,
             "DesktopWidgets": self.desktop_widgets,
             "AppSwitcher": self.app_switcher,
             "GenieDuration": self.genie_ms,
@@ -253,9 +264,33 @@ impl Config {
         if let Value::Object(f) = fields {
             m.extend(f);
         }
+        Value::Object(m)
+    }
+
+    pub fn save(&self) {
         let _ = std::fs::create_dir_all(dir());
-        if let Ok(s) = serde_json::to_string_pretty(&Value::Object(m)) {
+        if let Ok(s) = serde_json::to_string_pretty(&self.to_value()) {
             let _ = std::fs::write(path(), s);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secondary_docks_default_true_and_round_trip() {
+        let default = Config::default();
+        assert!(default.secondary_docks);
+        assert_eq!(default.to_value()["SecondaryDocks"], Value::Bool(true));
+
+        let parsed = Config::from_value(Some(json!({ "SecondaryDocks": false, "AppsInDock": true }))).unwrap();
+        assert!(!parsed.secondary_docks);
+        let legacy = Config::from_value(Some(json!({ "MenuBar": true, "AppsInDock": true }))).unwrap();
+        assert!(legacy.secondary_docks);
+        assert_eq!(Config::from_value(Some(json!({ "SecondaryDocks": "false", "AppsInDock": true }))).unwrap().secondary_docks, true);
+        let legacy_saved = legacy.to_value();
+        assert_eq!(legacy_saved["SecondaryDocks"], Value::Bool(true));
     }
 }

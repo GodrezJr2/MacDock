@@ -30,21 +30,18 @@ pub enum Zone {
     Trash,
 }
 
+type Zones = Vec<(i32, i32, i32, i32, Zone)>;
 thread_local! {
-    /// (left, top, right, bottom) in screen px per droppable icon; empty while the dock is hidden.
-    static ZONES: RefCell<Vec<(i32, i32, i32, i32, Zone)>> = const { RefCell::new(Vec::new()) };
+    static ZONES: RefCell<std::collections::HashMap<isize, Zones>> = RefCell::default();
 }
 
-pub fn set_zones(z: Vec<(i32, i32, i32, i32, Zone)>) {
-    ZONES.with(|c| *c.borrow_mut() = z);
+pub fn set_zones(hwnd: HWND, z: Zones) {
+    ZONES.with(|c| { let mut zones = c.borrow_mut(); if z.is_empty() { zones.remove(&(hwnd.0 as isize)); } else { zones.insert(hwnd.0 as isize, z); } });
 }
 
-fn zone_at(x: i32, y: i32) -> Option<Zone> {
-    ZONES.with(|c| c.borrow().iter().find(|r| x >= r.0 && x < r.2 && y >= r.1 && y < r.3).map(|r| r.4))
-}
-
-fn effect_at(pt: &POINTL) -> DROPEFFECT {
-    match zone_at(pt.x, pt.y) {
+fn effect_at(hwnd: HWND, pt: &POINTL) -> DROPEFFECT {
+    let zone = ZONES.with(|c| c.borrow().get(&(hwnd.0 as isize))?.iter().find(|r| pt.x >= r.0 && pt.x < r.2 && pt.y >= r.1 && pt.y < r.3).map(|r| r.4));
+    match zone {
         Some(Zone::Open) => DROPEFFECT_COPY,
         Some(Zone::Trash) => DROPEFFECT_MOVE,
         None => DROPEFFECT_NONE,
@@ -74,6 +71,7 @@ fn files_of(data: &IDataObject) -> Vec<String> {
 
 #[implement(IDropTarget)]
 struct Target {
+    hwnd: HWND,
     has_files: std::cell::Cell<bool>,
 }
 
@@ -81,33 +79,33 @@ impl IDropTarget_Impl for Target_Impl {
     fn DragEnter(&self, data: Option<&IDataObject>, _: MODIFIERKEYS_FLAGS, pt: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
         let ok = data.is_some_and(|d| unsafe { d.QueryGetData(&hdrop_format()) }.is_ok());
         self.has_files.set(ok);
-        crate::push(crate::Ev::Dock(DockEv::DragFiles(ok)));
-        unsafe { *effect = if ok { effect_at(pt) } else { DROPEFFECT_NONE } };
+        crate::push(crate::Ev::Dock(self.hwnd, DockEv::DragFiles(ok)));
+        unsafe { *effect = if ok { effect_at(self.hwnd, pt) } else { DROPEFFECT_NONE } };
         Ok(())
     }
 
     fn DragOver(&self, _: MODIFIERKEYS_FLAGS, pt: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
-        crate::push(crate::Ev::Dock(DockEv::Wake));
-        unsafe { *effect = if self.has_files.get() { effect_at(pt) } else { DROPEFFECT_NONE } };
+        crate::push(crate::Ev::Dock(self.hwnd, DockEv::Wake));
+        unsafe { *effect = if self.has_files.get() { effect_at(self.hwnd, pt) } else { DROPEFFECT_NONE } };
         Ok(())
     }
 
     fn DragLeave(&self) -> Result<()> {
         self.has_files.set(false);
-        crate::push(crate::Ev::Dock(DockEv::DragFiles(false)));
+        crate::push(crate::Ev::Dock(self.hwnd, DockEv::DragFiles(false)));
         Ok(())
     }
 
     fn Drop(&self, data: Option<&IDataObject>, _: MODIFIERKEYS_FLAGS, pt: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
-        let e = if self.has_files.get() { effect_at(pt) } else { DROPEFFECT_NONE };
+        let e = if self.has_files.get() { effect_at(self.hwnd, pt) } else { DROPEFFECT_NONE };
         unsafe { *effect = e };
         self.has_files.set(false);
-        crate::push(crate::Ev::Dock(DockEv::DragFiles(false)));
+        crate::push(crate::Ev::Dock(self.hwnd, DockEv::DragFiles(false)));
         if e != DROPEFFECT_NONE {
             if let Some(d) = data {
                 let files = files_of(d);
                 if !files.is_empty() {
-                    crate::push(crate::Ev::Dock(DockEv::DropFiles(files, pt.x, pt.y)));
+                    crate::push(crate::Ev::Dock(self.hwnd, DockEv::DropFiles(files, pt.x, pt.y)));
                 }
             }
         }
@@ -117,10 +115,15 @@ impl IDropTarget_Impl for Target_Impl {
 
 /// Make the dock window a drop target (OleInitialize must have run on this thread).
 pub fn register(hwnd: HWND) {
-    let t: IDropTarget = Target { has_files: std::cell::Cell::new(false) }.into();
+    let t: IDropTarget = Target { hwnd, has_files: std::cell::Cell::new(false) }.into();
     unsafe {
         let _ = RegisterDragDrop(hwnd, &t);
     }
+}
+
+pub fn unregister(hwnd: HWND) {
+    unsafe { let _ = windows::Win32::System::Ole::RevokeDragDrop(hwnd); }
+    set_zones(hwnd, Vec::new());
 }
 
 fn quote(f: &str) -> String {

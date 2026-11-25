@@ -25,6 +25,7 @@ pub enum Key {
     Widgets,
     Switcher,
     BatteryPct,
+    SecondaryDocks,
     AiUsage,
     ClaudeOAuth,
     TrayIcons,
@@ -106,6 +107,7 @@ pub fn apply(c: &mut Config, k: Key, v: f64) -> bool {
         Key::Widgets => Some(&mut c.desktop_widgets),
         Key::Switcher => Some(&mut c.app_switcher),
         Key::BatteryPct => Some(&mut c.battery_percent),
+        Key::SecondaryDocks => Some(&mut c.secondary_docks),
         Key::AiUsage => Some(&mut c.ai_usage),
         Key::ClaudeOAuth => Some(&mut c.claude_usage_oauth),
         Key::TrayIcons => Some(&mut c.tray_icons),
@@ -190,6 +192,7 @@ fn desktop_rows() -> Vec<Row> {
         Row::Switch(Key::ClaudeOAuth, "Claude limits from your Claude login"),
         Row::Switch(Key::Widgets, "Desktop widgets"),
         Row::Switch(Key::Switcher, "Mac-style Alt+Tab"),
+        Row::Switch(Key::SecondaryDocks, "Docks on secondary monitors"),
     ]
 }
 
@@ -251,6 +254,7 @@ impl Settings {
             Key::Widgets => b(c.desktop_widgets),
             Key::Switcher => b(c.app_switcher),
             Key::BatteryPct => b(c.battery_percent),
+            Key::SecondaryDocks => b(c.secondary_docks),
             Key::AiUsage => b(c.ai_usage),
             Key::ClaudeOAuth => b(c.claude_usage_oauth),
             Key::TrayIcons => b(c.tray_icons),
@@ -397,10 +401,10 @@ fn note_h(ui: &Ui, s: &str, w: f32) -> f32 {
     lines as f32 * ui.line_h(11.5, 400) + 16.0
 }
 
-const ALL: [Key; 23] = [
+const ALL: [Key; 24] = [
     Key::IconSize, Key::Magnify, Key::AutoHide, Key::Recents, Key::Downloads, Key::Tiles, Key::Badges,
     Key::HideTaskbar, Key::MenuBar, Key::Widgets, Key::Switcher, Key::BatteryPct, Key::AiUsage, Key::ClaudeOAuth,
-    Key::TrayIcons, Key::Genie, Key::GenieMs, Key::MagnifySpeed, Key::HideDelay, Key::HideSpeed, Key::ReduceMotion,
+    Key::TrayIcons, Key::SecondaryDocks, Key::Genie, Key::GenieMs, Key::MagnifySpeed, Key::HideDelay, Key::HideSpeed, Key::ReduceMotion,
     Key::Language, Key::LaunchpadStyle,
 ];
 
@@ -558,6 +562,10 @@ mod tests {
     #[test]
     fn switches_toggle_and_sliders_clamp() {
         let mut c = Config::default();
+        assert!(apply(&mut c, Key::SecondaryDocks, 0.0));
+        assert!(!c.secondary_docks);
+        assert!(apply(&mut c, Key::SecondaryDocks, 1.0));
+        assert!(c.secondary_docks);
         assert!(apply(&mut c, Key::AutoHide, 1.0));
         assert!(c.auto_hide);
         assert!(!apply(&mut c, Key::AutoHide, 1.0));

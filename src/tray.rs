@@ -35,7 +35,6 @@ pub struct Icon {
 
 struct Host {
     hwnd: HWND,
-    explorer: HWND,
     icons: Vec<Icon>,
     notify: isize, // the flyout to wake on changes
 }
@@ -62,6 +61,10 @@ pub fn running() -> bool {
 }
 
 /// Start hosting; `notify` gets WM_FLY_DATA whenever the icons change.
+pub fn owns_window(hwnd: HWND) -> bool {
+    HOST.with(|cell| cell.try_borrow().ok().is_some_and(|h| h.as_ref().is_some_and(|h| h.hwnd == hwnd)))
+}
+
 pub fn start(notify: isize) -> bool {
     if running() {
         HOST.with(|h| {
@@ -74,7 +77,7 @@ pub fn start(notify: isize) -> bool {
         return true;
     }
     unsafe {
-        let explorer = FindWindowW(w!("Shell_TrayWnd"), None).unwrap_or_default();
+        if crate::taskbar::explorer_taskbar().is_none() { return false; }
         let hinst = GetModuleHandleW(None).unwrap();
         let wc = WNDCLASSW { lpfnWndProc: Some(wndproc), hInstance: hinst.into(), lpszClassName: w!("Shell_TrayWnd"), ..Default::default() };
         RegisterClassW(&wc);
@@ -83,7 +86,7 @@ pub fn start(notify: isize) -> bool {
         ) else {
             return false;
         };
-        HOST.with(|h| *h.borrow_mut() = Some(Host { hwnd, explorer, icons: Vec::new(), notify }));
+        HOST.with(|h| *h.borrow_mut() = Some(Host { hwnd, icons: Vec::new(), notify }));
         let _ = SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         SetTimer(hwnd, TIMER_TOP, 500, None);
         broadcast();
@@ -287,12 +290,16 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     3 => Some(LRESULT(on_identify(host, bytes))),
                     _ => {
                         // AppBar and anything else: Explorer's business
-                        let ex = host.explorer;
                         drop(g);
-                        if ex.0.is_null() {
+                        let Some((ex, _)) = crate::taskbar::explorer_taskbar() else {
                             return Some(LRESULT(0));
+                        };
+                        let mut result = 0usize;
+                        if SendMessageTimeoutW(ex, WM_COPYDATA, wp, lp, SMTO_ABORTIFHUNG, 200, Some(&mut result)).0 == 0 {
+                            Some(LRESULT(0))
+                        } else {
+                            Some(LRESULT(result as isize))
                         }
-                        Some(SendMessageW(ex, WM_COPYDATA, wp, lp))
                     }
                 }
             });

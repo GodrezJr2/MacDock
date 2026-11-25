@@ -7,6 +7,7 @@
 mod backdrop;
 mod badges;
 mod config;
+mod display;
 mod dock;
 mod dropfiles;
 mod ai_usage;
@@ -53,7 +54,7 @@ use config::Config;
 use dock::{Act, Dock, DockEv};
 
 pub enum Ev {
-    Dock(DockEv),
+    Dock(HWND, DockEv),
     Genie(genie::GenieEv),
     Bar(menubar::BarEv),
     /// the flyout window it came from (a closing one still sends a deactivate)
@@ -103,6 +104,7 @@ unsafe extern "system" fn on_win_event(_: HWINEVENTHOOK, ev: u32, h: HWND, obj: 
 
 struct App {
     dock: Dock,
+    secondary: Vec<Dock>,
     genie: Option<genie::Genie>,
     bar: Option<menubar::MenuBar>,
     fly: Option<flyout::Flyout>,
@@ -116,13 +118,16 @@ struct App {
 
 impl App {
     fn awake(&self) -> bool {
-        self.dock.awake || self.genie.as_ref().is_some_and(|g| g.busy())
+        self.dock.awake || self.secondary.iter().any(|d| d.awake) || self.genie.as_ref().is_some_and(|g| g.busy())
     }
 
     /// The dock icon a window belongs to, in screen pixels.
-    fn icon_for(&mut self, h: HWND) -> genie::R {
-        let (x, y, w, hh) = self.dock.icon_rect_for(h);
-        let d = self.dock.dpi;
+    fn icon_for(&mut self, h: HWND, source: Option<HWND>) -> genie::R {
+        use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONEAREST};
+        let mon = unsafe { MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST) };
+        let dock = self.secondary.iter_mut().find(|d| source.map_or(d.display.id == mon, |src| d.hwnd == src)).unwrap_or(&mut self.dock);
+        let (x, y, w, hh) = dock.icon_rect_for(h);
+        let d = dock.dpi;
         genie::R { x: x * d, y: y * d, w: w * d, h: hh * d }
     }
 
@@ -134,7 +139,9 @@ impl App {
         unsafe {
             if up {
                 let f = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
-                let _ = SetWindowPos(self.dock.hwnd, HWND_TOPMOST, 0, 0, 0, 0, f);
+                for d in std::iter::once(&self.dock).chain(&self.secondary) {
+                    let _ = SetWindowPos(d.hwnd, HWND_TOPMOST, 0, 0, 0, 0, f);
+                }
                 if let Some(b) = self.bar.as_ref() {
                     let _ = SetWindowPos(b.hwnd, HWND_TOPMOST, 0, 0, 0, 0, f);
                 }
@@ -144,21 +151,21 @@ impl App {
     }
 
     /// Returns false to quit.
-    fn act(&mut self, a: Act) -> bool {
+    fn act(&mut self, a: Act, source: HWND) -> bool {
         match a {
             Act::Quit => return false,
             Act::OpenSettings => self.open_settings(),
             Act::OpenLaunchpad => self.open_launchpad(),
-            Act::Fullscreen(on) => self.set_fullscreen(on),
+            Act::Fullscreen => self.update_fullscreen(),
             Act::Minimize { fg, wins } => {
-                let icon = self.icon_for(fg);
+                let icon = self.icon_for(fg, Some(source));
                 match self.genie.as_mut() {
                     Some(g) => g.minimize_from_dock(fg, wins, icon),
                     None => genie::minimize_all(&wins),
                 }
             }
             Act::Restore { front, minimized } => {
-                let icon = self.icon_for(front);
+                let icon = self.icon_for(front, Some(source));
                 match self.genie.as_mut() {
                     Some(g) => g.restore(front, minimized, icon),
                     None => genie::restore_async(front, minimized),
@@ -168,10 +175,12 @@ impl App {
         true
     }
 
-    fn set_fullscreen(&mut self, on: bool) {
-        if on && !foreground_is_fullscreen() {
-            return; // e.g. our own overlays; only hide for a real fullscreen app
+    fn update_fullscreen(&mut self) {
+        let full_rect = foreground_fullscreen_rect();
+        for d in &mut self.secondary {
+            d.set_fullscreen_hidden(full_rect == Some(d.display.rect));
         }
+        let on = full_rect == Some(self.dock.display.rect);
         if on != self.fullscreen {
             self.fullscreen = on;
             self.dock.set_fullscreen_hidden(on);
@@ -335,8 +344,46 @@ impl App {
             }
         }
         self.dock.settings_changed(&old, done);
+        if old.secondary_docks != self.dock.cfg.secondary_docks { self.reconcile_displays(); }
+        self.sync_config(self.dock.hwnd, done);
         self.apply_genie_timing();
         true
+    }
+
+    fn reconcile_displays(&mut self) {
+        self.dock.display = display::Display::primary();
+        let wanted = if self.dock.cfg.secondary_docks { display::secondary() } else { Vec::new() };
+        self.secondary.retain_mut(|dock| {
+            if let Some(d) = wanted.iter().find(|d| d.id == dock.display.id) {
+                if *d != dock.display { dock.display = *d; dock.apply_display(); }
+                true
+            } else {
+                destroy_dock(dock);
+                false
+            }
+        });
+        for d in wanted {
+            if self.secondary.iter().any(|dock| dock.display.id == d.id) { continue; }
+            let hwnd = dock::create_window();
+            dropfiles::register(hwnd);
+            let mut dock = Dock::new(hwnd, self.dock.cfg.clone(), d);
+            dock.start();
+            self.secondary.push(dock);
+        }
+    }
+
+    // Propagate a saved change before another screen handles input and saves its copy.
+    fn sync_config(&mut self, source: HWND, relayout: bool) {
+        let cfg = if source == self.dock.hwnd {
+            if !std::mem::take(&mut self.dock.config_dirty) || self.secondary.is_empty() { return; }
+            self.dock.cfg.clone()
+        } else {
+            let Some(d) = self.secondary.iter_mut().find(|d| d.hwnd == source) else { return };
+            if !std::mem::take(&mut d.config_dirty) { return; }
+            self.dock.mirror_config(&d.cfg, relayout);
+            self.dock.cfg.clone()
+        };
+        for d in &mut self.secondary { if d.hwnd != source { d.mirror_config(&cfg, relayout); } }
     }
 
     fn apply_genie_timing(&mut self) {
@@ -350,8 +397,18 @@ impl App {
 
     fn handle(&mut self, e: Ev) -> bool {
         match e {
-            Ev::Dock(de) => {
-                if let DockEv::Refresh = de {
+            Ev::Dock(source, de) => {
+                let primary = source == self.dock.hwnd;
+                if !primary && matches!(de, DockEv::DisplayChanged) {
+                    // A DPI change can be delivered only to the window on the affected monitor.
+                    self.dock.handle(DockEv::DisplayChanged);
+                    return true;
+                }
+                if primary && matches!(de, DockEv::DisplaySettled) { self.reconcile_displays(); }
+                if primary && matches!(de, DockEv::Backdrop(true)) {
+                    for d in &mut self.secondary { d.handle(DockEv::Backdrop(true)); }
+                }
+                if primary && matches!(de, DockEv::Refresh) {
                     if let Some(pid) = taskbar::explorer_pid() {
                         if self.explorer_pid != Some(pid) {
                             self.explorer_pid = Some(pid);
@@ -359,23 +416,26 @@ impl App {
                                 b.shell_restarted();
                             }
                             self.dock.shell_restarted();
+                            for d in &mut self.secondary { d.shell_restarted(); }
                         }
                         if let Some(b) = self.bar.as_mut() {
                             b.ensure_reservation();
                         }
                         self.dock.ensure_reservation();
+                        for d in &mut self.secondary { d.ensure_reservation(); }
                     }
                     // Explorer's ABN_FULLSCREENAPP is unreliable with its taskbar hidden: ask on every refresh
-                    let fs = foreground_is_fullscreen();
-                    if fs != self.fullscreen {
-                        self.set_fullscreen(fs);
-                    }
+                    self.update_fullscreen();
                 }
-                if let Some(a) = self.dock.handle(de) {
-                    return self.act(a);
-                }
+                let action = if primary { self.dock.handle(de) } else {
+                    let Some(d) = self.secondary.iter_mut().find(|d| d.hwnd == source) else { return true };
+                    d.handle(de)
+                };
+                self.sync_config(source, true);
+                if let Some(a) = action { return self.act(a, source); }
             }
             Ev::Foreground(h) => {
+                for d in &mut self.secondary { d.on_foreground(HWND(h as *mut _)); }
                 self.keep_over_desktop(HWND(h as *mut _));
                 self.dock.on_foreground(HWND(h as *mut _));
                 if let Some(b) = self.bar.as_mut() {
@@ -392,7 +452,7 @@ impl App {
             }
             Ev::MinimizeStart(h) => {
                 if self.genie.is_some() {
-                    let icon = self.icon_for(HWND(h as *mut _));
+                    let icon = self.icon_for(HWND(h as *mut _), None);
                     self.genie.as_mut().unwrap().on_minimize_start(HWND(h as *mut _), icon);
                 }
             }
@@ -405,7 +465,7 @@ impl App {
                         let on = !self.dock.auto_hide();
                         self.dock.set_auto_hide(on);
                     }
-                    Some(menubar::BarAct::Fullscreen(on)) => self.set_fullscreen(on),
+                    Some(menubar::BarAct::Fullscreen) => self.update_fullscreen(),
                     Some(menubar::BarAct::Option(o, on)) => {
                         let c = self.dock.update_config(|c| match o {
                             menubar::BarOpt::BatteryPercent => c.battery_percent = on,
@@ -455,7 +515,49 @@ impl App {
                 }
             }
         }
+        self.sync_config(self.dock.hwnd, true);
         true
+    }
+}
+
+fn destroy_dock(d: &mut Dock) {
+    d.shutdown();
+    dropfiles::unregister(d.hwnd);
+    unsafe { let _ = DestroyWindow(d.hwnd); }
+}
+
+#[cfg(test)]
+mod monitor_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires an interactive Windows desktop with an extended display"]
+    fn secondary_toggle_preserves_primary_and_does_not_quit() {
+        let displays = display::secondary();
+        assert!(!displays.is_empty(), "connect an extended display");
+        unsafe { let _ = windows::Win32::System::Ole::OleInitialize(None); }
+        let hwnd = dock::create_window();
+        let mut cfg = Config::default();
+        cfg.auto_hide = true; // do not reserve work area or alter the running shell in this test
+        cfg.hide_taskbar = false;
+        cfg.badges = false;
+        let mut app = App { dock: Dock::new(hwnd, cfg, display::Display::primary()), secondary: Vec::new(),
+            genie: None, bar: None, fly: None, win: None, fullscreen: false, explorer_pid: None, started: [false; 4] };
+        app.reconcile_displays();
+        assert_eq!(app.secondary.len(), displays.len());
+        let first = app.secondary[0].hwnd;
+        app.reconcile_displays();
+        assert_eq!(app.secondary[0].hwnd, first);
+        app.dock.cfg.secondary_docks = false;
+        app.reconcile_displays();
+        assert!(app.secondary.is_empty());
+        unsafe {
+            assert!(!IsWindow(first).as_bool());
+            assert!(IsWindow(hwnd).as_bool());
+            assert!(!PeekMessageW(&mut MSG::default(), HWND::default(), WM_QUIT, WM_QUIT, PM_NOREMOVE).as_bool());
+            DestroyWindow(hwnd).unwrap();
+            windows::Win32::System::Ole::OleUninitialize();
+        }
     }
 }
 
@@ -523,41 +625,41 @@ fn desktop_raised() -> bool {
     }
 }
 
-fn foreground_is_fullscreen() -> bool {
+fn foreground_fullscreen_rect() -> Option<RECT> {
     unsafe {
         let fg = GetForegroundWindow();
         if fg.0.is_null() || shell::window_pid(fg) == std::process::id() {
-            return false;
+            return None;
         }
         // screenshot / screen tool overlays cover the screen for a moment; hiding for them made dock and bar
         // blink away on every Win+Shift+S. Tool windows (no taskbar button) are never a game either.
         if GetWindowLongPtrW(fg, GWL_EXSTYLE) & WS_EX_TOOLWINDOW.0 as isize != 0 {
-            return false;
+            return None;
         }
         const OVERLAYS: [&str; 9] = [
             "ScreenClippingHost.exe", "SnippingTool.exe", "ScreenSketch.exe", "ShareX.exe", "Lightshot.exe",
             "Greenshot.exe", "PowerToys.ScreenRuler.exe", "PowerToys.PowerOCR.exe", "PowerToys.ColorPickerUI.exe",
         ];
         if shell::exe_name(shell::window_pid(fg)).is_some_and(|n| OVERLAYS.iter().any(|o| shell::eq_ic(o, &n))) {
-            return false;
+            return None;
         }
         let mut cls = [0u16; 64];
         let n = GetClassNameW(fg, &mut cls) as usize;
         let cls = String::from_utf16_lossy(&cls[..n]);
         if ["Progman", "WorkerW", "Shell_TrayWnd"].contains(&cls.as_str()) {
-            return false;
+            return None;
         }
         // anything with a title bar is not fullscreen, even when it covers the whole screen because no AppBar
         // space is reserved; a fullscreen app sits exactly on the monitor without one. Not IsZoomed: Chrome and
         // Edge keep WS_MAXIMIZE when a maximized window goes fullscreen (F11, YouTube), only the caption goes.
         if GetWindowLongPtrW(fg, GWL_STYLE) & WS_CAPTION.0 as isize == WS_CAPTION.0 as isize {
-            return false;
+            return None;
         }
         let mut r = RECT::default();
         if GetWindowRect(fg, &mut r).is_err() {
-            return false;
+            return None;
         }
-        r.left == 0 && r.top == 0 && r.right == GetSystemMetrics(SM_CXSCREEN) && r.bottom == GetSystemMetrics(SM_CYSCREEN)
+        Some(r)
     }
 }
 
@@ -632,7 +734,7 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
     let want_widgets = cfg.desktop_widgets;
     let want_switcher = cfg.app_switcher;
     let started = [cfg.menu_bar, want_widgets, want_switcher, cfg.claude_usage_oauth];
-    let mut app = App { dock: Dock::new(hwnd, cfg), genie, bar, fly: None, win: None, fullscreen: false, explorer_pid: taskbar::explorer_pid(), started };
+    let mut app = App { dock: Dock::new(hwnd, cfg, display::Display::primary()), secondary: Vec::new(), genie, bar, fly: None, win: None, fullscreen: false, explorer_pid: taskbar::explorer_pid(), started };
     app.apply_genie_timing();
     if app.dock.config().launchpad_style == "classic" {
         flyout::warm_backdrop(); // only the full-screen Launchpad draws over it (~8 MB at 1080p)
@@ -641,6 +743,7 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
         b.start(); // reserve the top strip before the dock measures the work area
     }
     app.dock.start();
+    app.reconcile_displays();
     if want_widgets {
         widgets::start(); // after the bar and dock reserved their strips, so the work area is final
     }
@@ -702,6 +805,7 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
                 if app.dock.awake {
                     app.dock.frame();
                 }
+                for d in &mut app.secondary { if d.awake { d.frame(); } }
                 let t1 = std::time::Instant::now();
                 if let Some(g) = app.genie.as_mut() {
                     g.frame();
@@ -720,7 +824,9 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
         if let Some(b) = app.bar.as_mut() {
             b.shutdown();
         }
+        for d in &mut app.secondary { destroy_dock(d); }
         app.dock.shutdown();
+        dropfiles::unregister(hwnd);
         taskbar::restore(false);
         let _ = DestroyWindow(hwnd);
     }

@@ -159,6 +159,7 @@ fn id(s: &str) -> Option<&'static str> {
         "Hide the Windows taskbar" => "Sembunyikan taskbar Windows",
         "Menu bar" => "Menu bar",
         "Battery percentage" => "Persentase baterai",
+        "Docks on secondary monitors" => "Dock di monitor sekunder",
         "AI usage in the menu bar" => "Pemakaian AI di menu bar",
         "Claude limits from your Claude login" => "Batas Claude dari login Claude",
         "Tray icons in the menu bar" => "Ikon tray di menu bar",

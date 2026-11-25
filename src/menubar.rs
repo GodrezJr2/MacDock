@@ -15,7 +15,7 @@ use windows::Win32::System::Registry::*;
 use windows::Win32::System::Shutdown::LockWorkStation;
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::Input::KeyboardAndMouse::{keybd_event, TrackMouseEvent, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, TME_LEAVE, TRACKMOUSEEVENT};
-use windows::Win32::UI::Shell::{SHAppBarMessage, ABE_TOP, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, APPBARDATA};
+use windows::Win32::UI::Shell::{ABE_TOP, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, APPBARDATA};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::gfx::{self, Font, Surface};
@@ -54,7 +54,7 @@ pub enum BarEv {
 pub enum BarAct {
     Quit,
     ToggleAutoHide,
-    Fullscreen(bool),
+    Fullscreen,
     /// a menu bar setting was switched; the app saves it to config.json
     Option(BarOpt, bool),
     /// open (or close, if it is the open one) a menu bar extra under the item spanning these screen px
@@ -380,15 +380,15 @@ impl MenuBar {
         let mut d = self.appbar_data();
         unsafe {
             if !self.appbar {
-                if SHAppBarMessage(ABM_NEW, &mut d) == 0 {
+                if crate::taskbar::appbar_message(ABM_NEW, &mut d) == 0 {
                     return; // refused (e.g. we run at low integrity); maximized windows will slide under us
                 }
                 self.appbar = true;
             }
             d.rc = RECT { left: 0, top: 0, right: self.px(self.screen_w), bottom: self.px(H) };
-            SHAppBarMessage(ABM_QUERYPOS, &mut d);
+            crate::taskbar::appbar_message(ABM_QUERYPOS, &mut d);
             d.rc.bottom = d.rc.top + self.px(H);
-            SHAppBarMessage(ABM_SETPOS, &mut d);
+            crate::taskbar::appbar_message(ABM_SETPOS, &mut d);
         }
     }
 
@@ -408,7 +408,7 @@ impl MenuBar {
         if self.appbar {
             let mut d = self.appbar_data();
             unsafe {
-                SHAppBarMessage(ABM_REMOVE, &mut d);
+                crate::taskbar::appbar_message(ABM_REMOVE, &mut d);
             }
             self.appbar = false;
         }
@@ -580,7 +580,7 @@ impl MenuBar {
                     self.reserve();
                 }
             }
-            BarEv::AppBar(2 /* ABN_FULLSCREENAPP */, on) => return Some(BarAct::Fullscreen(on != 0)),
+            BarEv::AppBar(2 /* ABN_FULLSCREENAPP */, _) => return Some(BarAct::Fullscreen),
             BarEv::AppBar(..) => {}
             BarEv::Wallpaper => {
                 crate::flyout::forget_backdrop();

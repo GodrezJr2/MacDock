@@ -10,7 +10,7 @@ use windows::core::{Interface, BSTR, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, SIZE};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::Graphics::Gdi::{DeleteObject, GetObjectW, BITMAP, HBITMAP};
-use windows::Win32::Storage::EnhancedStorage::{PKEY_AppUserModel_ID, PKEY_Link_TargetParsingPath};
+use windows::Win32::Storage::EnhancedStorage::{PKEY_AppUserModel_ID, PKEY_AppUserModel_RelaunchCommand, PKEY_Link_TargetParsingPath};
 use windows::Win32::Storage::Packaging::Appx::GetApplicationUserModelId;
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Threading::{
@@ -65,11 +65,78 @@ pub fn item_aumid(parsing: &str) -> Option<String> {
     store_string(parsing, &PKEY_AppUserModel_ID)
 }
 
-pub fn window_aumid(h: HWND) -> Option<String> {
-    unsafe {
-        let ps: IPropertyStore = SHGetPropertyStoreForWindow(h).ok()?;
-        read_string(&ps, &PKEY_AppUserModel_ID)
+/// Extract Chromium's explicitly selected profile directory from launch arguments.
+fn profile_directory(args: &str) -> Option<String> {
+    let mut args = args.trim().chars().peekable();
+    while args.peek().is_some() {
+        while args.peek().is_some_and(|c| c.is_whitespace()) { args.next(); }
+        let mut token = String::new();
+        let mut quote = None;
+        while let Some(&c) = args.peek() {
+            if let Some(q) = quote {
+                args.next();
+                if c == q { quote = None; } else { token.push(c); }
+            } else if c == '"' || c == '\'' {
+                quote = Some(c);
+                args.next();
+            } else if c.is_whitespace() {
+                break;
+            } else {
+                token.push(c);
+                args.next();
+            }
+        }
+        if let Some((key, value)) = token.split_once('=') {
+            if key.eq_ignore_ascii_case("--profile-directory") && !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
     }
+    None
+}
+
+#[cfg(test)]
+mod profile_argument_tests {
+    #[test]
+    fn extracts_chromium_profile_argument() {
+        assert_eq!(super::profile_directory(r#"--profile-directory="Profile 1" --no-first-run"#).as_deref(), Some("Profile 1"));
+        assert_eq!(super::profile_directory("--profile-directory=Default").as_deref(), Some("Default"));
+        assert_eq!(super::profile_directory("--incognito").as_deref(), None);
+    }
+}
+
+/// Read a shortcut's app identity and browser profile, if explicitly set in its arguments.
+pub fn shortcut_identity(parsing: &str) -> (Option<String>, Option<String>) {
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+
+    unsafe {
+        let Ok(link) = CoCreateInstance::<_, IShellLinkW>(&ShellLink, None, CLSCTX_INPROC_SERVER) else {
+            return (None, None);
+        };
+        let w = wide(parsing);
+        let Ok(persist) = link.cast::<windows::Win32::System::Com::IPersistFile>() else {
+            return (None, None);
+        };
+        if persist.Load(PCWSTR(w.as_ptr()), windows::Win32::System::Com::STGM_READ).is_err() {
+            return (None, None);
+        }
+        let aumid = link.cast::<IPropertyStore>().ok().and_then(|store| read_string(&store, &PKEY_AppUserModel_ID));
+        let mut args = [0u16; 2048];
+        let args = link.GetArguments(&mut args).ok().map(|_| from_wide(&args));
+        (aumid, args.as_deref().and_then(profile_directory))
+    }
+}
+
+pub fn window_identity(h: HWND) -> (Option<String>, Option<String>) {
+    unsafe {
+        let Ok(ps) = SHGetPropertyStoreForWindow::<_, IPropertyStore>(h) else { return (None, None) };
+        (read_string(&ps, &PKEY_AppUserModel_ID), read_string(&ps, &PKEY_AppUserModel_RelaunchCommand))
+    }
+}
+
+pub fn window_aumid(h: HWND) -> Option<String> {
+    window_identity(h).0
 }
 
 pub fn display_name(parsing: &str) -> Option<String> {
@@ -209,13 +276,14 @@ pub struct AppWindow {
     pub pid: u32,
     pub exe: Option<String>,
     pub aumid: Option<String>,
+    pub window_aumid: Option<String>,
+    pub profile_directory: Option<String>,
     pub title: String,
 }
 
 #[derive(Default)]
 pub struct Shell {
     procs: HashMap<u32, (Option<String>, Option<String>)>,
-    win_aumids: HashMap<isize, Option<String>>,
 }
 
 impl Shell {
@@ -245,9 +313,6 @@ impl Shell {
 
     /// Top-level windows that would get a taskbar button, in z-order (front first).
     pub fn app_windows(&mut self) -> Vec<AppWindow> {
-        if self.win_aumids.len() > 400 {
-            self.win_aumids.clear();
-        }
         if self.procs.len() > 400 {
             self.procs.clear();
         }
@@ -295,18 +360,8 @@ impl Shell {
                 }
                 let (mut exe, paumid) = self.process_info(pid);
                 let frame = class == "ApplicationFrameWindow";
-                let waumid = match self.win_aumids.get(&(h.0 as isize)) {
-                    Some(a) => a.clone(),
-                    None => {
-                        let a = window_aumid(h);
-                        // UWP frames get their AUMID a moment after they appear: don't remember a miss for them
-                        if a.is_some() || !frame {
-                            self.win_aumids.insert(h.0 as isize, a.clone());
-                        }
-                        a
-                    }
-                };
-                let mut aumid = waumid.or(paumid);
+                let (waumid, window_relaunch) = window_identity(h);
+                let mut aumid = waumid.clone().or(paumid);
                 if frame {
                     // the real app lives in a child CoreWindow owned by another process
                     let mut inner = (pid, 0u32);
@@ -330,7 +385,8 @@ impl Shell {
                         continue;
                     }
                 }
-                out.push(AppWindow { hwnd: h, pid, exe, aumid, title });
+                let profile_directory = window_relaunch.as_deref().and_then(profile_directory);
+                out.push(AppWindow { hwnd: h, pid, exe, aumid, window_aumid: waumid, profile_directory, title });
             }
         }
         out
