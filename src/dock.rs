@@ -38,6 +38,8 @@ const TIMER_EDGE: usize = 3;
 const TIMER_TOASTS: usize = 4;
 const TIMER_BACKDROP: usize = 5;
 const TIMER_BACKDROP_RECHECK: usize = 6;
+/// slideshows, Spotlight and live wallpapers change the desktop without telling anyone
+const TIMER_WALLPAPER: usize = 7;
 /// changes behind the plate (video, a window dragged) repaint at most this often; hover and magnify stay at full rate
 const BACKDROP_FPS: f64 = 30.0;
 const ABN_POSCHANGED: usize = 1;
@@ -65,6 +67,7 @@ pub enum DockEv {
     Edge,
     Toasts,
     Wallpaper,
+    WallpaperCheck,
     Flash(isize),
     AppBar(usize, isize),
     /// something behind the plate changed (true: windows moved; false: a window drew)
@@ -128,6 +131,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
             TIMER_DISPLAY => ev(h, DockEv::DisplaySettled),
             TIMER_EDGE => ev(h, DockEv::Edge),
             TIMER_TOASTS => ev(h, DockEv::Toasts),
+            TIMER_WALLPAPER => ev(h, DockEv::WallpaperCheck),
             TIMER_BACKDROP_RECHECK => {
                 let _ = KillTimer(h, TIMER_BACKDROP_RECHECK);
                 ev(h, DockEv::BackdropRecheck);
@@ -459,6 +463,7 @@ impl Dock {
         self.refresh(true);
         unsafe {
             SetTimer(self.hwnd, TIMER_REFRESH, 700, None);
+            SetTimer(self.hwnd, TIMER_WALLPAPER, 30_000, None);
             if self.cfg.auto_hide {
                 SetTimer(self.hwnd, TIMER_EDGE, 60, None);
             }
@@ -703,10 +708,10 @@ impl Dock {
     fn load_frost(&mut self) {
         // 240 px wide: light enough blur that the wallpaper still reads through the glass, as on macOS
         let fh = (240.0 * self.screen_h / self.screen_w).round().max(1.0) as u32;
-        self.frost = gfx::wallpaper(240, fh);
+        self.frost = gfx::wallpaper_on(Some(self.display.rect), 240, fh);
         let gw = (self.screen_w * self.dpi / 2.0).round().max(1.0) as u32;
         let gh = (self.screen_h * self.dpi / 2.0).round().max(1.0) as u32;
-        self.glass = gfx::wallpaper(gw, gh).map(|mut p| {
+        self.glass = gfx::wallpaper_on(Some(self.display.rect), gw, gh).map(|mut p| {
             gfx::blur(&mut p, 1.0);
             p
         });
@@ -2100,6 +2105,16 @@ impl Dock {
                 }
             }
             DockEv::Wallpaper => self.load_frost(),
+            DockEv::WallpaperCheck => {
+                // a render of the desktop takes ~40 ms: not while the dock is animating, or hidden
+                if !self.hidden && !self.awake {
+                    let fh = (240.0 * self.screen_h / self.screen_w).round().max(1.0) as u32;
+                    let now = gfx::wallpaper_on(Some(self.display.rect), 240, fh);
+                    if now.as_ref().map(|p| p.data()) != self.frost.as_ref().map(|p| p.data()) {
+                        self.load_frost();
+                    }
+                }
+            }
             DockEv::Backdrop(layout) => {
                 if layout {
                     self.bd_due.1 = true;

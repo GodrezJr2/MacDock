@@ -7,13 +7,14 @@ use std::mem::size_of;
 use std::ptr::null_mut;
 
 use tiny_skia::{IntSize, Path, PathBuilder, Pixmap, PixmapMut};
-use windows::core::PCWSTR;
-use windows::Win32::Foundation::{COLORREF, GENERIC_READ, HWND, POINT, SIZE};
+use windows::core::{Interface, PCWSTR};
+use windows::Win32::Foundation::{BOOL, COLORREF, GENERIC_READ, HWND, LPARAM, POINT, RECT, SIZE};
+use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::Graphics::Imaging::*;
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::UI::WindowsAndMessaging::{
-    SystemParametersInfoW, UpdateLayeredWindow, SPI_GETDESKWALLPAPER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ULW_ALPHA,
+    EnumWindows, GetClassNameW, GetWindowRect, IsWindowVisible, SystemParametersInfoW, UpdateLayeredWindow, SPI_GETDESKWALLPAPER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ULW_ALPHA,
 };
 
 use crate::shell::wide;
@@ -142,10 +143,23 @@ pub fn rrect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<Path> {
     p.finish()
 }
 
-/// The wallpaper, "fill" fitted and shrunk hard to `fw` x `fh` (the shrink is the blur), via WIC.
-/// No picture set (a solid-colour background) gives a plain pixmap of that colour: the old fallback to
-/// TranscodedWallpaper showed whatever picture was there before, often a dark one.
+/// What the primary screen's desktop shows, "fill" fitted and shrunk hard to `fw` x `fh` (the shrink is the blur).
 pub fn wallpaper(fw: u32, fh: u32) -> Option<Pixmap> {
+    wallpaper_on(None, fw, fh)
+}
+
+/// What the desktop shows on the monitor at `mon` (screen px; None = the primary one), fitted to `fw` x `fh`.
+/// The desktop window is rendered as it is on screen (PrintWindow), so every kind of background works: a picture,
+/// a slideshow, Spotlight, a solid colour, a different picture per monitor, or a live wallpaper app hosted under it.
+/// If that fails, the wallpaper file is read as before.
+pub fn wallpaper_on(mon: Option<RECT>, fw: u32, fh: u32) -> Option<Pixmap> {
+    let mon = mon.unwrap_or_else(|| crate::display::Display::primary().rect);
+    if let Some(p) = desktop_shot().and_then(|(src, at)| {
+        let r = RECT { left: mon.left - at.left, top: mon.top - at.top, right: mon.right - at.left, bottom: mon.bottom - at.top };
+        fill_from(&src, Some(r), fw, fh)
+    }) {
+        return Some(p);
+    }
     let path = spi_wallpaper()?;
     if path.is_empty() {
         return solid_background(fw, fh);
@@ -156,7 +170,91 @@ pub fn wallpaper(fw: u32, fh: u32) -> Option<Pixmap> {
         // a slideshow or Spotlight picture that is gone: Windows keeps its own copy of what it shows
         format!("{}\\Microsoft\\Windows\\Themes\\TranscodedWallpaper", std::env::var("APPDATA").ok()?)
     };
-    decode_fill(&path, fw, fh)
+    unsafe {
+        let f: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
+        let wp = wide(&path);
+        let dec = f.CreateDecoderFromFilename(PCWSTR(wp.as_ptr()), None, GENERIC_READ, WICDecodeMetadataCacheOnDemand).ok()?;
+        let frame = dec.GetFrame(0).ok()?;
+        fill_from(&frame.cast().ok()?, None, fw, fh)
+    }
+}
+
+/// The last desktop render, reused for a moment: one wallpaper change sends several windows asking at once
+/// (dock, menu bar, widgets, each in two sizes), and a render of a big screen takes ~40 ms.
+static DESKTOP_SHOT: std::sync::Mutex<Option<(std::time::Instant, SendBitmap, RECT)>> = std::sync::Mutex::new(None);
+
+struct SendBitmap(IWICBitmap);
+// WIC bitmaps are free-threaded
+unsafe impl Send for SendBitmap {}
+
+/// The desktop window (the wallpaper and anything drawn on it) as WIC pixels, and where it sits on screen.
+fn desktop_shot() -> Option<(IWICBitmapSource, RECT)> {
+    let mut cache = DESKTOP_SHOT.lock().ok()?;
+    if let Some((t, b, r)) = cache.as_ref() {
+        if t.elapsed() < std::time::Duration::from_secs(2) {
+            return Some((b.0.cast().ok()?, *r));
+        }
+    }
+    let (bmp, r) = render_desktop()?;
+    *cache = Some((std::time::Instant::now(), SendBitmap(bmp.clone()), r));
+    Some((bmp.cast().ok()?, r))
+}
+
+/// The window the wallpaper is drawn in: Progman, or with an older live-wallpaper layout the bottom-most
+/// visible WorkerW (Progman is hidden then).
+fn desktop_host() -> Option<(HWND, RECT)> {
+    unsafe extern "system" fn each(h: HWND, l: LPARAM) -> BOOL {
+        let v = &mut *(l.0 as *mut Vec<HWND>);
+        let mut c = [0u16; 16];
+        let n = GetClassNameW(h, &mut c) as usize;
+        let c = String::from_utf16_lossy(&c[..n]);
+        if (c == "Progman" || c == "WorkerW") && IsWindowVisible(h).as_bool() {
+            v.push(h);
+        }
+        true.into()
+    }
+    let mut v: Vec<HWND> = Vec::new();
+    unsafe {
+        let _ = EnumWindows(Some(each), LPARAM(&mut v as *mut _ as isize));
+    }
+    // top to bottom: the wallpaper is under everything else
+    v.into_iter().rev().find_map(|h| {
+        let mut r = RECT::default();
+        unsafe { GetWindowRect(h, &mut r).ok()? };
+        (r.right - r.left > 100 && r.bottom - r.top > 100).then_some((h, r))
+    })
+}
+
+fn render_desktop() -> Option<(IWICBitmap, RECT)> {
+    let (host, r) = desktop_host()?;
+    let (w, h) = (r.right - r.left, r.bottom - r.top);
+    unsafe {
+        let sdc = GetDC(None);
+        let dc = CreateCompatibleDC(sdc);
+        let bi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER { biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32, ..Default::default() },
+            ..Default::default()
+        };
+        let mut bits = std::ptr::null_mut();
+        let out = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &mut bits, None, 0).ok().and_then(|bm| {
+            let old = SelectObject(dc, bm);
+            // PW_RENDERFULLCONTENT: what DWM shows, DirectComposition content and child windows included
+            let ok = PrintWindow(host, dc, PRINT_WINDOW_FLAGS(2)).as_bool();
+            let px = std::slice::from_raw_parts_mut(bits as *mut u8, (w * h * 4) as usize);
+            let res = ok.then(|| {
+                // the desktop is opaque; GDI leaves alpha at 0
+                px.chunks_exact_mut(4).for_each(|p| p[3] = 255);
+                let f: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
+                f.CreateBitmapFromMemory(w as u32, h as u32, &GUID_WICPixelFormat32bppBGRA, (w * 4) as u32, px).ok()
+            }).flatten();
+            SelectObject(dc, old);
+            let _ = DeleteObject(bm);
+            res
+        });
+        let _ = DeleteDC(dc);
+        ReleaseDC(None, sdc);
+        Some((out?, r))
+    }
 }
 
 /// The desktop's background colour, as a pixmap.
@@ -176,20 +274,34 @@ fn spi_wallpaper() -> Option<String> {
     }
 }
 
-/// The image at `path`, "fill" fitted (scaled to cover, centre cut) to `fw` x `fh`.
-fn decode_fill(path: &str, fw: u32, fh: u32) -> Option<Pixmap> {
+/// `src` (cut to `crop` first, if given), "fill" fitted (scaled to cover, centre cut) to `fw` x `fh` with WIC's
+/// Fant filter, which averages every source pixel: a smooth blur when shrinking hard.
+fn fill_from(src: &IWICBitmapSource, crop: Option<RECT>, fw: u32, fh: u32) -> Option<Pixmap> {
     unsafe {
         let f: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
-        let wp = wide(path);
-        let dec = f.CreateDecoderFromFilename(PCWSTR(wp.as_ptr()), None, GENERIC_READ, WICDecodeMetadataCacheOnDemand).ok()?;
-        let frame = dec.GetFrame(0).ok()?;
+        let src: IWICBitmapSource = match crop {
+            Some(c) => {
+                let (mut sw, mut sh) = (0u32, 0u32);
+                src.GetSize(&mut sw, &mut sh).ok()?;
+                let x = c.left.clamp(0, sw as i32);
+                let y = c.top.clamp(0, sh as i32);
+                let r = WICRect { X: x, Y: y, Width: c.right.clamp(x, sw as i32) - x, Height: c.bottom.clamp(y, sh as i32) - y };
+                if r.Width < 1 || r.Height < 1 {
+                    return None;
+                }
+                let cl = f.CreateBitmapClipper().ok()?;
+                cl.Initialize(src, &r).ok()?;
+                cl.cast().ok()?
+            }
+            None => src.clone(),
+        };
         let (mut w, mut h) = (0u32, 0u32);
-        frame.GetSize(&mut w, &mut h).ok()?;
+        src.GetSize(&mut w, &mut h).ok()?;
         let s = (fw as f64 / w as f64).max(fh as f64 / h as f64);
         let dw = ((w as f64 * s).ceil() as u32).max(fw);
         let dh = ((h as f64 * s).ceil() as u32).max(fh);
         let sc = f.CreateBitmapScaler().ok()?;
-        sc.Initialize(&frame, dw, dh, WICBitmapInterpolationModeFant).ok()?;
+        sc.Initialize(&src, dw, dh, WICBitmapInterpolationModeFant).ok()?;
         let cv = f.CreateFormatConverter().ok()?;
         cv.Initialize(&sc, &GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom).ok()?;
         let rc = WICRect { X: ((dw - fw) / 2) as i32, Y: ((dh - fh) / 2) as i32, Width: fw as i32, Height: fh as i32 };

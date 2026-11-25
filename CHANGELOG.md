@@ -14,8 +14,10 @@ Each release on GitHub uses its section from this file as its notes.
 - Quitting or restarting MacDock could leave its process spinning at 100% of a CPU core, impossible to end and
   blocking every later start until Windows restarted. MacDock now ends its process itself once its clean-up is done,
   and a new start only waits for a copy that is really still running.
-- With a solid-colour desktop background the dock's glass showed whatever picture had been set before (often a dark
-  one); it now shows the background colour.
+- The dock's glass could look dark or show the wrong picture: it was painted from the wallpaper file, which is stale,
+  missing or a different one with a slideshow, Windows Spotlight, a solid colour, a picture per monitor or a live
+  wallpaper app. The glass (and the menu bar, widgets and Launchpad) now shows what the desktop really draws, on each
+  monitor, and notices a slideshow or Spotlight change within 30 seconds.
 - An invisible window behind the dock (an overlay faded all the way out, or one that draws nothing) no longer
   turns the glass black.
 
