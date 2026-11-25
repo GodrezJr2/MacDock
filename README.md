@@ -112,8 +112,9 @@ notification-area icons (Discord, Steam, …).
   shortcuts (Ctrl+S, Ctrl+Z, …) to that app
 - System menu with Automatically Hide Dock, Quit MacDock and **Check for MacDock Updates…**. MacDock asks
   GitHub for the latest release at start and every 6 hours (only `api.github.com`, nothing is downloaded by
-  itself); when a newer one is out, a blue dot sits on the logo and the menu shows **Update Available**, which
-  opens the release page
+  itself); when a newer one is out, a blue dot sits on the logo and the menu shows **Update Available**. Click it
+  to install: MacDock downloads the release's `macdock.exe`, checks it against `macdock.exe.sha256`, puts it in
+  place of the running one (wherever that is) and restarts. **No** opens the release page instead
 - Battery, Wi-Fi, **Spotlight** search, Control Center and the clock, which drops a **calendar** (month view, arrows or the
   wheel step months, rows for the notification center and date & time settings)
 - **AI usage** for Claude Code and Codex: a ring with the limit closest to running out and the live

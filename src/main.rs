@@ -465,6 +465,10 @@ impl App {
                 b.auto_hide_dock = self.dock.auto_hide();
                 match b.handle(be) {
                     Some(menubar::BarAct::Quit) => return false,
+                    Some(menubar::BarAct::Restart) => {
+                        restart();
+                        return false;
+                    }
                     Some(menubar::BarAct::ToggleAutoHide) => {
                         let on = !self.dock.auto_hide();
                         self.dock.set_auto_hide(on);
@@ -758,6 +762,7 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
     if want_switcher {
         switcher::start();
     }
+    update::cleanup();
     update::start();
     if std::env::args().any(|a| a == "--settings") {
         app.open_settings();

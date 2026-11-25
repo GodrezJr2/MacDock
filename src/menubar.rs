@@ -30,6 +30,8 @@ const PAD_X: f64 = 9.0; // inside each button
 const GAP: f64 = 1.0; // between buttons
 const SIDE: f64 = 10.0; // from the screen edges
 const CB_APPBAR: u32 = WM_APP + 21;
+/// an update worker finished (update::take_install has its result)
+const WM_UPDATE_DONE: u32 = WM_APP + 22;
 const TIMER_TICK: usize = 1;
 const TIMER_DISPLAY: usize = 2;
 /// a new wallpaper has faded in: read the desktop again
@@ -42,6 +44,7 @@ const VK_LWIN: u8 = 0x5B;
 const VK_F11: u8 = 0x7A;
 
 pub enum BarEv {
+    UpdateDone,
     Move(i32),
     Leave,
     Up(i32),
@@ -55,6 +58,8 @@ pub enum BarEv {
 /// What the bar asks the app to do.
 pub enum BarAct {
     Quit,
+    /// an update was put in place: start it and quit
+    Restart,
     ToggleAutoHide,
     Fullscreen,
     /// a menu bar setting was switched; the app saves it to config.json
@@ -259,6 +264,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
             return LRESULT(0); // we place ourselves
         }
         CB_APPBAR => push(Ev::Bar(BarEv::AppBar(w.0, l.0))),
+        WM_UPDATE_DONE => push(Ev::Bar(BarEv::UpdateDone)),
         _ => {}
     }
     DefWindowProcW(h, msg, w, l)
@@ -590,6 +596,7 @@ impl MenuBar {
             }
             BarEv::AppBar(2 /* ABN_FULLSCREENAPP */, _) => return Some(BarAct::Fullscreen),
             BarEv::AppBar(..) => {}
+            BarEv::UpdateDone => return self.update_done(),
             BarEv::Wallpaper => {
                 crate::gfx::forget_desktop();
                 crate::flyout::forget_backdrop();
@@ -870,19 +877,16 @@ impl MenuBar {
             Do::Login => toggle_login(),
             Do::Settings => return Some(BarAct::OpenSettings),
             Do::OpenUpdate => {
-                if let Some((_, url)) = crate::update::available() {
-                    shell::launch(&url);
+                if let Some((v, url)) = crate::update::available() {
+                    return self.offer_update(&v, &url);
                 }
             }
             Do::CheckUpdate => {
                 let cur = crate::update::CURRENT;
                 match crate::update::check() {
                     Ok(Some((v, url))) => {
-                        if confirm(self.hwnd, &format!("MacDock {v} is available (you have {cur}).
-
-Open the download page?")) {
-                            shell::launch(&url);
-                        }
+                        self.update = true;
+                        return self.offer_update(&v, &url);
                     }
                     Ok(None) => inform(self.hwnd, &format!("MacDock {cur} is the latest version.")),
                     Err(e) => inform(self.hwnd, &format!("Could not check for updates: {e}.")),
@@ -894,6 +898,52 @@ Open the download page?")) {
             Do::Quit => return Some(BarAct::Quit),
         }
         None
+    }
+
+    /// "Install and restart" (the exe is swapped in place, see update::install), or the release page.
+    fn offer_update(&mut self, v: &str, url: &str) -> Option<BarAct> {
+        let cur = crate::update::CURRENT;
+        let q = format!("MacDock {v} is available (you have {cur}).
+
+Install it now? MacDock downloads it, checks it and restarts.
+
+Yes: install and restart
+No: open the release page");
+        let t = shell::wide(&q);
+        let answer = unsafe { MessageBoxW(self.hwnd, windows::core::PCWSTR(t.as_ptr()), w!("MacDock"), MB_YESNOCANCEL | MB_ICONQUESTION | MB_TOPMOST) };
+        if answer == IDNO {
+            shell::launch(url);
+        }
+        if answer != IDYES {
+            return None;
+        }
+        // the download takes seconds: a worker does it and posts WM_UPDATE_DONE back, so the bar and dock keep going
+        let (h, v, url) = (self.hwnd.0 as isize, v.to_string(), url.to_string());
+        if !crate::update::begin_install() {
+            return None; // one is already on its way
+        }
+        std::thread::spawn(move || {
+            let r = crate::update::install(&v);
+            crate::update::finish_install(r.map(|()| v.clone()).map_err(|e| (v, url, e)));
+            unsafe {
+                let _ = PostMessageW(HWND(h as *mut _), WM_UPDATE_DONE, WPARAM(0), LPARAM(0));
+            }
+        });
+        None
+    }
+
+    fn update_done(&mut self) -> Option<BarAct> {
+        match crate::update::take_install()? {
+            Ok(_) => Some(BarAct::Restart),
+            Err((v, url, e)) => {
+                if confirm(self.hwnd, &format!("Could not install MacDock {v}: {e}.
+
+Open the release page to update by hand?")) {
+                    shell::launch(&url);
+                }
+                None
+            }
+        }
     }
 
     // -------------------------------------------------------------- layout and drawing

@@ -6,6 +6,11 @@ Each release on GitHub uses its section from this file as its notes.
 
 ## [Unreleased]
 
+### Added
+- Updates install from the menu: **Update Available** downloads the new `macdock.exe`, checks its SHA-256 against the
+  release's `macdock.exe.sha256`, swaps it in for the running exe (in whatever folder it is) and restarts MacDock.
+  Before, the menu only opened the release page and the exe had to be replaced by hand.
+
 ## [0.4.5] - 2026-11-25
 
 ### Fixed

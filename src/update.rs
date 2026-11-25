@@ -1,6 +1,7 @@
 //! Update check: asks GitHub for the latest MacDock release at start and every 6 hours, on a worker thread.
 //! A newer version than this build puts a dot on the menu bar logo and an "Update Available" item in its menu,
-//! which opens the release page. Nothing is downloaded or installed by itself.
+//! which offers to install it: the release's macdock.exe is downloaded, checked against its .sha256 and put in
+//! place of the running exe, and MacDock restarts. Nothing is downloaded or installed without that click.
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -14,6 +15,25 @@ pub struct Release {
 }
 
 static LATEST: Mutex<Option<Release>> = Mutex::new(None);
+
+/// An install in progress, and the outcome of the last one: Ok(version) or Err((version, page, why)).
+type Outcome = Result<String, (String, String, String)>;
+static INSTALLING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static OUTCOME: Mutex<Option<Outcome>> = Mutex::new(None);
+
+/// false while another install is running
+pub fn begin_install() -> bool {
+    !INSTALLING.swap(true, std::sync::atomic::Ordering::SeqCst)
+}
+
+pub fn finish_install(r: Outcome) {
+    *OUTCOME.lock().unwrap() = Some(r);
+    INSTALLING.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn take_install() -> Option<Outcome> {
+    OUTCOME.lock().unwrap().take()
+}
 
 /// "v0.2.10" -> [0, 2, 10]
 fn parse(v: &str) -> Vec<u64> {
@@ -51,6 +71,121 @@ pub fn available() -> Option<(String, String)> {
     LATEST.lock().unwrap().as_ref().map(|r| (r.version.clone(), r.url.clone()))
 }
 
+const UA: &str = "User-Agent: MacDock\r\n";
+
+/// "macdock.exe" -> "macdock.exe.new" / "macdock.exe.old", next to it
+fn beside(exe: &std::path::Path, ext: &str) -> std::path::PathBuf {
+    let mut p = exe.as_os_str().to_owned();
+    p.push(ext);
+    p.into()
+}
+
+/// Download release `version`'s macdock.exe, check it against the release's macdock.exe.sha256 and swap it in for
+/// the running exe, which Windows lets us rename (not delete) while it runs: it becomes macdock.exe.old and the next
+/// start removes it. The caller restarts MacDock. On an error the running exe is left where it was.
+pub fn install(version: &str) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let base = format!("/{REPO}/releases/download/v{version}");
+    let (st, bin) = crate::claude_oauth::get_bytes("github.com", &format!("{base}/macdock.exe"), UA, 64 << 20)?;
+    if st != 200 {
+        return Err(format!("GitHub answered {st} for macdock.exe"));
+    }
+    let (st, sum) = crate::claude_oauth::get_bytes("github.com", &format!("{base}/macdock.exe.sha256"), UA, 4096)?;
+    if st != 200 {
+        return Err(format!("GitHub answered {st} for macdock.exe.sha256"));
+    }
+    let want = String::from_utf8_lossy(&sum).split_whitespace().next().unwrap_or_default().to_ascii_lowercase();
+    if want.len() != 64 || hex(&sha256(&bin)) != want {
+        return Err("the download does not match its checksum".into());
+    }
+    if bin.len() < 64 * 1024 || !bin.starts_with(b"MZ") {
+        return Err("the download is not a program".into());
+    }
+    let (new, old) = (beside(&exe, ".new"), beside(&exe, ".old"));
+    std::fs::write(&new, &bin).map_err(|e| format!("could not write next to macdock.exe ({e})"))?;
+    let _ = std::fs::remove_file(&old);
+    if let Err(e) = std::fs::rename(&exe, &old) {
+        let _ = std::fs::remove_file(&new);
+        return Err(format!("could not move the running macdock.exe aside ({e})"));
+    }
+    if let Err(e) = std::fs::rename(&new, &exe) {
+        let _ = std::fs::rename(&old, &exe);
+        let _ = std::fs::remove_file(&new);
+        return Err(format!("could not put the new macdock.exe in place ({e})"));
+    }
+    Ok(())
+}
+
+/// Remove the macdock.exe.old an update left behind. The old process may still be on its way out, so a few tries.
+pub fn cleanup() {
+    let Ok(exe) = std::env::current_exe() else { return };
+    let old = beside(&exe, ".old");
+    if !old.exists() {
+        return;
+    }
+    std::thread::spawn(move || {
+        for _ in 0..40 {
+            if std::fs::remove_file(&old).is_ok() || !old.exists() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    });
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// SHA-256 (FIPS 180-4), for checking a download against the release's checksum file.
+fn sha256(data: &[u8]) -> [u8; 32] {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01,
+        0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+        0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08,
+        0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ];
+    let mut h: [u32; 8] = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+    let mut msg = data.to_vec();
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&((data.len() as u64) * 8).to_be_bytes());
+    for chunk in msg.chunks(64) {
+        let mut w = [0u32; 64];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([chunk[4 * i], chunk[4 * i + 1], chunk[4 * i + 2], chunk[4 * i + 3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
+        }
+        let mut v = h;
+        for i in 0..64 {
+            let s1 = v[4].rotate_right(6) ^ v[4].rotate_right(11) ^ v[4].rotate_right(25);
+            let ch = (v[4] & v[5]) ^ (!v[4] & v[6]);
+            let t1 = v[7].wrapping_add(s1).wrapping_add(ch).wrapping_add(K[i]).wrapping_add(w[i]);
+            let s0 = v[0].rotate_right(2) ^ v[0].rotate_right(13) ^ v[0].rotate_right(22);
+            let maj = (v[0] & v[1]) ^ (v[0] & v[2]) ^ (v[1] & v[2]);
+            let t2 = s0.wrapping_add(maj);
+            v = [t1.wrapping_add(t2), v[0], v[1], v[2], v[3].wrapping_add(t1), v[4], v[5], v[6]];
+        }
+        for i in 0..8 {
+            h[i] = h[i].wrapping_add(v[i]);
+        }
+    }
+    let mut out = [0u8; 32];
+    for (i, x) in h.iter().enumerate() {
+        out[4 * i..4 * i + 4].copy_from_slice(&x.to_be_bytes());
+    }
+    out
+}
+
 pub fn start() {
     std::thread::spawn(|| {
         std::thread::sleep(Duration::from_secs(20)); // let start-up and the network settle
@@ -63,7 +198,31 @@ pub fn start() {
 
 #[cfg(test)]
 mod tests {
-    use super::newer;
+    use super::{hex, newer, sha256};
+
+    #[test]
+    fn sha256_known_answers() {
+        assert_eq!(hex(&sha256(b"")), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(hex(&sha256(b"abc")), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        let long = b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+        assert_eq!(hex(&sha256(long)), "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+        assert_eq!(hex(&sha256(&vec![b'a'; 1_000_000])), "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+    }
+
+    /// Downloads the latest release and checks it, without swapping anything: cargo test -- --ignored live_download
+    #[test]
+    #[ignore]
+    fn live_download() {
+        let (_, body) = crate::claude_oauth::get("api.github.com", "/repos/GodrezJr2/MacDock/releases/latest", "Accept: application/vnd.github+json\r\nUser-Agent: MacDock\r\n").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let tag = v["tag_name"].as_str().unwrap().to_string();
+        let base = format!("/GodrezJr2/MacDock/releases/download/{tag}");
+        let (st, bin) = crate::claude_oauth::get_bytes("github.com", &format!("{base}/macdock.exe"), super::UA, 64 << 20).unwrap();
+        let (_, sum) = crate::claude_oauth::get_bytes("github.com", &format!("{base}/macdock.exe.sha256"), super::UA, 4096).unwrap();
+        println!("{tag}: {st}, {} bytes", bin.len());
+        assert_eq!(st, 200);
+        assert!(String::from_utf8_lossy(&sum).starts_with(&hex(&sha256(&bin))));
+    }
 
     #[test]
     fn compares_versions() {

@@ -76,6 +76,13 @@ impl Drop for H {
 
 /// HTTPS GET with WinHTTP (system proxy settings, 10 s timeouts). Returns (status, body).
 pub(crate) fn get(host: &str, path: &str, headers: &str) -> Result<(u32, String), String> {
+    let (status, body) = get_bytes(host, path, headers, 1 << 20)?;
+    Ok((status, String::from_utf8_lossy(&body).into_owned()))
+}
+
+/// The same GET, the body as bytes and at most `limit` of them. Redirects (a GitHub release asset goes on to
+/// its CDN host) are followed by WinHTTP.
+pub(crate) fn get_bytes(host: &str, path: &str, headers: &str, limit: usize) -> Result<(u32, Vec<u8>), String> {
     let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
     let (host_w, path_w) = (wide(host), wide(path));
     let hdr: Vec<u16> = headers.encode_utf16().collect();
@@ -87,7 +94,7 @@ pub(crate) fn get(host: &str, path: &str, headers: &str) -> Result<(u32, String)
         let _ = WinHttpSetTimeouts(s.0, 10_000, 10_000, 10_000, 10_000);
         let c = H(WinHttpConnect(s.0, PCWSTR(host_w.as_ptr()), 443, 0));
         if c.0.is_null() {
-            return Err("can't reach Anthropic".into());
+            return Err(format!("can't reach {host}"));
         }
         let r = H(WinHttpOpenRequest(c.0, w!("GET"), PCWSTR(path_w.as_ptr()), PCWSTR::null(), PCWSTR::null(), std::ptr::null(), WINHTTP_FLAG_SECURE));
         if r.0.is_null() {
@@ -107,11 +114,11 @@ pub(crate) fn get(host: &str, path: &str, headers: &str) -> Result<(u32, String)
                 break;
             }
             body.extend_from_slice(&buf[..n as usize]);
-            if body.len() > 1 << 20 {
-                break;
+            if body.len() > limit {
+                return Err("answer too large".into());
             }
         }
-        Ok((status, String::from_utf8_lossy(&body).into_owned()))
+        Ok((status, body))
     }
 }
 
