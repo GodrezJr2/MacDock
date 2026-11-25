@@ -731,7 +731,7 @@ impl Widgets {
                 self.render();
             }
             Act::OpenSettings => {
-                crate::push(crate::Ev::Settings(crate::fly_settings::Change::OpenConfig));
+                crate::push(crate::Ev::Settings(crate::fly_settings::Change::Open));
             }
         }
     }

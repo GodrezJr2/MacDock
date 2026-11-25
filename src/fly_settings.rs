@@ -47,6 +47,7 @@ pub enum Change {
     ResetAnimations,
     Restart,
     OpenConfig,
+    Open,
 }
 
 const LANGS: [&str; 3] = ["auto", "en", "id"];
