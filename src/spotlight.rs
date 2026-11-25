@@ -109,6 +109,9 @@ impl Spotlight {
         match self.hits.get(row) {
             Some(&ai) => {
                 let spec = self.apps[ai].spec.clone();
+                if spec == "macdock:settings" {
+                    return Cmd::Settings;
+                }
                 crate::apps::remember(&spec);
                 Cmd::Launch(spec)
             }
@@ -271,7 +274,13 @@ impl Content for Spotlight {
 
     fn right_click(&mut self, id: u32) -> Cmd {
         match id.checked_sub(ID_ROW).and_then(|r| self.hits.get(r as usize)) {
-            Some(&ai) => Cmd::Pin(self.apps[ai].spec.clone()),
+            Some(&ai) => {
+                if self.apps[ai].spec == "macdock:settings" {
+                    Cmd::Settings
+                } else {
+                    Cmd::Pin(self.apps[ai].spec.clone())
+                }
+            }
             None => Cmd::None,
         }
     }

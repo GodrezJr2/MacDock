@@ -1351,6 +1351,13 @@ impl Dock {
                 } else if it.trash {
                     add(Entry::item("Open"), Some(Do::OpenTrash));
                     add(Entry::item("Empty Recycle Bin"), Some(Do::EmptyTrash));
+                } else if it.launch.as_deref() == Some(APPS_ITEM) {
+                    add(Entry::item("Open"), Some(Do::Launch));
+                    add(Entry::Sep, None);
+                    add(Entry::item("MacDock Settings…"), Some(Do::Settings));
+                    if it.pinned() {
+                        add(Entry::item("Remove from Dock"), Some(Do::Unpin));
+                    }
                 } else {
                     for w in it.wins.iter().take(12) {
                         let t: String = if w.title.chars().count() > 48 { w.title.chars().take(47).chain(Some('…')).collect() } else { w.title.clone() };
@@ -1377,6 +1384,8 @@ impl Dock {
                     if self.cfg.icon_overrides.contains_key(&it.key) {
                         add(Entry::item("Reset Icon"), Some(Do::ResetIcon));
                     }
+                    add(Entry::Sep, None);
+                    add(Entry::item("Dock Settings…"), Some(Do::Settings));
                     if it.running() {
                         add(Entry::Sep, None);
                         add(Entry::item("Quit"), Some(Do::QuitApp));
