@@ -143,17 +143,44 @@ pub fn rrect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<Path> {
 }
 
 /// The wallpaper, "fill" fitted and shrunk hard to `fw` x `fh` (the shrink is the blur), via WIC.
+/// No picture set (a solid-colour background) gives a plain pixmap of that colour: the old fallback to
+/// TranscodedWallpaper showed whatever picture was there before, often a dark one.
 pub fn wallpaper(fw: u32, fh: u32) -> Option<Pixmap> {
+    let path = spi_wallpaper()?;
+    if path.is_empty() {
+        return solid_background(fw, fh);
+    }
+    let path = if std::path::Path::new(&path).is_file() {
+        path
+    } else {
+        // a slideshow or Spotlight picture that is gone: Windows keeps its own copy of what it shows
+        format!("{}\\Microsoft\\Windows\\Themes\\TranscodedWallpaper", std::env::var("APPDATA").ok()?)
+    };
+    decode_fill(&path, fw, fh)
+}
+
+/// The desktop's background colour, as a pixmap.
+fn solid_background(fw: u32, fh: u32) -> Option<Pixmap> {
+    let c = unsafe { GetSysColor(COLOR_BACKGROUND) };
+    let mut p = Pixmap::new(fw.max(1), fh.max(1))?;
+    p.fill(tiny_skia::Color::from_rgba8((c & 0xFF) as u8, (c >> 8 & 0xFF) as u8, (c >> 16 & 0xFF) as u8, 255));
+    Some(p)
+}
+
+fn spi_wallpaper() -> Option<String> {
     unsafe {
         let mut buf = [0u16; 520];
         SystemParametersInfoW(SPI_GETDESKWALLPAPER, buf.len() as u32, Some(buf.as_mut_ptr() as *mut c_void), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)).ok()?;
         let n = buf.iter().position(|&c| c == 0).unwrap_or(0);
-        let mut path = String::from_utf16_lossy(&buf[..n]);
-        if path.is_empty() || !std::path::Path::new(&path).exists() {
-            path = format!("{}\\Microsoft\\Windows\\Themes\\TranscodedWallpaper", std::env::var("APPDATA").ok()?);
-        }
+        Some(String::from_utf16_lossy(&buf[..n]))
+    }
+}
+
+/// The image at `path`, "fill" fitted (scaled to cover, centre cut) to `fw` x `fh`.
+fn decode_fill(path: &str, fw: u32, fh: u32) -> Option<Pixmap> {
+    unsafe {
         let f: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
-        let wp = wide(&path);
+        let wp = wide(path);
         let dec = f.CreateDecoderFromFilename(PCWSTR(wp.as_ptr()), None, GENERIC_READ, WICDecodeMetadataCacheOnDemand).ok()?;
         let frame = dec.GetFrame(0).ok()?;
         let (mut w, mut h) = (0u32, 0u32);
@@ -603,6 +630,20 @@ pub fn save_png(path: &str, w: u32, h: u32, bgra: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn solid_background_is_the_desktop_colour() {
+        let c = unsafe { windows::Win32::Graphics::Gdi::GetSysColor(windows::Win32::Graphics::Gdi::COLOR_BACKGROUND) };
+        let p = super::solid_background(4, 2).unwrap();
+        let px = p.pixel(3, 1).unwrap();
+        assert_eq!((px.red(), px.green(), px.blue(), px.alpha()), ((c & 0xFF) as u8, (c >> 8 & 0xFF) as u8, (c >> 16 & 0xFF) as u8, 255));
+    }
+
+    #[test]
+    fn wallpaper_loads_here() {
+        unsafe { let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED); }
+        assert!(super::wallpaper(64, 36).is_some());
+    }
+
     /// A snapshot written to disk must come back with the same pixels (it used to come back striped).
     #[test]
     fn png_roundtrip() {

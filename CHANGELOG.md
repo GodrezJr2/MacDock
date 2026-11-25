@@ -14,6 +14,10 @@ Each release on GitHub uses its section from this file as its notes.
 - Quitting or restarting MacDock could leave its process spinning at 100% of a CPU core, impossible to end and
   blocking every later start until Windows restarted. MacDock now ends its process itself once its clean-up is done,
   and a new start only waits for a copy that is really still running.
+- With a solid-colour desktop background the dock's glass showed whatever picture had been set before (often a dark
+  one); it now shows the background colour.
+- An invisible window behind the dock (an overlay faded all the way out, or one that draws nothing) no longer
+  turns the glass black.
 
 ## [0.4.4] - 2026-11-25
 

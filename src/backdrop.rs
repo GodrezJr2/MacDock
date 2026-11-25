@@ -124,6 +124,13 @@ fn windows_under(region: &RECT) -> Vec<(isize, RECT)> {
         if ex & WS_EX_TRANSPARENT.0 != 0 {
             return true.into(); // click-through overlays
         }
+        if ex & WS_EX_LAYERED.0 != 0 {
+            // a layered window faded all the way out (overlays, hidden tool windows) shows nothing
+            let (mut alpha, mut flags) = (255u8, LAYERED_WINDOW_ATTRIBUTES_FLAGS(0));
+            if GetLayeredWindowAttributes(h, None, Some(&mut alpha), Some(&mut flags)).is_ok() && flags.0 & LWA_ALPHA.0 != 0 && alpha == 0 {
+                return true.into();
+            }
+        }
         let mut cloaked = 0u32;
         let _ = DwmGetWindowAttribute(h, DWMWA_CLOAKED, &mut cloaked as *mut _ as *mut _, 4);
         if cloaked != 0 {
@@ -273,15 +280,17 @@ impl Backdrop {
             let src = std::slice::from_raw_parts(m.pData as *const u8, m.RowPitch as usize * h as usize);
             let row = w as usize * 4;
             let dst = pm.data_mut();
-            let mut any_alpha = false;
+            let (mut any_alpha, mut any_colour) = (false, false);
             for y in 0..h as usize {
                 let s = &src[y * m.RowPitch as usize..][..row];
                 dst[y * row..][..row].copy_from_slice(s);
                 any_alpha |= s.chunks_exact(4).any(|p| p[3] != 0);
+                any_colour |= s.iter().any(|&b| b != 0);
             }
             self.ctx.Unmap(st, 0);
-            if !any_alpha {
-                // some windows hand over no alpha at all: they are opaque
+            if !any_alpha && any_colour {
+                // some windows hand over no alpha at all: they are opaque. All zero is a fully clear
+                // window (an invisible overlay), not a black one: it stays see-through.
                 dst.chunks_exact_mut(4).for_each(|p| p[3] = 255);
             }
         }
