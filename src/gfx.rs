@@ -187,6 +187,13 @@ struct SendBitmap(IWICBitmap);
 // WIC bitmaps are free-threaded
 unsafe impl Send for SendBitmap {}
 
+/// Drop the shared render: the desktop is changing (a new wallpaper fades in over about a second).
+pub fn forget_desktop() {
+    if let Ok(mut c) = DESKTOP_SHOT.lock() {
+        *c = None;
+    }
+}
+
 /// The desktop window (the wallpaper and anything drawn on it) as WIC pixels, and where it sits on screen.
 fn desktop_shot() -> Option<(IWICBitmapSource, RECT)> {
     let mut cache = DESKTOP_SHOT.lock().ok()?;

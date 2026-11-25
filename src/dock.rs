@@ -40,6 +40,8 @@ const TIMER_BACKDROP: usize = 5;
 const TIMER_BACKDROP_RECHECK: usize = 6;
 /// slideshows, Spotlight and live wallpapers change the desktop without telling anyone
 const TIMER_WALLPAPER: usize = 7;
+/// after a wallpaper change: look again while the new one fades in
+const TIMER_WALLPAPER_SETTLE: usize = 8;
 /// changes behind the plate (video, a window dragged) repaint at most this often; hover and magnify stay at full rate
 const BACKDROP_FPS: f64 = 30.0;
 const ABN_POSCHANGED: usize = 1;
@@ -68,6 +70,7 @@ pub enum DockEv {
     Toasts,
     Wallpaper,
     WallpaperCheck,
+    WallpaperSettle,
     Flash(isize),
     AppBar(usize, isize),
     /// something behind the plate changed (true: windows moved; false: a window drew)
@@ -132,6 +135,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
             TIMER_EDGE => ev(h, DockEv::Edge),
             TIMER_TOASTS => ev(h, DockEv::Toasts),
             TIMER_WALLPAPER => ev(h, DockEv::WallpaperCheck),
+            TIMER_WALLPAPER_SETTLE => ev(h, DockEv::WallpaperSettle),
             TIMER_BACKDROP_RECHECK => {
                 let _ = KillTimer(h, TIMER_BACKDROP_RECHECK);
                 ev(h, DockEv::BackdropRecheck);
@@ -371,6 +375,7 @@ pub struct Dock {
     frost: Option<Pixmap>,
     glass: Option<Pixmap>, // the wallpaper at half the screen's pixels, lightly blurred: what Liquid Glass shows
     light_glass: bool,
+    wall_settle: u8, // looks left while a new wallpaper fades in
     backdrop: Option<crate::backdrop::Backdrop>, // live captures of the windows behind the plate
     backdrop_gen: u64,
     bd_due: (bool, bool), // backdrop events waiting for the next allowed repaint: (frames, layout)
@@ -444,7 +449,7 @@ impl Dock {
         let now = Instant::now();
         Dock {
             hwnd, cfg, display, config_dirty: false, shell: Shell::default(), dpi, screen_w, screen_h, fit_b: f64::MAX,
-            win_w: 1.0, win_h: 1.0, items: Vec::new(), icons: HashMap::new(), surface: None, drawn: Vec::new(), frost: None, glass: None, light_glass: false, backdrop: crate::backdrop::Backdrop::new(hwnd, display.primary), backdrop_gen: 0, bd_due: (false, false), bd_last: 0.0, bd_timer: false, behind: None, glass_layer: None, over: None, wall_strip: None,
+            win_w: 1.0, win_h: 1.0, items: Vec::new(), icons: HashMap::new(), surface: None, drawn: Vec::new(), frost: None, glass: None, light_glass: false, wall_settle: 0, backdrop: crate::backdrop::Backdrop::new(hwnd, display.primary), backdrop_gen: 0, bd_due: (false, false), bd_last: 0.0, bd_timer: false, behind: None, glass_layer: None, over: None, wall_strip: None,
             label: None, label_alpha: 0.0, menu_up: false, drag_files: false, label_at: (0.0, 0.0, 0.0, 0.0), hovered: None, plate_left: 0.0,
             plate_w: 0.0, seps: Vec::new(), running_now: HashMap::new(), clock: now, last_t: 0.0, awake: false, hidden: false,
             sig: String::new(), refreshes: 0, appbar: false, reserved: None,
@@ -703,6 +708,17 @@ impl Dock {
         }
         self.label = None;
         self.wake();
+    }
+
+    /// Read the desktop again, cheaply, and rebuild the glass only if it changed.
+    fn reload_frost_if_changed(&mut self) -> bool {
+        let fh = (240.0 * self.screen_h / self.screen_w).round().max(1.0) as u32;
+        let now = gfx::wallpaper_on(Some(self.display.rect), 240, fh);
+        let changed = now.as_ref().map(|p| p.data()) != self.frost.as_ref().map(|p| p.data());
+        if changed {
+            self.load_frost();
+        }
+        changed
     }
 
     fn load_frost(&mut self) {
@@ -2104,15 +2120,28 @@ impl Dock {
                     self.wake();
                 }
             }
-            DockEv::Wallpaper => self.load_frost(),
+            DockEv::Wallpaper => {
+                // Windows says so as the new wallpaper starts to fade in: what is drawn now is still mostly the
+                // old one, so look again a few times while it settles
+                gfx::forget_desktop();
+                self.load_frost();
+                self.wall_settle = 4;
+                unsafe { SetTimer(self.hwnd, TIMER_WALLPAPER_SETTLE, 700, None) };
+            }
+            DockEv::WallpaperSettle => {
+                gfx::forget_desktop();
+                let _ = self.reload_frost_if_changed();
+                self.wall_settle = self.wall_settle.saturating_sub(1);
+                if self.wall_settle == 0 {
+                    unsafe { let _ = KillTimer(self.hwnd, TIMER_WALLPAPER_SETTLE); }
+                }
+            }
             DockEv::WallpaperCheck => {
                 // a render of the desktop takes ~40 ms: not while the dock is animating, or hidden
-                if !self.hidden && !self.awake {
-                    let fh = (240.0 * self.screen_h / self.screen_w).round().max(1.0) as u32;
-                    let now = gfx::wallpaper_on(Some(self.display.rect), 240, fh);
-                    if now.as_ref().map(|p| p.data()) != self.frost.as_ref().map(|p| p.data()) {
-                        self.load_frost();
-                    }
+                if !self.hidden && !self.awake && self.reload_frost_if_changed() {
+                    // the desktop changed without a word (slideshow, Spotlight): tell the menu bar and widgets,
+                    // and the other docks, as Windows would have
+                    tell_wallpaper_changed(self.hwnd);
                 }
             }
             DockEv::Backdrop(layout) => {
@@ -2276,6 +2305,22 @@ mod item_identity_tests {
     fn launcher_fallback_still_matches_squirrel_apps() {
         assert!(launcher_of(r"C:\\App\\Update.exe", r"C:\\App\\app-1.2.3\\App.exe"));
         assert!(!launcher_of(r"C:\\App\\Update.exe", r"C:\\Other\\App.exe"));
+    }
+}
+
+/// Post the wallpaper-changed broadcast to MacDock's other windows (not `me`).
+fn tell_wallpaper_changed(me: HWND) {
+    unsafe extern "system" fn each(h: HWND, l: LPARAM) -> windows::Win32::Foundation::BOOL {
+        let me = HWND(l.0 as *mut _);
+        let mut pid = 0;
+        GetWindowThreadProcessId(h, Some(&mut pid));
+        if h != me && pid == windows::Win32::System::Threading::GetCurrentProcessId() {
+            let _ = PostMessageW(h, WM_SETTINGCHANGE, WPARAM(SPI_SETDESKWALLPAPER), LPARAM(0));
+        }
+        true.into()
+    }
+    unsafe {
+        let _ = EnumWindows(Some(each), LPARAM(me.0 as isize));
     }
 }
 

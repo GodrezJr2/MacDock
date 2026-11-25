@@ -25,6 +25,8 @@ const GAP: f32 = 14.0;
 const RADIUS: f32 = 26.0;
 const MARGIN: f32 = 22.0; // shadow room
 const TIMER_TICK: usize = 1;
+/// a new wallpaper has faded in: cut the glass again
+const TIMER_WALLPAPER: usize = 2;
 const TICK_MS: u32 = 5000;
 
 const RED: (u8, u8, u8) = (0xFF, 0x45, 0x3A);
@@ -374,7 +376,19 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             });
             return LRESULT(0);
         }
+        WM_TIMER if wp.0 == TIMER_WALLPAPER => {
+            let _ = KillTimer(h, TIMER_WALLPAPER);
+            STATE.with(|st| {
+                if let Some(w) = st.borrow_mut().as_mut() {
+                    w.place();
+                    w.render();
+                }
+            });
+        }
         WM_SETTINGCHANGE | WM_DISPLAYCHANGE | WM_DPICHANGED => {
+            if msg == WM_SETTINGCHANGE && wp.0 == 0x14 /* SPI_SETDESKWALLPAPER */ {
+                SetTimer(h, TIMER_WALLPAPER, 3500, None);
+            }
             // wallpaper, work area (menu bar / dock reserve), resolution or scale changed
             STATE.with(|st| {
                 if let Some(w) = st.borrow_mut().as_mut() {

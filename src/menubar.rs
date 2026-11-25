@@ -32,6 +32,8 @@ const SIDE: f64 = 10.0; // from the screen edges
 const CB_APPBAR: u32 = WM_APP + 21;
 const TIMER_TICK: usize = 1;
 const TIMER_DISPLAY: usize = 2;
+/// a new wallpaper has faded in: read the desktop again
+const TIMER_WALLPAPER: usize = 3;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
 const VK_CONTROL: u8 = 0x11;
@@ -570,6 +572,12 @@ impl MenuBar {
                 }
                 self.place();
             }
+            BarEv::Timer(TIMER_WALLPAPER) => {
+                unsafe { let _ = KillTimer(self.hwnd, TIMER_WALLPAPER); }
+                crate::gfx::forget_desktop();
+                crate::flyout::forget_backdrop();
+                self.load_frost();
+            }
             BarEv::Timer(_) => {}
             BarEv::Display => unsafe {
                 // let Windows settle (several messages arrive per change), then refit once
@@ -583,8 +591,10 @@ impl MenuBar {
             BarEv::AppBar(2 /* ABN_FULLSCREENAPP */, _) => return Some(BarAct::Fullscreen),
             BarEv::AppBar(..) => {}
             BarEv::Wallpaper => {
+                crate::gfx::forget_desktop();
                 crate::flyout::forget_backdrop();
                 self.load_frost();
+                unsafe { SetTimer(self.hwnd, TIMER_WALLPAPER, 3500, None) };
                 self.render();
             }
         }
