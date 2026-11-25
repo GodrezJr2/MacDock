@@ -473,6 +473,11 @@ pub trait Content {
     /// Mouse over a spot changed (the tray forwards it to the app).
     fn hover(&mut self, _id: Option<u32>) {}
     fn wheel(&mut self, _delta: i32) {}
+    /// Redraw on every mouse move. A panel whose look under the mouse only changes when the spot under it
+    /// changes says no, so moving across it costs nothing (Settings on a 1080p iGPU laptop, issue #7).
+    fn redraw_on_move(&self) -> bool {
+        true
+    }
     fn hwheel(&mut self, _delta: i32) {}
     fn char(&mut self, _c: char) -> Cmd {
         Cmd::None
@@ -583,6 +588,17 @@ fn create_window(window: bool) -> HWND {
     }
 }
 
+/// The bottom of the primary monitor's work area in px: above the dock when it reserves its strip.
+fn work_bottom_px() -> i32 {
+    let mut r = windows::Win32::Foundation::RECT::default();
+    let ok = unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, Some(&mut r as *mut _ as *mut _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)) }.is_ok();
+    if ok && r.bottom > r.top {
+        r.bottom
+    } else {
+        unsafe { GetSystemMetrics(SM_CYSCREEN) }
+    }
+}
+
 pub struct Flyout {
     pub hwnd: HWND,
     pub kind: crate::menubar::Extra,
@@ -618,6 +634,9 @@ pub struct Flyout {
     stage: bool,
     born: std::time::Instant,
     anim_timer: bool,
+    /// a panel taller than the screen scrolls: how far (DIPs), and how far it can
+    scroll: f32,
+    overflow: f32,
 }
 
 impl Flyout {
@@ -630,6 +649,7 @@ impl Flyout {
             hwnd, kind, content, dpi: dpi as f32, right_px, top_px, screen_w_px, pos: (0, 0), mouse: None, hot: None,
             press: None, spots: Vec::new(), surface: None, stage_pm: None, glass: None, under: None, glass_h: 0.0, tracking: false, stay_open: window, window, moved: None,
             full: false, view: (dpi as f32, 0.0, 0.0), stage: false, born: std::time::Instant::now(), anim_timer: false,
+            scroll: 0.0, overflow: 0.0,
         };
         f.content.opened(hwnd.0 as isize);
         // the animation starts once it can be seen: setting up the content can take a while (Control Center)
@@ -740,9 +760,13 @@ impl Flyout {
                     }
                 }
                 let hot = self.spot_at(p).map(|s| s.id);
-                if hot != self.hot {
+                let changed = hot != self.hot;
+                if changed {
                     self.hot = hot;
                     self.content.hover(hot);
+                }
+                if !changed && self.press.is_none() && !self.content.redraw_on_move() {
+                    return None; // nothing under the mouse looks different
                 }
             }
             FlyEv::Leave => {
@@ -780,6 +804,15 @@ impl Flyout {
                 if let Some(s) = self.spot_at(self.to_content(x, y)) {
                     cmd = self.content.right_click(s.id);
                 }
+            }
+            FlyEv::Wheel(d) if self.overflow > 0.0 && !self.stage && self.content.glass().is_none() => {
+                // a panel cut to the screen's height: the wheel (or two fingers) scrolls it
+                let before = self.scroll;
+                self.scroll = (self.scroll - d as f32 / 120.0 * 56.0).clamp(0.0, self.overflow);
+                if let Some(m) = self.mouse.as_mut() {
+                    m.1 += self.scroll - before;
+                }
+                self.hot = self.mouse.and_then(|p| self.spot_at(p)).map(|s| s.id);
             }
             FlyEv::Wheel(d) => self.content.wheel(d),
             FlyEv::HWheel(d) => self.content.hwheel(d),
@@ -989,9 +1022,8 @@ impl Flyout {
         let s = self.dpi;
         // measure pass: draw into a scratch pixmap sized for the tallest panel, keep the height
         let cw = w - 2.0 * padx;
-        let max_h = 1000.0; // fits a 1080p screen at 100% under the bar
+        let max_h = 1000.0; // the tallest a panel measures; a shorter screen cuts it further below
         let (pw, ph_max) = (((w + 2.0 * MARGIN) * s).ceil() as u32, ((max_h + 2.0 * MARGIN) * s).ceil() as u32);
-        let mut pm = Pixmap::new(pw, ph_max).unwrap();
         let (ox, oy) = (MARGIN + padx, MARGIN + pady);
         // panel first at full height guess, then content; redrawn below once the height is known
         let mut spots = Vec::new();
@@ -1000,8 +1032,15 @@ impl Flyout {
             let mut ui = Ui { pm: &mut scratch, s, ox, oy, mouse: self.mouse, pressed: self.press, spots: &mut spots, w: cw, fs: s, still: true };
             self.content.draw(&mut ui)
         };
-        let panel_h = (ch + 2.0 * pady).min(max_h);
+        // no taller than the room left between its top and the bottom of the work area (above the dock): at
+        // 1080p and 150% the screen is 720 DIPs, so Settings is cut there and scrolls (issue #7)
+        let top_y = self.moved.map_or(self.top_px - (7.0 * s) as i32, |m| m.1);
+        let room = (work_bottom_px() - top_y) as f32 / s - 2.0 * MARGIN;
+        let panel_h = (ch + 2.0 * pady).min(max_h).min(room.max(160.0));
+        self.overflow = if self.full { 0.0 } else { (ch + 2.0 * pady - panel_h).max(0.0) };
+        self.scroll = self.scroll.clamp(0.0, self.overflow);
         let total_h = ((panel_h + 2.0 * MARGIN) * s).ceil() as u32;
+        let Some(mut pm) = Pixmap::new(pw, total_h) else { return };
         // shadow + panel
         if let Some(path) = gfx::rrect(MARGIN * s, MARGIN * s, w * s, panel_h * s, 16.0 * s) {
             if let Some((sh, sx, sy)) = gfx::shadow(&path, 13.0 * s, (0, 0, 0, 0x80)) {
@@ -1026,10 +1065,20 @@ impl Flyout {
         if self.full {
             return self.render_full(w, panel_h, padx, pady);
         }
-        let _ = panel_h;
+        let oy = oy - self.scroll;
         {
             let mut ui = Ui { pm: &mut pm, s, ox, oy, mouse: self.mouse, pressed: self.press, spots: &mut spots, w: cw, fs: s, still: true };
-            self.content.draw(&mut ui);
+            if self.overflow > 0.0 {
+                // clipped to the panel, its edges fading where more is to scroll to
+                let (sc, ov) = (self.scroll, self.overflow);
+                let fade = [if sc > 0.5 { 18.0 } else { 0.0 }, if sc < ov - 0.5 { 18.0 } else { 0.0 }, 0.0, 0.0];
+                let content = &mut self.content;
+                ui.layer(-padx, sc - pady + 1.0, w, panel_h - 2.0, 1.0, 1.0, fade, |ui| {
+                    content.draw(ui);
+                });
+            } else {
+                self.content.draw(&mut ui);
+            }
         }
         self.spots = spots;
         self.view = (s, ox, oy);
@@ -1057,7 +1106,7 @@ impl Flyout {
             let z = 0.96 + 0.04 * e;
             let ax = if self.kind.centred() { pw as f32 / 2.0 } else { pw as f32 - MARGIN * s };
             let ay = if self.kind.centred() { total_h as f32 / 2.0 } else { MARGIN * s };
-            if let Some(mut out) = Pixmap::new(pw, ph_max) {
+            if let Some(mut out) = Pixmap::new(pw, total_h) {
                 let paint = PixmapPaint { opacity: e, quality: tiny_skia::FilterQuality::Bilinear, ..Default::default() };
                 out.draw_pixmap(0, 0, pm.as_ref(), &paint, Transform::from_row(z, 0.0, 0.0, z, ax - ax * z, ay - ay * z), None);
                 pm = out;

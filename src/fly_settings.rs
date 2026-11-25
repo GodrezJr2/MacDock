@@ -484,6 +484,10 @@ impl Content for Settings {
         y < TITLE_H + 4.0
     }
 
+    fn redraw_on_move(&self) -> bool {
+        false // rows light up per spot; a slider being dragged redraws through the press
+    }
+
     fn draw(&mut self, ui: &mut Ui) -> f32 {
         let cw = ui.w;
         let col = (cw - COL_GAP) / 2.0;
