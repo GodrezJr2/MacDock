@@ -13,6 +13,7 @@ use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 use crate::flyout::{white, Cmd, Content, Ui, ACCENT4, WM_FLY_DATA};
+use crate::i18n::t;
 use crate::menubar::net;
 
 // ---- shared Wi-Fi state (also used by Control Center)
@@ -98,6 +99,8 @@ struct State {
     /// the network whose password row is open
     expanded: Option<String>,
     busy: bool,
+    /// a scan is running (the header shows a spinner instead of the refresh button)
+    scanning: bool,
 }
 
 const ID_SWITCH: u32 = 1;
@@ -105,15 +108,22 @@ const ID_CURRENT: u32 = 2;
 const ID_SETTINGS: u32 = 3;
 const ID_FIELD: u32 = 4;
 const ID_JOIN: u32 = 5;
+const ID_REFRESH: u32 = 6;
 const ID_NET: u32 = 100;
 const ROW_H: f32 = 36.0;
 const LIST_MAX: f32 = 330.0;
+/// seconds between scans while the flyout stays open (Windows itself rescans about once a minute)
+const RESCAN_S: u64 = 15;
 
 pub struct WifiFly {
     hwnd: isize,
     st: Arc<Mutex<State>>,
     scroll: usize,
     password: String,
+    /// when the last scan was asked for
+    scanned: std::time::Instant,
+    /// the spinner's clock
+    born: std::time::Instant,
 }
 
 fn status_name(s: WiFiConnectionStatus) -> String {
@@ -171,11 +181,13 @@ fn reload(st: &Mutex<State>, scan: bool) {
     if scan {
         {
             let mut s = st.lock().unwrap();
-            if s.current.is_none() && s.status.is_empty() {
+            s.scanning = true;
+            if s.nets.is_empty() && s.status.is_empty() {
                 s.status = "Searching…".into();
             }
         }
         let _ = ad.ScanAsync().and_then(|o| o.get());
+        st.lock().unwrap().scanning = false;
     }
     let mut nets: Vec<(NetInfo, f64)> = Vec::new();
     if let Ok(list) = ad.NetworkReport().and_then(|r| r.AvailableNetworks()) {
@@ -213,7 +225,8 @@ impl WifiFly {
     pub fn new() -> WifiFly {
         // show the connected network at once; the scan fills in the rest
         let st = State { on: true, current: net::current(), ..Default::default() };
-        WifiFly { hwnd: 0, st: Arc::new(Mutex::new(st)), scroll: 0, password: String::new() }
+        let now = std::time::Instant::now();
+        WifiFly { hwnd: 0, st: Arc::new(Mutex::new(st)), scroll: 0, password: String::new(), scanned: now, born: now }
     }
 
     fn run(&self, f: impl FnOnce(&Mutex<State>) + Send + 'static) {
@@ -229,6 +242,17 @@ impl WifiFly {
             f(&st);
             st.lock().unwrap().busy = false;
         });
+    }
+
+    /// Look for networks again (the refresh button, and every RESCAN_S while open).
+    fn rescan(&mut self) {
+        let s = self.st.lock().unwrap();
+        if s.busy || !s.on || s.expanded.is_some() {
+            return;
+        }
+        drop(s);
+        self.scanned = std::time::Instant::now();
+        self.run(|st| reload(st, true));
     }
 
     fn join(&mut self, ssid: String, secured: bool, password: Option<String>) {
@@ -291,7 +315,23 @@ impl Content for WifiFly {
     }
     fn opened(&mut self, hwnd: isize) {
         self.hwnd = hwnd;
+        self.scanned = std::time::Instant::now();
         self.run(|st| reload(st, true));
+    }
+
+    fn period_ms(&self) -> u32 {
+        1000
+    }
+
+    fn tick(&mut self) {
+        if self.scanned.elapsed().as_secs() >= RESCAN_S {
+            self.rescan();
+        }
+    }
+
+    /// the spinner turns at the frame rate while a scan runs
+    fn animating(&self) -> bool {
+        self.st.lock().unwrap().scanning
     }
 
     fn click(&mut self, id: u32, _fx: f32) -> Cmd {
@@ -319,6 +359,7 @@ impl Content for WifiFly {
                 std::thread::sleep(std::time::Duration::from_millis(800));
                 reload(st, false);
             }),
+            ID_REFRESH => self.rescan(),
             ID_SETTINGS => return Cmd::Launch("ms-settings:network-wifi".into()),
             ID_JOIN => self.submit(),
             id if id >= ID_NET => {
@@ -366,9 +407,21 @@ impl Content for WifiFly {
         // header
         ui.text_mid(8.0, 10.0, "Wi-Fi", 13.5, 600, white(0xF2), 0.0);
         ui.switch(ID_SWITCH, w - 4.0 - 36.0, 0.0, st.on);
+        if st.on {
+            // refresh, or a spinner while a scan runs (macOS shows one next to the list as it fills)
+            let (cx, cy, r) = (w - 4.0 - 36.0 - 8.0 - 12.0, 10.0, 12.0);
+            if st.scanning {
+                spinner(ui, cx, cy, self.born.elapsed().as_secs_f32());
+            } else {
+                if ui.hit(ID_REFRESH, cx - r, cy - r, 2.0 * r, 2.0 * r) {
+                    ui.circle(cx, cy, r, white(0x1F));
+                }
+                ui.glyph(cx, cy, '\u{E72C}', 12.0, white(0xA0));
+            }
+        }
         let mut y = 26.0;
         if !st.status.is_empty() {
-            y += ui.text_wrap(8.0, y, &st.status, 11.5, 400, white(0x80), w - 16.0) + 4.0;
+            y += ui.text_wrap(8.0, y, t(&st.status), 11.5, 400, white(0x80), w - 16.0) + 4.0;
         }
         // the joined network
         if st.on {
@@ -381,7 +434,7 @@ impl Content for WifiFly {
         // other networks
         if st.on && !st.nets.is_empty() {
             y += 4.0;
-            ui.text(8.0, y, "Other Networks", 11.5, 600, white(0x80), 0.0);
+            ui.text(8.0, y, t("Other Networks"), 11.5, 600, white(0x80), 0.0);
             y += ui.line_h(11.5, 600) + 2.0;
             let visible = (LIST_MAX / ROW_H) as usize;
             let mut shown = 0.0;
@@ -399,7 +452,7 @@ impl Content for WifiFly {
                     ui.outline(fx, fy, fw, 28.0, 6.0, 1.0, ACCENT4);
                     let dots: String = "•".repeat(self.password.chars().count());
                     let tw = if dots.is_empty() {
-                        ui.text_mid(fx + 8.0, fy + 14.0, "Password", 13.0, 400, white(0x60), fw - 16.0);
+                        ui.text_mid(fx + 8.0, fy + 14.0, t("Password"), 13.0, 400, white(0x60), fw - 16.0);
                         0.0
                     } else {
                         ui.text_mid(fx + 8.0, fy + 14.0, &dots, 13.0, 400, white(0xF2), fw - 16.0)
@@ -408,8 +461,8 @@ impl Content for WifiFly {
                     let jx = w - 8.0 - 56.0;
                     let hov = ui.hit(ID_JOIN, jx, fy, 56.0, 28.0);
                     ui.fill(jx, fy, 56.0, 28.0, 6.0, if hov { (0x30, 0x98, 0xFF, 255) } else { ACCENT4 });
-                    let jw = ui.text_w("Join", 13.0, 500);
-                    ui.text_mid(jx + (56.0 - jw) / 2.0, fy + 14.0, "Join", 13.0, 500, white(255), 0.0);
+                    let jw = ui.text_w(t("Join"), 13.0, 500);
+                    ui.text_mid(jx + (56.0 - jw) / 2.0, fy + 14.0, t("Join"), 13.0, 500, white(255), 0.0);
                     y += 2.0 + 28.0 + 8.0;
                 }
             }
@@ -429,8 +482,21 @@ impl Content for WifiFly {
         ui.fill(8.0, y, w - 16.0, 1.0, 0.0, white(0x1A));
         y += 1.0 + 8.0;
         ui.row(ID_SETTINGS, 0.0, y, w, 30.0);
-        ui.text_mid(8.0, y + 15.0, "Wi-Fi Settings…", 13.0, 400, white(0xF2), 0.0);
+        ui.text_mid(8.0, y + 15.0, t("Wi-Fi Settings…"), 13.0, 400, white(0xF2), 0.0);
         y + 30.0 - 3.0
+    }
+}
+
+/// The macOS activity spinner: eight spokes, the brightest one going round once a second.
+fn spinner(ui: &mut Ui, cx: f32, cy: f32, secs: f32) {
+    const N: usize = 8;
+    let head = (secs * N as f32) as usize % N;
+    for i in 0..N {
+        let a = i as f32 / N as f32 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+        let (s, c) = a.sin_cos();
+        let age = (head + N - i) % N; // 0 = the brightest
+        let alpha = (0xE0 as f32 * (1.0 - age as f32 / N as f32)).max(0x30 as f32) as u8;
+        ui.line(cx + c * 3.5, cy + s * 3.5, cx + c * 7.0, cy + s * 7.0, 1.6, white(alpha));
     }
 }
 
@@ -445,11 +511,40 @@ fn net_row(ui: &mut Ui, y: f32, w: f32, ssid: &str, bars: u8, secured: bool, con
         let (h1, h2) = (ui.line_h(13.0, 600), ui.line_h(11.0, 400));
         let top = cy - (h1 + h2) / 2.0;
         ui.text(tx, top, ssid, 13.0, 600, white(0xF2), w - tx - right);
-        ui.text(tx, top + h1, "Connected", 11.0, 400, white(0x80), 0.0);
+        ui.text(tx, top + h1, t("Connected"), 11.0, 400, white(0x80), 0.0);
     } else {
         ui.text_mid(tx, cy, ssid, 13.0, 400, white(0xF2), w - tx - right);
     }
     if secured {
         ui.glyph(w - 8.0 - 6.0, cy, '\u{E72E}', 11.0, white(0x80));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The flyout while scanning and after: target/wifi_scan.png, target/wifi_idle.png
+    /// (cargo test wifi_snapshot -- --ignored).
+    #[test]
+    #[ignore]
+    fn wifi_snapshot() {
+        for (scanning, file) in [(true, "wifi_scan"), (false, "wifi_idle")] {
+            let mut f = WifiFly::new();
+            {
+                let mut s = f.st.lock().unwrap();
+                s.on = true;
+                s.current = Some(("Home 5G".into(), 4));
+                s.scanning = scanning;
+                s.nets = vec![
+                    NetInfo { ssid: "Neighbour".into(), bars: 3, secured: true },
+                    NetInfo { ssid: "Cafe Free WiFi".into(), bars: 2, secured: false },
+                ];
+            }
+            f.born -= std::time::Duration::from_millis(300);
+            let (w, h, px) = crate::flyout::snapshot(&mut f, 1.25);
+            let path = format!(r"{}\target\{file}.png", env!("CARGO_MANIFEST_DIR"));
+            assert!(crate::gfx::save_png(&path, w, h, &px));
+        }
     }
 }

@@ -184,6 +184,18 @@ fn id(s: &str) -> Option<&'static str> {
         "Reset to Defaults" => "Reset ke Default",
         "Click again to reset" => "Klik lagi untuk reset",
         "Fan out windows on hover" => "Kipas jendela saat hover",
+        "Windows key opens Spotlight" => "Tombol Windows membuka Spotlight",
+        // Wi-Fi
+        "Wi-Fi is off" => "Wi-Fi mati",
+        "Searching…" => "Mencari…",
+        "No networks found" => "Tidak ada jaringan",
+        "Other Networks" => "Jaringan Lain",
+        "Wi-Fi Settings…" => "Pengaturan Wi-Fi…",
+        "Connected" => "Terhubung",
+        "Password" => "Kata sandi",
+        "Join" => "Gabung",
+        "Wrong password." => "Kata sandi salah.",
+        "Not connected · using Ethernet" => "Tidak terhubung · memakai Ethernet",
         "Open config.json" => "Buka config.json",
         _ => return None,
     })
