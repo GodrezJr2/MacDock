@@ -180,6 +180,38 @@ fn corners(p: &Pose, w: f32, h: f32) -> [Point; 4] {
     pts
 }
 
+/// What each card of a fan was made from, to fan.log (kept short): class, pid, rect, minimized, picture.
+fn log_cards(wins: &[(isize, String)], pics: &[Option<Pixmap>]) {
+    use std::io::Write;
+    let path = format!("{}\\fan.log", crate::config::dir());
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 256 * 1024) {
+        let _ = std::fs::remove_file(&path);
+    }
+    let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) else { return };
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    for ((h, title), pic) in wins.iter().zip(pics) {
+        let hw = HWND(*h as *mut _);
+        let mut cls = [0u16; 128];
+        let (mut pid, mut r) = (0u32, RECT::default());
+        let (n, iconic, visible) = unsafe {
+            GetWindowThreadProcessId(hw, Some(&mut pid));
+            let _ = GetWindowRect(hw, &mut r);
+            (GetClassNameW(hw, &mut cls) as usize, IsIconic(hw).as_bool(), IsWindowVisible(hw).as_bool())
+        };
+        let _ = writeln!(
+            f,
+            "{t} {h:#x} pid {pid} {} [{}] {},{} {}x{} iconic {iconic} visible {visible} pic {}",
+            String::from_utf16_lossy(&cls[..n]),
+            title,
+            r.left,
+            r.top,
+            r.right - r.left,
+            r.bottom - r.top,
+            pic.as_ref().map(|p| format!("{}x{}", p.width(), p.height())).unwrap_or_else(|| "none".into()),
+        );
+    }
+}
+
 /// Cut a title to fit room px, with an ellipsis.
 fn fit(title: &str, font: Font, room: f32) -> String {
     if gfx::measure(title, font).0 as f32 <= room {
@@ -347,6 +379,7 @@ impl Fan {
             }).collect();
             jobs.into_iter().map(|j| j.join().ok().flatten()).collect()
         });
+        log_cards(&wins, &pics);
         let ang = angles(wins.len());
         self.cards = wins.iter().zip(pics).zip(ang).filter_map(|(((h, title), pic), angle)| {
             let img = make_card(pic, r.icon.as_ref(), title, s)?;
