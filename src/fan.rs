@@ -180,27 +180,6 @@ fn corners(p: &Pose, w: f32, h: f32) -> [Point; 4] {
     pts
 }
 
-/// Shrink a big picture to about w px wide: halve it with a box filter first, so the last bicubic step
-/// does not skip pixels and shimmer.
-fn shrink(mut img: Pixmap, w: u32) -> Pixmap {
-    while img.width() >= w * 2 && img.height() >= 4 {
-        let (sw, nw, nh) = (img.width() as usize, img.width() / 2, img.height() / 2);
-        let Some(mut out) = Pixmap::new(nw, nh) else { break };
-        let (src, dst) = (img.data(), out.data_mut());
-        for y in 0..nh as usize {
-            for x in 0..nw as usize {
-                let i = |dx: usize, dy: usize| ((2 * y + dy) * sw + 2 * x + dx) * 4;
-                for c in 0..4 {
-                    let s = src[i(0, 0) + c] as u32 + src[i(1, 0) + c] as u32 + src[i(0, 1) + c] as u32 + src[i(1, 1) + c] as u32;
-                    dst[(y * nw as usize + x) * 4 + c] = ((s + 2) / 4) as u8;
-                }
-            }
-        }
-        img = out;
-    }
-    img
-}
-
 /// Cut a title to fit room px, with an ellipsis.
 fn fit(title: &str, font: Font, room: f32) -> String {
     if gfx::measure(title, font).0 as f32 <= room {
@@ -234,7 +213,7 @@ fn make_card(pic: Option<Pixmap>, icon: Option<&Pixmap>, title: &str, s: f32) ->
     let q = PixmapPaint { quality: FilterQuality::Bicubic, ..Default::default() };
     match pic {
         Some(p) => {
-            let p = shrink(p, cw as u32);
+            let p = gfx::shrink(p, cw as u32);
             // cover the card, top aligned so the window's title bar shows
             let k = (cw / p.width() as f32).max(ch / p.height() as f32);
             let x = (cw - p.width() as f32 * k) / 2.0;
@@ -725,7 +704,7 @@ mod tests {
     fn shrink_halves_down_to_size() {
         let mut p = Pixmap::new(1000, 600).unwrap();
         p.fill(Color::WHITE);
-        let s = shrink(p, 200);
+        let s = gfx::shrink(p, 200);
         assert_eq!((s.width(), s.height()), (250, 150));
         assert_eq!(s.data()[0..4], [255, 255, 255, 255]);
     }

@@ -673,6 +673,27 @@ fn box_pass(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize, horizontal
     }
 }
 
+/// Halve a picture with a box filter while it is at least 2w px wide, so it ends between w and 2w (a last
+/// bicubic step after it does not skip pixels and shimmer).
+pub fn shrink(mut img: Pixmap, w: u32) -> Pixmap {
+    while img.width() >= w * 2 && img.height() >= 4 {
+        let (sw, nw, nh) = (img.width() as usize, img.width() / 2, img.height() / 2);
+        let Some(mut out) = Pixmap::new(nw, nh) else { break };
+        let (src, dst) = (img.data(), out.data_mut());
+        for y in 0..nh as usize {
+            for x in 0..nw as usize {
+                let i = |dx: usize, dy: usize| ((2 * y + dy) * sw + 2 * x + dx) * 4;
+                for c in 0..4 {
+                    let s = src[i(0, 0) + c] as u32 + src[i(1, 0) + c] as u32 + src[i(0, 1) + c] as u32 + src[i(1, 1) + c] as u32;
+                    dst[(y * nw as usize + x) * 4 + c] = ((s + 2) / 4) as u8;
+                }
+            }
+        }
+        img = out;
+    }
+    img
+}
+
 /// Decode an image file (PNG etc.) with WIC into premultiplied BGRA, shrunk to fit `max_px` if larger.
 pub fn image_file(path: &str, max_px: u32) -> Option<Pixmap> {
     unsafe {

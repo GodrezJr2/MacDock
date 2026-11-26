@@ -395,7 +395,12 @@ const SNAP_W: i32 = 2560;
 /// Memory for snapshots of minimized windows (newest first; older ones come back from disk) and for windows
 /// still on screen; the newest of each kind is always kept. About what 14 shrunk snapshots used to take.
 const SNAP_BYTES_MINIMIZED: usize = 32 << 20;
-const SNAP_BYTES_ON_SCREEN: usize = 24 << 20;
+const SNAP_BYTES_ON_SCREEN: usize = 28 << 20;
+/// Snapshots of windows still on screen other than the newest are halved down to under 2x this width
+/// (2560 -> 1280, 1920 -> 960): a quarter of the memory, so several fit the budget. They are the fallback when
+/// a window can't be read at minimize time (Chrome stops drawing a window that is covered, and PrintWindow
+/// then returns black), which is softer at the very end of a restore but beats no genie at all.
+const OLD_SNAP_W: u32 = 800;
 
 /// Copies a window's pixels straight off the screen (the window in front is what's visible there), shrunk to
 /// at most `max_w` px wide by GDI (HALFTONE) so no bigger bitmap is ever allocated.
@@ -918,6 +923,13 @@ impl Genie {
                 .collect();
             let (max, budget) = if want_iconic { (MAX_MINIMIZED, SNAP_BYTES_MINIMIZED) } else { (MAX_SNAPS, SNAP_BYTES_ON_SCREEN) };
             v.sort_by_key(|x| std::cmp::Reverse(x.1)); // newest first
+            if !want_iconic {
+                for (k, _) in v.iter().skip(1) {
+                    if let Some(s) = self.snaps.get_mut(k).filter(|s| s.img.width() >= OLD_SNAP_W * 2) {
+                        s.img = Arc::new(crate::gfx::shrink((*s.img).clone(), OLD_SNAP_W));
+                    }
+                }
+            }
             let mut used = 0usize;
             for (i, (k, _)) in v.iter().enumerate() {
                 used += self.snaps.get(k).map_or(0, |s| s.img.data().len());
@@ -1321,6 +1333,20 @@ impl Genie {
         }
         if let Some(s) = self.snaps.get(&(h.0 as isize)) {
             got.insert(h.0 as isize, (s.img.clone(), s.rect));
+        }
+        // a window DWM could not give back (covered Chrome draws nothing): the snapshot from when it was last
+        // in front, if it has not moved since
+        for &k in &others {
+            if got.contains_key(&k) {
+                continue;
+            }
+            let Some(s) = self.snaps.get(&k) else { continue };
+            let same = window_rect(hwnd_of(k)).is_some_and(|r| {
+                (r.left as f64, r.top as f64, (r.right - r.left) as f64, (r.bottom - r.top) as f64) == (s.rect.x, s.rect.y, s.rect.w, s.rect.h)
+            });
+            if same {
+                got.insert(k, (s.img.clone(), s.rect));
+            }
         }
         // back to front, the window in front last
         let mut order = front_first(&open);
