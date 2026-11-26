@@ -6,6 +6,8 @@ Each release on GitHub uses its section from this file as its notes.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-27
+
 ### Added
 - **Window fan**: rest the pointer on a dock app that has two or more windows and pictures of them fan out above
   its icon like a hand of cards on an arc. Hovering a card lifts it in front of the others; clicking it brings
@@ -13,6 +15,16 @@ Each release on GitHub uses its section from this file as its notes.
   went into the dock, or the app icon. Can be turned off in Settings (**Fan out windows on hover**, `WindowFan`).
 - **Reset to Defaults** in Settings puts every setting of that window back to its default (click twice to
   confirm). Pinned apps, picked icons and the widget layout stay as they are.
+- **Windows key opens Spotlight** (Settings › Desktop, `WinKeySpotlight`, off by default): a tap of the Windows key
+  on its own opens Spotlight instead of Start. Win with another key (Win+E, Win+Shift+S, Win+L…) works as before,
+  and Ctrl+Esc still opens Start.
+- The Wi-Fi menu has a refresh button next to the switch, and shows a spinner there while it scans, also when you
+  are already connected (it used to say "Searching…" only with no network joined). It scans again every 15 seconds
+  while it stays open, and its text follows the interface language.
+
+### Changed
+- Each time the window fan opens it notes what each card was made from in `%APPDATA%\MacDock\fan.log` (kept under
+  256 KB), to track down an empty card that sometimes shows up.
 
 ## [0.5.0] - 2026-11-26
 
