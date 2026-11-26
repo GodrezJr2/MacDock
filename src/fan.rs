@@ -322,18 +322,35 @@ impl Fan {
         o
     }
 
-    /// The card under a window point, topmost first; slack px around each card counts too.
+    /// Card i where it rests in the hand, not lifted.
+    fn rest_pose(&self, i: usize) -> Pose {
+        pose_on_arc(self.pivot, RADIUS * self.s, self.cards[i].angle, 0.0, LIFT * self.s)
+    }
+
+    fn contains(&self, i: usize, p: &Pose, x: f32, y: f32, slack: f32) -> bool {
+        let (w, h) = self.card_size(i);
+        let Some(inv) = transform(p, w, h).invert() else { return false };
+        let mut pt = Point::from_xy(x, y);
+        inv.map_point(&mut pt);
+        pt.x >= -slack && pt.x <= w + slack && pt.y >= -slack && pt.y <= h + slack
+    }
+
+    /// The card under a window point, as drawn now, topmost first; slack px around each card counts too.
     fn card_at(&self, x: f32, y: f32, slack: f32) -> Option<usize> {
-        for &i in self.order().iter().rev() {
-            let (w, h) = self.card_size(i);
-            let Some(inv) = transform(&self.pose(i), w, h).invert() else { continue };
-            let mut p = Point::from_xy(x, y);
-            inv.map_point(&mut p);
-            if p.x >= -slack && p.x <= w + slack && p.y >= -slack && p.y <= h + slack {
-                return Some(i);
+        self.order().into_iter().rev().find(|&i| self.contains(i, &self.pose(i), x, y, slack))
+    }
+
+    /// The card to lift for a window point. Judged against the cards at rest, which do not move, so lifting
+    /// one never decides the hover by itself: with the moving cards, a card lifted out from under the pointer
+    /// left it on its neighbour, which lifted in turn, and the two swapped back and forth. The hovered card
+    /// stays hovered while the pointer is on it at rest or where it is lifted to.
+    fn hover_at(&self, x: f32, y: f32) -> Option<usize> {
+        if let Some(h) = self.hovered.filter(|&h| h < self.cards.len()) {
+            if self.contains(h, &self.rest_pose(h), x, y, 0.0) || self.contains(h, &self.pose(h), x, y, 0.0) {
+                return Some(h);
             }
         }
-        None
+        (0..self.cards.len()).rev().find(|&i| self.contains(i, &self.rest_pose(i), x, y, 0.0))
     }
 
     fn start(&mut self, r: Request) {
@@ -484,7 +501,7 @@ impl Fan {
                 self.close();
             }
         }
-        let hov = if self.closing || self.open < 0.7 { None } else { self.card_at((p.x - self.pos.0) as f32, (p.y - self.pos.1) as f32, 0.0) };
+        let hov = if self.closing || self.open < 0.7 { None } else { self.hover_at((p.x - self.pos.0) as f32, (p.y - self.pos.1) as f32) };
         if hov != self.hovered {
             self.hovered = hov;
             moving = true;
@@ -541,7 +558,8 @@ impl Fan {
         if self.closing || self.cards.is_empty() {
             return;
         }
-        if let Some(i) = self.card_at(x, y, 0.0) {
+        // the lifted card is the one the user is looking at; else whatever is drawn under the pointer
+        if let Some(i) = self.hovered.or_else(|| self.card_at(x, y, 0.0)) {
             let h = self.cards[i].hwnd;
             unsafe {
                 let _ = PostMessageW(HWND(self.dock as *mut _), WM_FAN_PICK, WPARAM(h as usize), LPARAM(0));
@@ -666,6 +684,41 @@ mod tests {
         eprintln!("fan size {:?} pos {:?} pivot {:?}", f.size, f.pos, f.pivot);
         let path = format!(r"{}/target/fan.png", env!("CARGO_MANIFEST_DIR"));
         assert!(gfx::save_png(&path, out.width(), out.height(), out.data()));
+    }
+
+    /// Two overlapping cards, the pointer on the lower edge of the right one, where its lift leaves it and
+    /// only the left one is drawn: the hover must stay put frame after frame instead of swapping.
+    #[test]
+    fn hover_does_not_swap_between_overlapping_cards() {
+        let s = 1.0;
+        let cards: Vec<Card> = angles(2).into_iter().map(|angle| {
+            let img = Pixmap::new(232, 150).unwrap();
+            Card { hwnd: 0, img, shadow: None, angle, lift: 0.0 }
+        }).collect();
+        let mut f = Fan {
+            hwnd: HWND::default(), cards, s, pos: (0, 0), size: (1, 1), pivot: (0.0, 0.0),
+            anchor: RECT { left: 1000, top: 1400, right: 1060, bottom: 1460 }, low: 0.0, open: 1.0, closing: false, motion: true,
+            hovered: None, top: None, off_since: None, last: Instant::now(), dock: 0, surface: None, drawn: false,
+        };
+        f.layout(RECT { left: 0, top: 0, right: 2560, bottom: 1600 });
+        f.open = 1.0;
+        // a point inside the right card at rest, near its bottom, also inside the left card
+        let r = f.rest_pose(1);
+        let (w, h) = f.card_size(1);
+        let mut pt = Point::from_xy(12.0, h - 6.0);
+        transform(&r, w, h).map_point(&mut pt);
+        let mut seen = Vec::new();
+        for _ in 0..20 {
+            let hov = f.hover_at(pt.x, pt.y);
+            f.hovered = hov;
+            if hov.is_some() { f.top = hov; }
+            for (i, c) in f.cards.iter_mut().enumerate() {
+                c.lift = if Some(i) == hov { 1.0 } else { 0.0 };
+            }
+            seen.push(hov);
+        }
+        assert!(seen.iter().all(|&s| s == seen[0]), "hover changed: {seen:?}");
+        assert_eq!(seen[0], Some(1));
     }
 
     #[test]
