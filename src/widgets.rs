@@ -84,7 +84,8 @@ struct Widgets {
     widget_items: Vec<String>,
     widget_position: String,
     widget_offset: Option<(i32, i32)>,
-    dragging: bool,
+    dragging: bool,   // left button went down on a tile
+    drag_moved: bool, // ... and the mouse has since moved past the click slop, so it is a drag
     drag_start: (i32, i32),
     initial_pos: (i32, i32),
 }
@@ -224,6 +225,7 @@ impl Widgets {
             let _ = SetWindowPos(self.hwnd, after, self.pos.0, self.pos.1, self.size as i32, self.size as i32, SWP_NOACTIVATE);
         }
         self.glass = None;
+        self.face = None; // the dial is drawn at the scale of the moment
         self.shown.clear();
     }
 
@@ -282,208 +284,152 @@ impl Widgets {
         w
     }
 
-    /// Analog clock dial: hour ticks and numerals.
-    fn build_face(&mut self) {
+    /// The white clock dial with its 12 numbers, cached (hands are drawn per tick).
+    fn build_face(&self) -> Option<Pixmap> {
         let s = self.s;
-        let tw = TILE * s;
-        let mut pm = Pixmap::new(tw as u32, tw as u32).unwrap();
-        let cx = tw / 2.0;
-        let cy = cx;
-        let r = 62.0 * s;
-
-        // hour markers
-        for i in 0..12 {
-            let a = i as f32 * PI / 6.0;
-            let (sa, ca) = (a.sin(), -a.cos());
-            let r0 = if i % 3 == 0 { r - 9.0 * s } else { r - 5.0 * s };
-            let r1 = r;
-            let mut pb = PathBuilder::new();
-            pb.move_to(cx + r0 * sa, cy + r0 * ca);
-            pb.line_to(cx + r1 * sa, cy + r1 * ca);
-            if let Some(p) = pb.finish() {
-                let mut stroke = Stroke::default();
-                stroke.width = if i % 3 == 0 { 2.5 * s } else { 1.5 * s };
-                stroke.line_cap = LineCap::Round;
-                pm.stroke_path(&p, &paint((255, 255, 255), if i % 3 == 0 { 0xE0 } else { 0x80 }), &stroke, Transform::identity(), None);
-            }
+        let n = (TILE * s).ceil() as u32;
+        let mut pm = Pixmap::new(n, n)?;
+        let c = TILE * s / 2.0;
+        let r = (TILE / 2.0 - 12.0) * s;
+        let dial = PathBuilder::from_circle(c, c, r)?;
+        pm.fill_path(&dial, &paint((0xF5, 0xF5, 0xF7), 0xFF), FillRule::Winding, Transform::identity(), None);
+        for h in 1..=12 {
+            let a = h as f32 / 12.0 * 2.0 * PI;
+            let rr = r - 15.0 * s;
+            let (x, y) = (c + a.sin() * rr, c - a.cos() * rr);
+            let fh = gfx::measure("8", Font { face: gfx::UI, px: (13.0 * s).round() as i32, weight: 600 }).1 as f32;
+            self.text(&mut pm, &h.to_string(), 13.0, 600, (0x1C, 0x1C, 0x1E), 0xFF, x, y - fh / 2.0, 1);
         }
-        self.face = Some(pm);
+        Some(pm)
     }
 
-    fn hand(&self, pm: &mut Pixmap, cx: f32, cy: f32, angle: f32, len: f32, width: f32, c: (u8, u8, u8), tail: f32) {
-        let (sa, ca) = (angle.sin(), -angle.cos());
+    fn hand(pm: &mut Pixmap, c: (f32, f32), angle: f32, len: f32, tail: f32, width: f32, color: (u8, u8, u8)) {
+        let (dx, dy) = (angle.sin(), -angle.cos());
         let mut pb = PathBuilder::new();
-        pb.move_to(cx - tail * sa, cy - tail * ca);
-        pb.line_to(cx + len * sa, cy + len * ca);
+        pb.move_to(c.0 - dx * tail, c.1 - dy * tail);
+        pb.line_to(c.0 + dx * len, c.1 + dy * len);
         if let Some(p) = pb.finish() {
-            let mut st = Stroke::default();
-            st.width = width;
-            st.line_cap = LineCap::Round;
-            pm.stroke_path(&p, &paint(c, 0xFF), &st, Transform::identity(), None);
+            pm.stroke_path(&p, &paint(color, 0xFF), &Stroke { width, line_cap: LineCap::Round, ..Default::default() }, Transform::identity(), None);
         }
     }
 
-    fn arc(&self, pm: &mut Pixmap, cx: f32, cy: f32, r: f32, width: f32, sweep: f32, c: (u8, u8, u8), a: u8) {
+    fn arc(pm: &mut Pixmap, c: (f32, f32), r: f32, from: f32, to: f32, width: f32, p: &Paint) {
+        let steps = (((to - from).abs() / (2.0 * PI)) * 96.0).ceil().max(2.0) as i32;
         let mut pb = PathBuilder::new();
-        let steps = (sweep.abs() * 32.0).ceil().max(2.0) as usize;
-        let start = -PI / 2.0;
         for i in 0..=steps {
-            let th = start + sweep * (i as f32 / steps as f32);
-            let (x, y) = (cx + r * th.cos(), cy + r * th.sin());
-            if i == 0 { pb.move_to(x, y); } else { pb.line_to(x, y); }
-        }
-        if let Some(p) = pb.finish() {
-            let mut st = Stroke::default();
-            st.width = width;
-            st.line_cap = LineCap::Round;
-            pm.stroke_path(&p, &paint(c, a), &st, Transform::identity(), None);
-        }
-    }
-
-    fn sample_cpu(&mut self) -> f32 {
-        let (mut idle, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default());
-        unsafe {
-            if GetSystemTimes(Some(&mut idle), Some(&mut kernel), Some(&mut user)).is_ok() {
-                let id = ft(idle);
-                let tot = ft(kernel) + ft(user);
-                if let Some((pi, pt)) = self.cpu_prev {
-                    let dtot = tot.saturating_sub(pt);
-                    let didle = id.saturating_sub(pi);
-                    if dtot > 0 {
-                        self.cpu = (1.0 - didle as f32 / dtot as f32).clamp(0.0, 1.0);
-                    }
-                }
-                self.cpu_prev = Some((id, tot));
+            let a = from + (to - from) * i as f32 / steps as f32;
+            let (x, y) = (c.0 + a.sin() * r, c.1 - a.cos() * r);
+            if i == 0 {
+                pb.move_to(x, y);
+            } else {
+                pb.line_to(x, y);
             }
         }
-        self.cpu
+        if let Some(path) = pb.finish() {
+            pm.stroke_path(&path, p, &Stroke { width, line_cap: LineCap::Round, ..Default::default() }, Transform::identity(), None);
+        }
     }
 
-    fn draw_digital_clock(&self, pm: &mut Pixmap, x: f32, y: f32) {
-        let t = unsafe { GetLocalTime() };
-        let s = self.s;
-        let tw = TILE * s;
-        let cx = x + tw / 2.0;
-        let cy = y + tw / 2.0;
-
-        let day_idx = (t.wDayOfWeek as usize).min(6);
-        let header = format!("{}, {} {}", DAYS[day_idx], t.wDay, MONTHS[(t.wMonth as usize - 1).min(11)]);
-        self.text(pm, &header.to_uppercase(), 10.0, 700, RED, 0xFF, cx, cy - 38.0 * s, 1);
-
-        let hour = t.wHour;
-        let time_str = format!("{:02}:{:02}", hour, t.wMinute);
-        self.text(pm, &time_str, 38.0, 700, (255, 255, 255), 0xFF, cx, cy - 2.0 * s, 1);
-
-        let ampm = if hour >= 12 { "PM" } else { "AM" };
-        let sec_str = format!("{:02}s  {}", t.wSecond, ampm);
-        self.text(pm, &sec_str, 12.0, 500, (255, 255, 255), 0xAA, cx, cy + 32.0 * s, 1);
+    fn sample_cpu(&mut self) {
+        let (mut idle, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default());
+        if unsafe { GetSystemTimes(Some(&mut idle), Some(&mut kernel), Some(&mut user)) }.is_err() {
+            return;
+        }
+        let (i, t) = (ft(idle), ft(kernel) + ft(user)); // kernel time includes idle
+        if let Some((pi, pt)) = self.cpu_prev {
+            let dt = t.saturating_sub(pt);
+            if dt > 0 {
+                self.cpu = 1.0 - i.saturating_sub(pi) as f32 / dt as f32;
+            }
+        }
+        self.cpu_prev = Some((i, t));
     }
 
     fn render(&mut self) {
-        let t = unsafe { GetLocalTime() };
-        let s = self.s;
-        let tw = TILE * s;
-
-        // Skip render if nothing changed
-        let base_key = format!(
-            "{}:{}:{}:{}:{}:{}",
-            self.widget_at(0),
-            self.widget_at(1),
-            self.widget_at(2),
-            self.widget_at(3),
-            t.wMinute,
-            (self.cpu * 100.0) as u32
-        );
-        let has_digital = (0..4).any(|i| self.widget_at(i) == "digital_clock");
-        let key = if has_digital {
-            format!("{}:{}:{}", base_key, t.wSecond, t.wHour)
-        } else {
-            base_key
-        };
-        if self.shown == key && self.glass.is_some() {
-            return;
-        }
-        self.shown = key;
-
         if self.glass.is_none() {
             self.build_glass();
         }
-        let Some(glass) = self.glass.as_ref() else { return };
+        if self.face.is_none() {
+            self.face = self.build_face();
+        }
+        // one snapshot of everything the tiles show; the frame is redrawn only when it changes
+        self.sample_cpu();
+        let t = unsafe { GetLocalTime() };
+        let (pw, mem, dsk) = (power(), memory(), disk());
+        let kinds: Vec<String> = (0..4).map(|i| self.widget_at(i).to_string()).collect();
+        let key = format!("{:?} {:?} {}:{} {} {:?} {:.0} {:.0} {:.0}", kinds, self.glass.is_some(), t.wHour, t.wMinute, t.wDay, pw, self.cpu * 100.0, mem * 100.0, dsk * 100.0);
+        if key == self.shown {
+            return;
+        }
+        self.shown = key;
+        let Some(glass) = &self.glass else { return };
         let mut pm = glass.clone();
+        let s = self.s;
+        let tw = TILE * s;
+        let pad = 16.0 * s;
 
-        for i in 0..4 {
-            let kind = self.widget_at(i);
-            if kind == "none" {
-                continue;
-            }
+        for (i, kind) in kinds.iter().enumerate() {
             let (x, y) = self.tile_origin(i);
-            let cx = x + tw / 2.0;
-            let cy = y + tw / 2.0;
-
-            match kind {
+            match kind.as_str() {
                 "clock" => {
-                    if self.face.is_none() {
-                        self.build_face();
-                    }
-                    if let Some(face) = self.face.as_ref() {
+                    if let Some(face) = &self.face {
                         pm.draw_pixmap(x as i32, y as i32, face.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
                     }
-                    let hr = (t.wHour % 12) as f32 + t.wMinute as f32 / 60.0;
-                    let min = t.wMinute as f32 + t.wSecond as f32 / 60.0;
-                    let sec = t.wSecond as f32;
-
-                    self.hand(&mut pm, cx, cy, hr * PI / 6.0, 36.0 * s, 4.0 * s, (255, 255, 255), 6.0 * s);
-                    self.hand(&mut pm, cx, cy, min * PI / 30.0, 52.0 * s, 2.5 * s, (255, 255, 255), 8.0 * s);
-                    self.hand(&mut pm, cx, cy, sec * PI / 30.0, 56.0 * s, 1.5 * s, ORANGE, 12.0 * s);
-
-                    let mut pb = PathBuilder::new();
-                    pb.push_circle(cx, cy, 3.5 * s);
-                    if let Some(p) = pb.finish() {
-                        pm.fill_path(&p, &paint(ORANGE, 0xFF), FillRule::Winding, Transform::identity(), None);
+                    let c = (x + tw / 2.0, y + tw / 2.0);
+                    let r = (TILE / 2.0 - 12.0) * s;
+                    let mins = t.wMinute as f32 + t.wSecond as f32 / 60.0;
+                    let hours = (t.wHour % 12) as f32 + mins / 60.0;
+                    let dark = (0x1C, 0x1C, 0x1E);
+                    Self::hand(&mut pm, c, hours / 12.0 * 2.0 * PI, r * 0.5, 0.0, 4.5 * s, dark);
+                    Self::hand(&mut pm, c, mins / 60.0 * 2.0 * PI, r * 0.78, 0.0, 3.0 * s, dark);
+                    if let Some(dot) = PathBuilder::from_circle(c.0, c.1, 3.6 * s) {
+                        pm.fill_path(&dot, &paint(ORANGE, 0xFF), FillRule::Winding, Transform::identity(), None);
                     }
                 }
                 "digital_clock" => {
-                    self.draw_digital_clock(&mut pm, x, y);
+                    // laid out like the date tile: day on top, the time big and light, the date below
+                    self.text(&mut pm, DAYS[t.wDayOfWeek as usize % 7], 12.0, 700, ORANGE, 0xFF, x + pad, y + pad, 0);
+                    let time = format!("{:02}:{:02}", t.wHour, t.wMinute);
+                    self.text(&mut pm, &time, 46.0, 300, (255, 255, 255), 0xFF, x + pad - 2.0 * s, y + pad + 24.0 * s, 0);
+                    let date = format!("{} {}", t.wDay, MONTHS[(t.wMonth as usize + 11) % 12]);
+                    self.text(&mut pm, &date, 13.0, 600, (255, 255, 255), 0xB0, x + pad, y + tw - pad - 18.0 * s, 0);
                 }
                 "date" | "calendar" => {
-                    let d = (t.wDayOfWeek as usize).min(6);
-                    self.text(&mut pm, DAYS[d], 12.0, 700, RED, 0xFF, cx, y + 26.0 * s, 1);
-                    let day_str = format!("{}", t.wDay);
-                    self.text(&mut pm, &day_str, 56.0, 200, (255, 255, 255), 0xFF, cx, y + 44.0 * s, 1);
-                    let m = (t.wMonth as usize).saturating_sub(1).min(11);
-                    self.text(&mut pm, MONTHS[m], 13.0, 500, (255, 255, 255), 0xCC, cx, y + 124.0 * s, 1);
+                    self.text(&mut pm, DAYS[t.wDayOfWeek as usize % 7], 12.0, 700, RED, 0xFF, x + pad, y + pad, 0);
+                    self.text(&mut pm, &t.wDay.to_string(), 58.0, 300, (255, 255, 255), 0xFF, x + pad - 3.0 * s, y + pad + 12.0 * s, 0);
+                    let month = format!("{} {}", MONTHS[(t.wMonth as usize + 11) % 12], t.wYear);
+                    self.text(&mut pm, &month, 13.0, 600, (255, 255, 255), 0xB0, x + pad, y + tw - pad - 18.0 * s, 0);
                 }
                 "battery" => {
-                    let (pct, plugged, charging) = power().unwrap_or((100, true, false));
-                    let r = 48.0 * s;
-                    let w = 12.0 * s;
-                    self.arc(&mut pm, cx, cy, r, w, 2.0 * PI, (255, 255, 255), 0x28);
-                    let sweep = 2.0 * PI * (pct as f32 / 100.0);
-                    let c = if pct <= 20 && !plugged { RED } else { GREEN };
-                    self.arc(&mut pm, cx, cy, r, w, sweep, c, 0xFF);
-
-                    let s_pct = format!("{}%", pct);
-                    self.text(&mut pm, &s_pct, 24.0, 600, (255, 255, 255), 0xFF, cx, cy - 14.0 * s, 1);
-                    let state = if charging { "Charging" } else if plugged { "Power Adapter" } else { "Battery" };
-                    self.text(&mut pm, state, 10.0, 500, (255, 255, 255), 0xAA, cx, cy + 14.0 * s, 1);
+                    let c = (x + tw / 2.0, y + tw / 2.0 - 10.0 * s);
+                    let rr = 44.0 * s;
+                    Self::arc(&mut pm, c, rr, 0.0, 2.0 * PI, 9.0 * s, &paint((255, 255, 255), 0x2C));
+                    let (label, pct) = match pw {
+                        Some((p, ac, charging)) => {
+                            let colr = if charging || ac { GREEN } else if p <= 20 { RED } else if p <= 40 { YELLOW } else { GREEN };
+                            if p > 0 {
+                                Self::arc(&mut pm, c, rr, 0.0, p as f32 / 100.0 * 2.0 * PI, 9.0 * s, &paint(colr, 0xFF));
+                            }
+                            (if charging { "Charging" } else if ac { "Plugged In" } else { "Battery" }, format!("{p}%"))
+                        }
+                        None => ("AC Power", "—".to_string()),
+                    };
+                    let fh = gfx::measure("8", Font { face: gfx::UI, px: (24.0 * s).round() as i32, weight: 600 }).1 as f32;
+                    self.text(&mut pm, &pct, 24.0, 600, (255, 255, 255), 0xFF, c.0, c.1 - fh / 2.0, 1);
+                    self.text(&mut pm, label, 12.5, 600, (255, 255, 255), 0xB0, c.0, y + tw - pad - 16.0 * s, 1);
                 }
                 "system" => {
-                    let cpu = self.sample_cpu();
-                    let mem = memory();
-                    let dsk = disk();
-                    self.text(&mut pm, "SYSTEM", 11.0, 700, (255, 255, 255), 0x90, x + 16.0 * s, y + 16.0 * s, 0);
-
-                    let mut ry = y + 40.0 * s;
-                    let pad = 16.0 * s;
+                    self.text(&mut pm, "System", 13.0, 700, (255, 255, 255), 0xF0, x + pad, y + pad - 2.0 * s, 0);
+                    let rows = [("CPU", self.cpu, BLUE), ("Memory", mem, PURPLE), ("Disk C:", dsk, ORANGE)];
                     let bw = tw - 2.0 * pad;
-                    for (lbl, v, colr) in [("CPU", cpu, BLUE), ("RAM", mem, PURPLE), ("SSD", dsk, YELLOW)] {
-                        self.text(&mut pm, lbl, 11.0, 600, (255, 255, 255), 0xE0, x + pad, ry, 0);
-                        let pct_s = format!("{:.0}%", (v * 100.0).round());
-                        self.text(&mut pm, &pct_s, 11.0, 500, (255, 255, 255), 0x90, x + tw - pad, ry, 2);
-
-                        let by = ry + 16.0 * s;
+                    let mut ry = y + pad + 26.0 * s;
+                    for (name, v, colr) in rows {
+                        let v = v.clamp(0.0, 1.0);
+                        self.text(&mut pm, name, 11.5, 600, (255, 255, 255), 0xC0, x + pad, ry, 0);
+                        self.text(&mut pm, &format!("{:.0}%", v * 100.0), 11.5, 600, (255, 255, 255), 0xF0, x + tw - pad, ry, 2);
+                        let by = ry + 18.0 * s;
                         if let Some(p) = gfx::rrect(x + pad, by, bw, 6.0 * s, 3.0 * s) {
-                            pm.fill_path(&p, &paint((255, 255, 255), 0x24), FillRule::Winding, Transform::identity(), None);
+                            pm.fill_path(&p, &paint((255, 255, 255), 0x2C), FillRule::Winding, Transform::identity(), None);
                         }
                         if let Some(p) = gfx::rrect(x + pad, by, (bw * v).max(6.0 * s), 6.0 * s, 3.0 * s) {
                             pm.fill_path(&p, &paint(colr, 0xFF), FillRule::Winding, Transform::identity(), None);
@@ -527,6 +473,44 @@ impl Widgets {
             let (x, y) = self.tile_origin(i);
             px >= x && px < x + tw && py >= y && py < y + tw
         })
+    }
+
+    /// Follow the cursor once it has moved past a 4 px click slop (a click with a shaky hand stays a click).
+    fn drag_to_cursor(&mut self) {
+        let mut p = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut p);
+        }
+        let (dx, dy) = (p.x - self.drag_start.0, p.y - self.drag_start.1);
+        if !self.drag_moved && dx.abs() <= 4 && dy.abs() <= 4 {
+            return;
+        }
+        self.drag_moved = true;
+        self.pos = (self.initial_pos.0 + dx, self.initial_pos.1 + dy);
+        unsafe {
+            let after = if RAISED.with(|r| r.get()) { HWND_TOPMOST } else { HWND_BOTTOM };
+            let _ = SetWindowPos(self.hwnd, after, self.pos.0, self.pos.1, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+        if let Some(sf) = self.surface.as_mut() {
+            sf.present(self.hwnd, self.pos.0, self.pos.1);
+        }
+    }
+
+    /// End a press: None if none was in progress, else whether it was a drag (then placed and saved).
+    fn end_drag(&mut self) -> Option<bool> {
+        if !self.dragging {
+            return None;
+        }
+        self.dragging = false;
+        self.drag_to_cursor(); // the drop point is where the button came up, not the last move
+        unsafe {
+            let _ = ReleaseCapture();
+        }
+        let moved = std::mem::take(&mut self.drag_moved);
+        if moved {
+            self.snap_or_save_drag();
+        }
+        Some(moved)
     }
 
     fn snap_or_save_drag(&mut self) {
@@ -623,7 +607,10 @@ impl Widgets {
         add(Entry::item("Calendar & Date").checked(cur_kind == "date" || cur_kind == "calendar"), Some(Act::SetWidget(slot, "date")));
         add(Entry::item("Battery").checked(cur_kind == "battery"), Some(Act::SetWidget(slot, "battery")));
         add(Entry::item("System (CPU / RAM / Disk)").checked(cur_kind == "system"), Some(Act::SetWidget(slot, "system")));
-        add(Entry::item("Hide this tile").checked(cur_kind == "none"), Some(Act::HideTile(slot)));
+        // the last tile stays: with none left there is nothing to right-click to bring them back
+        let visible = (0..4).filter(|&i| self.widget_at(i) != "none").count();
+        let can_hide = cur_kind != "none" && visible > 1;
+        add(Entry::item("Hide this tile").checked(cur_kind == "none").enabled(can_hide), can_hide.then_some(Act::HideTile(slot)));
 
         add(Entry::Sep, None);
 
@@ -797,6 +784,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     if let Ok(mut b) = st.try_borrow_mut() {
                         if let Some(w) = b.as_mut() {
                             w.dragging = true;
+                            w.drag_moved = false;
                             w.drag_start = (p.x, p.y);
                             w.initial_pos = w.pos;
                         }
@@ -810,15 +798,11 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 if let Ok(mut b) = st.try_borrow_mut() {
                     if let Some(w) = b.as_mut() {
                         if w.dragging {
-                            let mut p = POINT::default();
-                            let _ = GetCursorPos(&mut p);
-                            let dx = p.x - w.drag_start.0;
-                            let dy = p.y - w.drag_start.1;
-                            w.pos = (w.initial_pos.0 + dx, w.initial_pos.1 + dy);
-                            let after = if RAISED.with(|r| r.get()) { HWND_TOPMOST } else { HWND_BOTTOM };
-                            let _ = SetWindowPos(w.hwnd, after, w.pos.0, w.pos.1, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
-                            if let Some(sf) = w.surface.as_mut() {
-                                sf.present(w.hwnd, w.pos.0, w.pos.1);
+                            // the button came up where we never heard of it: end the drag here
+                            if wp.0 & 0x0001 == 0 {
+                                w.end_drag();
+                            } else {
+                                w.drag_to_cursor();
                             }
                         }
                     }
@@ -827,35 +811,22 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             return LRESULT(0);
         }
         WM_CAPTURECHANGED => {
+            // a menu or Alt+Tab took the mouse mid-drag: drop the widget where it is
             STATE.with(|st| {
                 if let Ok(mut b) = st.try_borrow_mut() {
                     if let Some(w) = b.as_mut() {
-                        w.dragging = false;
+                        w.end_drag();
                     }
                 }
             });
             return LRESULT(0);
         }
         WM_LBUTTONUP => {
-            let was_dragging = STATE.with(|st| {
-                if let Ok(mut b) = st.try_borrow_mut() {
-                    if let Some(w) = b.as_mut() {
-                        if w.dragging {
-                            w.dragging = false;
-                            let _ = ReleaseCapture();
-                            let mut p = POINT::default();
-                            let _ = GetCursorPos(&mut p);
-                            let moved = (p.x - w.drag_start.0).abs() > 4 || (p.y - w.drag_start.1).abs() > 4;
-                            if moved {
-                                w.snap_or_save_drag();
-                                return true;
-                            }
-                        }
-                    }
-                }
-                false
+            let dragged = STATE.with(|st| {
+                let Ok(mut b) = st.try_borrow_mut() else { return false };
+                b.as_mut().and_then(|w| w.end_drag()).unwrap_or(false)
             });
-            if was_dragging {
+            if dragged {
                 return LRESULT(0);
             }
 
@@ -959,6 +930,7 @@ pub fn start() {
             widget_position: cfg.widget_position,
             widget_offset: cfg.widget_offset,
             dragging: false,
+            drag_moved: false,
             drag_start: (0, 0),
             initial_pos: (0, 0),
         };

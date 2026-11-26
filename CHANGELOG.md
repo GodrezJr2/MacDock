@@ -12,13 +12,24 @@ Each release on GitHub uses its section from this file as its notes.
 - Desktop widgets can be arranged: each of the four slots shows a clock, a digital clock, the date, battery or system
   stats, or nothing (right-click a tile), and the widgets can be dragged anywhere, snapping to a screen corner when
   dropped near one. The layout is saved as `WidgetItems`, `WidgetPosition` and `WidgetOffset` in config.json.
-  Thanks to @shekhaw. (#6)
+  Clicks still open the tile's app; a drag starts only once the mouse has moved a few pixels, the last visible tile
+  can't be hidden (so the right-click menu that brings tiles back stays reachable), and widgets put somewhere that a
+  monitor or scale change has moved off-screen come back inside the work area. Thanks to @shekhaw. (#6)
+- A **Digital Clock** tile, laid out like the date tile: the day, the time in large type and the date. (#6)
 - A Settings button in Launchpad, a Settings result in app search and a **MacDock Settings…** item in the dock's
   menus all open MacDock's own Settings window, which "Edit config" used to open as raw config.json in Notepad. (#6)
 - Updates install from the menu: **Update Available** downloads the new `macdock.exe`, checks its SHA-256 against the
   release's `macdock.exe.sha256`, swaps it in for the running exe (in whatever folder it is) and restarts MacDock.
   Before, the menu only opened the release page and the exe had to be replaced by hand.
-  This works from 0.5.0 onward: updating to 0.5.0 itself is still done by hand.
+  This works from 0.5.0 onward: updating to 0.5.0 itself is still done by hand. A download that breaks off is
+  rejected rather than installed, a second click while one is running does nothing, and the old exe is kept as
+  `macdock.exe.update-old` until the next start removes it.
+
+### Fixed
+- `config.json` is written to a temporary file and then swapped in, so a crash or power cut while saving can no
+  longer leave a half-written file that the next start reads as no settings at all. The dock and the widgets each
+  save only their own settings, so neither overwrites what the other just changed.
+- The battery tile shows **AC Power** on a PC without a battery instead of a full ring.
 
 ## [0.4.5] - 2026-11-25
 

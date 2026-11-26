@@ -150,6 +150,16 @@ impl Default for Config {
     }
 }
 
+/// Write config.json through a temporary file and a rename, so a crash or power cut mid-write never leaves a
+/// half-written file (which the next start would read as no config at all).
+fn write_atomic(s: &str) {
+    let tmp = format!("{}.tmp", path());
+    if std::fs::write(&tmp, s).is_ok() && std::fs::rename(&tmp, path()).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::write(path(), s);
+    }
+}
+
 impl Config {
     pub fn load() -> Config {
         let Some(c) = Self::from_value(std::fs::read_to_string(path()).ok().and_then(|s| serde_json::from_str::<Value>(s.trim_start_matches('\u{feff}')).ok())) else {
@@ -318,7 +328,7 @@ impl Config {
         }
         let _ = std::fs::create_dir_all(dir());
         if let Ok(s) = serde_json::to_string_pretty(&val) {
-            let _ = std::fs::write(path(), s);
+            write_atomic(&s);
         }
     }
 
@@ -335,7 +345,7 @@ impl Config {
         }
         let _ = std::fs::create_dir_all(dir());
         if let Ok(s) = serde_json::to_string_pretty(&disk_val) {
-            let _ = std::fs::write(path(), s);
+            write_atomic(&s);
         }
     }
 
