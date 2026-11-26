@@ -39,6 +39,7 @@ mod tile;
 mod tray;
 mod update;
 mod widgets;
+mod winkey;
 
 use std::cell::RefCell;
 
@@ -314,6 +315,7 @@ impl App {
                 }
                 let c = self.dock.config().clone();
                 match k {
+                    Key::WinSpotlight => winkey::set(c.win_spotlight),
                     Key::Genie => {
                         if c.genie && self.genie.is_none() {
                             let mut g = genie::Genie::new();
@@ -771,6 +773,7 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
         switcher::start();
         fan::start();
     }
+    winkey::set(app.dock.config().win_spotlight);
     update::cleanup();
     update::start();
     if std::env::args().any(|a| a == "--settings") {

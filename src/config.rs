@@ -32,6 +32,8 @@ pub struct Config {
     pub show_recents: bool,
     /// Hovering an app with two or more windows fans their snapshots out above its icon.
     pub window_fan: bool,
+    /// A tap of the Windows key opens Spotlight instead of Start.
+    pub win_spotlight: bool,
     /// A Downloads folder item before the Trash; click lists the newest files.
     pub downloads_stack: bool,
     /// The battery percentage next to the battery icon (off like macOS; still shown at 20% or less).
@@ -133,6 +135,7 @@ impl Default for Config {
             recent: Vec::new(),
             show_recents: true,
             window_fan: true,
+            win_spotlight: false,
             downloads_stack: true,
             desktop_widgets: true,
             widget_items: vec!["clock".into(), "date".into(), "battery".into(), "system".into()],
@@ -193,6 +196,7 @@ impl Config {
         b("ClaudeUsageOAuth", &mut c.claude_usage_oauth);
         b("ShowRecents", &mut c.show_recents);
         b("WindowFan", &mut c.window_fan);
+        b("WinKeySpotlight", &mut c.win_spotlight);
         b("DownloadsStack", &mut c.downloads_stack);
         b("BatteryPercent", &mut c.battery_percent);
         b("SecondaryDocks", &mut c.secondary_docks);
@@ -293,6 +297,7 @@ impl Config {
             "Recent": self.recent,
             "ShowRecents": self.show_recents,
             "WindowFan": self.window_fan,
+            "WinKeySpotlight": self.win_spotlight,
             "DownloadsStack": self.downloads_stack,
             "BatteryPercent": self.battery_percent,
             "SecondaryDocks": self.secondary_docks,

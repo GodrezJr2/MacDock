@@ -25,6 +25,7 @@ pub enum Key {
     MenuBar,
     Widgets,
     Switcher,
+    WinSpotlight,
     BatteryPct,
     SecondaryDocks,
     AiUsage,
@@ -111,6 +112,7 @@ pub fn apply(c: &mut Config, k: Key, v: f64) -> bool {
         Key::MenuBar => Some(&mut c.menu_bar),
         Key::Widgets => Some(&mut c.desktop_widgets),
         Key::Switcher => Some(&mut c.app_switcher),
+        Key::WinSpotlight => Some(&mut c.win_spotlight),
         Key::BatteryPct => Some(&mut c.battery_percent),
         Key::SecondaryDocks => Some(&mut c.secondary_docks),
         Key::AiUsage => Some(&mut c.ai_usage),
@@ -208,6 +210,7 @@ fn desktop_rows() -> Vec<Row> {
         Row::Switch(Key::ClaudeOAuth, "Claude limits from your Claude login"),
         Row::Switch(Key::Widgets, "Desktop widgets"),
         Row::Switch(Key::Switcher, "Mac-style Alt+Tab"),
+        Row::Switch(Key::WinSpotlight, "Windows key opens Spotlight"),
         Row::Switch(Key::SecondaryDocks, "Docks on secondary monitors"),
     ]
 }
@@ -397,6 +400,7 @@ fn value_of(c: &Config, k: Key) -> f64 {
         Key::MenuBar => b(c.menu_bar),
         Key::Widgets => b(c.desktop_widgets),
         Key::Switcher => b(c.app_switcher),
+        Key::WinSpotlight => b(c.win_spotlight),
         Key::BatteryPct => b(c.battery_percent),
         Key::SecondaryDocks => b(c.secondary_docks),
         Key::AiUsage => b(c.ai_usage),
@@ -424,9 +428,9 @@ fn note_h(ui: &Ui, s: &str, w: f32) -> f32 {
     lines as f32 * ui.line_h(11.5, 400) + 16.0
 }
 
-const ALL: [Key; 25] = [
+const ALL: [Key; 26] = [
     Key::IconSize, Key::Magnify, Key::AutoHide, Key::Recents, Key::WindowFan, Key::Downloads, Key::Tiles, Key::Badges,
-    Key::HideTaskbar, Key::MenuBar, Key::Widgets, Key::Switcher, Key::BatteryPct, Key::AiUsage, Key::ClaudeOAuth,
+    Key::HideTaskbar, Key::MenuBar, Key::Widgets, Key::Switcher, Key::WinSpotlight, Key::BatteryPct, Key::AiUsage, Key::ClaudeOAuth,
     Key::TrayIcons, Key::SecondaryDocks, Key::Genie, Key::GenieMs, Key::MagnifySpeed, Key::HideDelay, Key::HideSpeed, Key::ReduceMotion,
     Key::Language, Key::LaunchpadStyle,
 ];
