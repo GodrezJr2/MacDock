@@ -17,7 +17,8 @@ Each release on GitHub uses its section from this file as its notes.
   confirm). Pinned apps, picked icons and the widget layout stay as they are.
 - **Windows key opens Spotlight** (Settings › Desktop, `WinKeySpotlight`, off by default): a tap of the Windows key
   on its own opens Spotlight instead of Start. Win with another key (Win+E, Win+Shift+S, Win+L…) works as before,
-  and Ctrl+Esc still opens Start.
+  and Ctrl+Esc still opens Start. Tapping it again (or Esc) closes Spotlight, so a stray press is undone with
+  one more tap.
 - The Wi-Fi menu has a refresh button next to the switch, and shows a spinner there while it scans, also when you
   are already connected (it used to say "Searching…" only with no network joined). It scans again every 15 seconds
   while it stays open, and its text follows the interface language.

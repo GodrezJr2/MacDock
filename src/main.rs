@@ -253,7 +253,12 @@ impl App {
         if self.bar.is_some() {
             return self.toggle_flyout(menubar::Extra::Spotlight, 0);
         }
+        // the same key again closes it, as with the menu bar (a Windows key pressed by mistake is one more tap)
+        let open = self.fly.as_ref().is_some_and(|f| f.kind == menubar::Extra::Spotlight);
         self.close_flyout();
+        if open {
+            return;
+        }
         let content = Box::new(spotlight::Spotlight::new(!self.dock.config().reduce_motion));
         self.fly = Some(flyout::Flyout::open(menubar::Extra::Spotlight, content, 0, (80.0 * self.dock.dpi) as i32, self.dock.dpi));
     }
