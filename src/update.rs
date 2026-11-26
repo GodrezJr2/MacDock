@@ -12,6 +12,8 @@ pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 pub struct Release {
     pub version: String,
     pub url: String,
+    /// the tag exactly as GitHub has it ("v0.5.0"), which the asset URLs use
+    pub tag: String,
 }
 
 static LATEST: Mutex<Option<Release>> = Mutex::new(None);
@@ -28,11 +30,16 @@ pub fn begin_install() -> bool {
 
 pub fn finish_install(r: Outcome) {
     *OUTCOME.lock().unwrap() = Some(r);
-    INSTALLING.store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// The install stays "in progress" until its outcome is taken here, so a second click can't start another worker
+/// in between; after a successful one it stays so for good, as MacDock is about to restart.
 pub fn take_install() -> Option<Outcome> {
-    OUTCOME.lock().unwrap().take()
+    let r = OUTCOME.lock().unwrap().take()?;
+    if r.is_err() {
+        INSTALLING.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+    Some(r)
 }
 
 /// "v0.2.10" -> [0, 2, 10]
@@ -61,8 +68,8 @@ pub fn check() -> Result<Option<(String, String)>, String> {
     let v: serde_json::Value = serde_json::from_str(&body).map_err(|_| "bad answer".to_string())?;
     let tag = v["tag_name"].as_str().unwrap_or_default().to_string();
     let url = v["html_url"].as_str().map(str::to_string).unwrap_or_else(|| format!("https://github.com/{REPO}/releases/latest"));
-    let found = newer(&tag, CURRENT).then(|| (tag.trim_start_matches('v').to_string(), url));
-    *LATEST.lock().unwrap() = found.clone().map(|(version, url)| Release { version, url });
+    let found = newer(&tag, CURRENT).then(|| (tag.trim_start_matches(['v', 'V']).to_string(), url));
+    *LATEST.lock().unwrap() = found.clone().map(|(version, url)| Release { version, url, tag: tag.clone() });
     Ok(found)
 }
 
@@ -73,7 +80,8 @@ pub fn available() -> Option<(String, String)> {
 
 const UA: &str = "User-Agent: MacDock\r\n";
 
-/// "macdock.exe" -> "macdock.exe.new" / "macdock.exe.old", next to it
+/// "macdock.exe" -> "macdock.exe.update-new" / "macdock.exe.update-old", next to it. Names only the updater uses,
+/// so clean-up never touches a backup someone made by hand.
 fn beside(exe: &std::path::Path, ext: &str) -> std::path::PathBuf {
     let mut p = exe.as_os_str().to_owned();
     p.push(ext);
@@ -81,11 +89,12 @@ fn beside(exe: &std::path::Path, ext: &str) -> std::path::PathBuf {
 }
 
 /// Download release `version`'s macdock.exe, check it against the release's macdock.exe.sha256 and swap it in for
-/// the running exe, which Windows lets us rename (not delete) while it runs: it becomes macdock.exe.old and the next
+/// the running exe, which Windows lets us rename (not delete) while it runs: it becomes macdock.exe.update-old and the next
 /// start removes it. The caller restarts MacDock. On an error the running exe is left where it was.
 pub fn install(version: &str) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let base = format!("/{REPO}/releases/download/v{version}");
+    let tag = LATEST.lock().unwrap().as_ref().filter(|r| r.version == version).map(|r| r.tag.clone()).unwrap_or_else(|| format!("v{version}"));
+    let base = format!("/{REPO}/releases/download/{tag}");
     let (st, bin) = crate::claude_oauth::get_bytes("github.com", &format!("{base}/macdock.exe"), UA, 64 << 20)?;
     if st != 200 {
         return Err(format!("GitHub answered {st} for macdock.exe"));
@@ -101,7 +110,7 @@ pub fn install(version: &str) -> Result<(), String> {
     if bin.len() < 64 * 1024 || !bin.starts_with(b"MZ") {
         return Err("the download is not a program".into());
     }
-    let (new, old) = (beside(&exe, ".new"), beside(&exe, ".old"));
+    let (new, old) = (beside(&exe, ".update-new"), beside(&exe, ".update-old"));
     std::fs::write(&new, &bin).map_err(|e| format!("could not write next to macdock.exe ({e})"))?;
     let _ = std::fs::remove_file(&old);
     if let Err(e) = std::fs::rename(&exe, &old) {
@@ -109,17 +118,20 @@ pub fn install(version: &str) -> Result<(), String> {
         return Err(format!("could not move the running macdock.exe aside ({e})"));
     }
     if let Err(e) = std::fs::rename(&new, &exe) {
-        let _ = std::fs::rename(&old, &exe);
+        let back = std::fs::rename(&old, &exe);
         let _ = std::fs::remove_file(&new);
-        return Err(format!("could not put the new macdock.exe in place ({e})"));
+        return Err(match back {
+            Ok(()) => format!("could not put the new macdock.exe in place ({e})"),
+            Err(b) => format!("could not put the new macdock.exe in place ({e}), nor the old one back ({b}): rename {} to macdock.exe", old.display()),
+        });
     }
     Ok(())
 }
 
-/// Remove the macdock.exe.old an update left behind. The old process may still be on its way out, so a few tries.
+/// Remove the macdock.exe.update-old an update left behind. The old process may still be on its way out, so a few tries.
 pub fn cleanup() {
     let Ok(exe) = std::env::current_exe() else { return };
-    let old = beside(&exe, ".old");
+    let old = beside(&exe, ".update-old");
     if !old.exists() {
         return;
     }

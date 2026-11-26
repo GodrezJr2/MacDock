@@ -110,7 +110,10 @@ pub(crate) fn get_bytes(host: &str, path: &str, headers: &str, limit: usize) -> 
         let mut buf = [0u8; 8192];
         loop {
             let mut n = 0u32;
-            if WinHttpReadData(r.0, buf.as_mut_ptr() as *mut c_void, buf.len() as u32, &mut n).is_err() || n == 0 {
+            if WinHttpReadData(r.0, buf.as_mut_ptr() as *mut c_void, buf.len() as u32, &mut n).is_err() {
+                return Err("the download broke off".into()); // a partial body is not the answer
+            }
+            if n == 0 {
                 break;
             }
             body.extend_from_slice(&buf[..n as usize]);
