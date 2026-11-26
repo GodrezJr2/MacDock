@@ -6,10 +6,19 @@ Each release on GitHub uses its section from this file as its notes.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-26
+
 ### Added
+- Desktop widgets can be arranged: each of the four slots shows a clock, a digital clock, the date, battery or system
+  stats, or nothing (right-click a tile), and the widgets can be dragged anywhere, snapping to a screen corner when
+  dropped near one. The layout is saved as `WidgetItems`, `WidgetPosition` and `WidgetOffset` in config.json.
+  Thanks to @shekhaw. (#6)
+- A Settings button in Launchpad, a Settings result in app search and a **MacDock Settings…** item in the dock's
+  menus all open MacDock's own Settings window, which "Edit config" used to open as raw config.json in Notepad. (#6)
 - Updates install from the menu: **Update Available** downloads the new `macdock.exe`, checks its SHA-256 against the
   release's `macdock.exe.sha256`, swaps it in for the running exe (in whatever folder it is) and restarts MacDock.
   Before, the menu only opened the release page and the exe had to be replaced by hand.
+  This works from 0.5.0 onward: updating to 0.5.0 itself is still done by hand.
 
 ## [0.4.5] - 2026-11-25
 
@@ -161,7 +170,11 @@ First public release: a macOS-style dock (magnification, genie minimize and rest
 attention bounce, recent apps and a Downloads stack) and menu bar (battery, Wi-Fi, Control Center, tray icons and
 AI usage flyouts) for Windows 11, written in Rust.
 
-[Unreleased]: https://github.com/GodrezJr2/MacDock/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/GodrezJr2/MacDock/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/GodrezJr2/MacDock/compare/v0.4.5...v0.5.0
+[0.4.5]: https://github.com/GodrezJr2/MacDock/compare/v0.4.4...v0.4.5
+[0.4.4]: https://github.com/GodrezJr2/MacDock/compare/v0.4.3...v0.4.4
+[0.4.3]: https://github.com/GodrezJr2/MacDock/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/GodrezJr2/MacDock/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/GodrezJr2/MacDock/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/GodrezJr2/MacDock/compare/v0.3.1...v0.4.0
