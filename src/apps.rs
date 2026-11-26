@@ -255,6 +255,9 @@ impl Apps {
 
     fn launch(&self, ai: usize) -> Cmd {
         let spec = self.apps[ai].spec.clone();
+        if spec == "macdock:settings" {
+            return Cmd::Settings;
+        }
         remember(&spec);
         Cmd::Launch(spec)
     }
@@ -555,7 +558,13 @@ impl Content for Apps {
 
     fn right_click(&mut self, id: u32) -> Cmd {
         match id.checked_sub(ID_APP).filter(|_| id >= ID_APP).and_then(|i| self.app_of(i as usize)) {
-            Some(ai) => Cmd::Pin(self.apps[ai].spec.clone()),
+            Some(ai) => {
+                if self.apps[ai].spec == "macdock:settings" {
+                    Cmd::Settings
+                } else {
+                    Cmd::Pin(self.apps[ai].spec.clone())
+                }
+            }
             None => Cmd::None,
         }
     }

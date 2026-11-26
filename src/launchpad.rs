@@ -85,6 +85,7 @@ unsafe fn shell_name(it: &IShellItem, kind: windows::Win32::UI::Shell::SIGDN) ->
 
 fn enumerate() -> Vec<(String, String)> {
     let mut out = Vec::new();
+    out.push(("MacDock Settings".to_string(), "macdock:settings".to_string()));
     unsafe {
         let Ok(folder) = SHCreateItemFromParsingName::<_, _, IShellItem>(w!("shell:AppsFolder"), None) else { return out };
         let Ok(en) = folder.BindToHandler::<_, IEnumShellItems>(None, &BHID_EnumItems) else { return out };
@@ -110,7 +111,14 @@ fn enumerate() -> Vec<(String, String)> {
 /// Test aid: fill the catalog with the real app list and icons, on this thread.
 #[cfg(test)]
 pub(crate) fn load_now() {
-    let apps = enumerate().into_iter().map(|(name, spec)| App { icon: crate::shell::icon(&spec, ICON_PX).map(Arc::new), name, spec }).collect();
+    let apps = enumerate().into_iter().map(|(name, spec)| {
+        let pm = if spec == "macdock:settings" {
+            std::env::current_exe().ok().and_then(|e| crate::shell::icon(&e.to_string_lossy(), ICON_PX))
+        } else {
+            crate::shell::icon(&spec, ICON_PX)
+        };
+        App { icon: pm.map(Arc::new), name, spec }
+    }).collect();
     *CATALOG.lock().unwrap() = apps;
 }
 
@@ -131,7 +139,12 @@ pub(crate) fn refresh() {
         notify();
         let todo: Vec<String> = CATALOG.lock().unwrap().iter().filter(|a| a.icon.is_none()).map(|a| a.spec.clone()).collect();
         for (i, spec) in todo.iter().enumerate() {
-            if let Some(pm) = crate::shell::icon(spec, ICON_PX) {
+            let pm = if spec == "macdock:settings" {
+                std::env::current_exe().ok().and_then(|e| crate::shell::icon(&e.to_string_lossy(), ICON_PX))
+            } else {
+                crate::shell::icon(spec, ICON_PX)
+            };
+            if let Some(pm) = pm {
                 let pm = Arc::new(pm);
                 if let Some(a) = CATALOG.lock().unwrap().iter_mut().find(|a| &a.spec == spec) {
                     a.icon = Some(pm);
@@ -157,6 +170,7 @@ const SEARCH_H: f32 = 30.0;
 const ID_APP: u32 = 1; // ids 1..=PER_PAGE: the cells of the page shown
 const ID_DOT: u32 = 100; // 100.. the page dots
 const ID_SEARCH: u32 = 90; // the search field: a click there must not count as the background
+const ID_SETTINGS: u32 = 95; // the settings button
 
 pub struct Launchpad {
     apps: Vec<App>,
@@ -512,6 +526,16 @@ impl Content for Launchpad {
             }
         }
 
+        // Settings button in top right
+        let btn_sz = 30.0;
+        let btn_x = (w - 48.0).max(sx + SEARCH_W + 20.0);
+        let btn_y = sy + (SEARCH_H - btn_sz) / 2.0;
+        let hov_set = ui.hit(ID_SETTINGS, btn_x, btn_y, btn_sz, btn_sz);
+        let bg_set = white(if ui.pressed == Some(ID_SETTINGS) { 0x44 } else if hov_set { 0x2D } else { 0x1A });
+        ui.fill(btn_x, btn_y, btn_sz, btn_sz, btn_sz / 2.0, bg_set);
+        ui.outline(btn_x, btn_y, btn_sz, btn_sz, btn_sz / 2.0, 1.0, white(if hov_set { 0x3F } else { 0x24 }));
+        ui.glyph(btn_x + btn_sz / 2.0, btn_y + btn_sz / 2.0, '\u{E713}', 13.0, white(if hov_set { 0xFF } else { 0xD0 }));
+
         let (_, top, _, cell_h, _) = self.grid();
         let grid_h = cell_h * ROWS as f32;
         if self.shown.is_empty() {
@@ -555,6 +579,9 @@ impl Content for Launchpad {
     }
 
     fn click(&mut self, id: u32, _fx: f32) -> Cmd {
+        if id == ID_SETTINGS {
+            return Cmd::Settings;
+        }
         if id >= ID_DOT {
             self.go((id - ID_DOT) as usize);
             return Cmd::None;
@@ -565,14 +592,29 @@ impl Content for Launchpad {
             return Cmd::None;
         }
         match self.app_at(id) {
-            Some(a) => Cmd::Launch(a.spec.clone()),
+            Some(a) => {
+                if a.spec == "macdock:settings" {
+                    Cmd::Settings
+                } else {
+                    Cmd::Launch(a.spec.clone())
+                }
+            }
             None => Cmd::None,
         }
     }
 
     fn right_click(&mut self, id: u32) -> Cmd {
+        if id == ID_SETTINGS {
+            return Cmd::Settings;
+        }
         match self.app_at(id) {
-            Some(a) => Cmd::Pin(a.spec.clone()),
+            Some(a) => {
+                if a.spec == "macdock:settings" {
+                    Cmd::Settings
+                } else {
+                    Cmd::Pin(a.spec.clone())
+                }
+            }
             None => Cmd::None,
         }
     }
@@ -608,6 +650,9 @@ impl Content for Launchpad {
             }
             '\r' => {
                 if let Some(&i) = self.shown.get(self.sel) {
+                    if self.apps[i].spec == "macdock:settings" {
+                        return Cmd::Settings;
+                    }
                     return Cmd::Launch(self.apps[i].spec.clone());
                 }
             }
@@ -653,6 +698,27 @@ mod tests {
         assert_eq!(names, ["Edge Canary", "Microsoft Edge"]);
         l.set_query("pad".into());
         assert_eq!(l.shown.len(), 1);
+    }
+
+    #[test]
+    fn settings_button_and_search_open_settings() {
+        let mut l = Launchpad::empty(vec![
+            App { name: "MacDock Settings".into(), spec: "macdock:settings".into(), icon: None },
+            App { name: "Calculator".into(), spec: "shell:AppsFolder\\calc".into(), icon: None },
+        ], false);
+        l.filter();
+
+        // 1. Click settings button directly
+        assert!(matches!(l.click(ID_SETTINGS, 0.0), Cmd::Settings));
+        assert!(matches!(l.right_click(ID_SETTINGS), Cmd::Settings));
+
+        // 2. Search "settings" and launch via Enter
+        l.set_query("settings".into());
+        assert_eq!(l.shown.len(), 1);
+        assert!(matches!(l.char('\r'), Cmd::Settings));
+
+        // 3. Click app cell
+        assert!(matches!(l.click(ID_APP, 0.0), Cmd::Settings));
     }
 
     #[test]

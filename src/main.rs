@@ -282,6 +282,10 @@ impl App {
         let old = self.dock.config().clone();
         let mut done = true;
         match ch {
+            Change::Open => {
+                self.open_settings();
+                return true;
+            }
             Change::Restart => {
                 restart();
                 return false;
