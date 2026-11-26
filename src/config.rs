@@ -384,7 +384,8 @@ mod tests {
         let parsed = Config::from_value(Some(json!({
             "WidgetItems": ["digital_clock", "system", "none", "battery"],
             "WidgetPosition": "bottom-left",
-            "WidgetOffset": [150, 300]
+            "WidgetOffset": [150, 300],
+            "AppsInDock": true
         }))).unwrap();
         assert_eq!(parsed.widget_items, vec!["digital_clock", "system", "none", "battery"]);
         assert_eq!(parsed.widget_position, "bottom-left");
