@@ -30,6 +30,8 @@ pub struct Config {
     /// ({Key, Launch, Exe, Aumid, Name}).
     pub recent: Vec<Value>,
     pub show_recents: bool,
+    /// Hovering an app with two or more windows fans their snapshots out above its icon.
+    pub window_fan: bool,
     /// A Downloads folder item before the Trash; click lists the newest files.
     pub downloads_stack: bool,
     /// The battery percentage next to the battery icon (off like macOS; still shown at 20% or less).
@@ -130,6 +132,7 @@ impl Default for Config {
             icon_overrides: Map::new(),
             recent: Vec::new(),
             show_recents: true,
+            window_fan: true,
             downloads_stack: true,
             desktop_widgets: true,
             widget_items: vec!["clock".into(), "date".into(), "battery".into(), "system".into()],
@@ -189,6 +192,7 @@ impl Config {
         b("AiUsage", &mut c.ai_usage);
         b("ClaudeUsageOAuth", &mut c.claude_usage_oauth);
         b("ShowRecents", &mut c.show_recents);
+        b("WindowFan", &mut c.window_fan);
         b("DownloadsStack", &mut c.downloads_stack);
         b("BatteryPercent", &mut c.battery_percent);
         b("SecondaryDocks", &mut c.secondary_docks);
@@ -288,6 +292,7 @@ impl Config {
             "IconOverrides": self.icon_overrides,
             "Recent": self.recent,
             "ShowRecents": self.show_recents,
+            "WindowFan": self.window_fan,
             "DownloadsStack": self.downloads_stack,
             "BatteryPercent": self.battery_percent,
             "SecondaryDocks": self.secondary_docks,

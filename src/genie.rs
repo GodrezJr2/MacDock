@@ -495,6 +495,20 @@ fn grab_window(h: HWND, r: RECT) -> Option<Pixmap> {
     }
 }
 
+/// A picture of a window for the dock's window fan: from DWM while it is on screen (even covered), else the
+/// snapshot saved when it was minimized (the pid must still match: hwnds get reused). Full size; None if
+/// neither is there.
+pub fn window_picture(h: HWND) -> Option<Pixmap> {
+    if unsafe { IsIconic(h) }.as_bool() {
+        let pid = shell::window_pid(h).to_string();
+        let f = snap_files(h.0 as isize).into_iter().find(|f| {
+            f.file_stem().is_some_and(|s| s.to_string_lossy().split('_').nth(1) == Some(pid.as_str()))
+        })?;
+        return crate::gfx::image_file(&f.to_string_lossy(), 4096);
+    }
+    grab_window(h, window_rect(h)?)
+}
+
 /// grab_window for several windows at once, one thread each (~12-22 ms apiece). Those that fail are left out.
 fn grab_windows(hs: &[isize]) -> Vec<(isize, Pixmap, R)> {
     std::thread::scope(|s| {

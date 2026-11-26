@@ -181,6 +181,9 @@ fn id(s: &str) -> Option<&'static str> {
         "Changes apply right away and are saved to config.json." => "Perubahan langsung berlaku dan tersimpan di config.json.",
         "Restart MacDock" => "Restart MacDock",
         "Reset Animations" => "Reset Animasi",
+        "Reset to Defaults" => "Reset ke Default",
+        "Click again to reset" => "Klik lagi untuk reset",
+        "Fan out windows on hover" => "Kipas jendela saat hover",
         "Open config.json" => "Buka config.json",
         _ => return None,
     })

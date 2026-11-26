@@ -10,6 +10,7 @@ mod config;
 mod display;
 mod dock;
 mod dropfiles;
+mod fan;
 mod ai_usage;
 mod apps;
 mod spotlight;
@@ -296,6 +297,13 @@ impl App {
             }
             Change::ResetAnimations => {
                 self.dock.update_config(fly_settings::reset_animations);
+            }
+            Change::ResetAll => {
+                // one change at a time, so each gets the same follow-up as when it is set by hand
+                for (k, v) in fly_settings::defaults_differing(self.dock.config()) {
+                    self.on_settings(Change::Set(k, v, true));
+                }
+                return true;
             }
             Change::Set(k, v, d) => {
                 done = d;
@@ -761,6 +769,7 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
     }
     if want_switcher {
         switcher::start();
+        fan::start();
     }
     update::cleanup();
     update::start();

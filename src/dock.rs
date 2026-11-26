@@ -53,6 +53,8 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 const ATTENTION_HOP: f64 = 0.5;
 const ATTENTION_CYCLE: f64 = 1.1;
 const LAUNCH_PERIOD: f64 = 0.62;
+/// seconds the pointer rests on an app with several windows before they fan out
+const FAN_DWELL: f64 = 0.4;
 
 // ------------------------------------------------------------------ window messages → events
 // The window procedure only queues events; the main loop handles them. That keeps re-entrant calls
@@ -82,6 +84,8 @@ pub enum DockEv {
     DragFiles(bool),
     /// files dropped at screen px (x, y)
     DropFiles(Vec<String>, i32, i32),
+    /// a card of the window fan was clicked: bring this window up
+    FanPick(isize),
 }
 
 /// What the dock wants done by the app around it.
@@ -155,6 +159,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
         WM_SETTINGCHANGE if w.0 == SPI_SETDESKWALLPAPER => ev(h, DockEv::Wallpaper),
         CB_APPBAR => ev(h, DockEv::AppBar(w.0, l.0)),
         crate::backdrop::WM_BACKDROP => ev(h, DockEv::Backdrop(w.0 == 1)),
+        crate::fan::WM_FAN_PICK => ev(h, DockEv::FanPick(w.0 as isize)),
         // the session is ending and we may not get another chance: put the taskbar back now
         WM_ENDSESSION if w.0 != 0 => {
             taskbar::restore(false);
@@ -421,6 +426,8 @@ pub struct Dock {
     look_pending: bool,
     toasts: Vec<(String, i64)>,
     toast_job: Option<Arc<Mutex<Option<Vec<(String, i64)>>>>>,
+    /// the item the pointer rests on, since when, and whether its window fan was opened this time
+    fan_hover: Option<(String, Instant, bool)>,
 }
 
 impl Dock {
@@ -456,7 +463,7 @@ impl Dock {
             hide: 0.0, peek_until: now, last_near: now,
             pressed: None, press_pt: (0.0, 0.0), dragging: false, drag_out: false, drag_x: 0.0,
             last_app: unsafe { GetForegroundWindow() },
-            seen: None, toasts: Vec::new(), toast_job: None, look_pending: false,
+            seen: None, toasts: Vec::new(), toast_job: None, look_pending: false, fan_hover: None,
         }
     }
 
@@ -1144,6 +1151,7 @@ impl Dock {
     }
 
     fn on_down(&mut self) {
+        crate::fan::hide();
         let p = self.cursor();
         self.press_pt = p;
         self.pressed = self.item_at(p.0).map(|i| self.items[i].key.clone());
@@ -1292,6 +1300,7 @@ impl Dock {
     }
 
     fn context_menu(&mut self) -> Option<Act> {
+        crate::fan::hide();
         let (mx, my) = self.cursor();
         let on_plate = my >= self.win_h - BOTTOM_GAP - self.plate_h() - 4.0;
         let idx = self.item_at(mx).filter(|&i| self.items[i].size > 0.5 && (on_plate || my >= self.win_h - BOTTOM_GAP - PAD - self.items[i].size - 4.0));
@@ -1629,7 +1638,7 @@ impl Dock {
 
         let kh = self.cfg.ease(dt, 13.0, self.cfg.hide_speed);
         if self.cfg.auto_hide {
-            if hovering || self.dragging || self.pressed.is_some() || self.at_bottom_edge() {
+            if hovering || self.dragging || self.pressed.is_some() || self.at_bottom_edge() || crate::fan::is_open() {
                 self.last_near = now;
             }
             // linger a moment after the pointer leaves, like macOS
@@ -1737,7 +1746,8 @@ impl Dock {
             crate::dropfiles::set_zones(self.hwnd, zones);
         }
 
-        let want = if self.hovered.is_some() && !self.menu_up { 1.0 } else { 0.0 };
+        self.fan_tick(plate_bottom);
+        let want = if self.hovered.is_some() && !self.menu_up && !crate::fan::is_open() { 1.0 } else { 0.0 };
         self.label_alpha = approach(self.label_alpha, want, 1.0 - (-dt * 22.0).exp());
         if self.label_alpha != want {
             settled = false;
@@ -1750,6 +1760,53 @@ impl Dock {
         if settled && self.hide == hide_target && !hovering && self.items.iter().all(|i| !i.leaving) {
             self.awake = false; // sleep in GetMessage until the pointer, a timer or a launch wakes us
         }
+    }
+
+    /// Rest on an app with two or more windows and they fan out above its icon (once per visit).
+    fn fan_tick(&mut self, plate_bottom: f64) {
+        let cand = self
+            .hovered
+            .filter(|_| self.cfg.window_fan && !self.menu_up && !self.dragging && self.pressed.is_none() && self.hide < 0.05)
+            .filter(|&i| !self.items[i].leaving && self.items[i].wins.len() >= 2);
+        let Some(i) = cand else {
+            self.fan_hover = None;
+            return;
+        };
+        let key = self.items[i].key.clone();
+        match &mut self.fan_hover {
+            Some((k, since, done)) if *k == key => {
+                if *done || since.elapsed().as_secs_f64() < FAN_DWELL {
+                    return;
+                }
+                *done = true;
+            }
+            _ => {
+                self.fan_hover = Some((key, Instant::now(), false));
+                return;
+            }
+        }
+        let it = &self.items[i];
+        if crate::fan::open_for(&it.key) {
+            return;
+        }
+        let (d, wx, wy) = (self.dpi, self.win_x(), self.win_y() + self.slide());
+        let top = plate_bottom - PAD - it.size;
+        let anchor = windows::Win32::Foundation::RECT {
+            left: ((wx + it.x) * d).round() as i32,
+            top: ((wy + top) * d).round() as i32,
+            right: ((wx + it.x + it.size) * d).round() as i32,
+            bottom: ((wy + top + it.size) * d).round() as i32,
+        };
+        crate::fan::show(crate::fan::Request {
+            key: it.key.clone(),
+            wins: it.wins.iter().map(|w| (w.hwnd.0 as isize, w.title.clone())).collect(),
+            icon: it.icon.as_deref().cloned(),
+            anchor,
+            monitor: self.display.rect,
+            scale: d as f32,
+            motion: !self.cfg.reduce_motion,
+            dock: self.hwnd.0 as isize,
+        });
     }
 
     fn frame_key(&self, plate_top: f64, plate_bottom: f64, win_x: f64, win_y: f64, slide: f64, px: (u32, u32)) -> Vec<u64> {
@@ -2124,6 +2181,17 @@ impl Dock {
                 self.wake();
             }
             DockEv::DropFiles(files, x, y) => self.drop_files(&files, x, y),
+            DockEv::FanPick(v) => {
+                let h = HWND(v as *mut _);
+                if !unsafe { IsWindow(h) }.as_bool() {
+                    return None;
+                }
+                // a minimized one comes back out of the icon with the genie; one on screen just comes forward
+                if unsafe { IsIconic(h) }.as_bool() {
+                    return Some(Act::Restore { front: h, minimized: vec![h] });
+                }
+                shell::activate(h);
+            }
             DockEv::Edge => {
                 if !self.hidden && ((self.hide > 0.0 && self.at_bottom_edge()) || (self.hide < 1.0 && !self.awake)) {
                     self.wake();

@@ -6,6 +6,14 @@ Each release on GitHub uses its section from this file as its notes.
 
 ## [Unreleased]
 
+### Added
+- **Window fan**: rest the pointer on a dock app that has two or more windows and pictures of them fan out above
+  its icon like a hand of cards on an arc. Hovering a card lifts it in front of the others; clicking it brings
+  that window up (a minimized one comes back with the genie). Minimized windows show the picture saved when they
+  went into the dock, or the app icon. Can be turned off in Settings (**Fan out windows on hover**, `WindowFan`).
+- **Reset to Defaults** in Settings puts every setting of that window back to its default (click twice to
+  confirm). Pinned apps, picked icons and the widget layout stay as they are.
+
 ## [0.5.0] - 2026-11-26
 
 ### Added
