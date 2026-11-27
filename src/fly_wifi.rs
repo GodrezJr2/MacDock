@@ -4,7 +4,7 @@
 use std::sync::{Arc, Mutex};
 
 use windows::core::HSTRING;
-use windows::Devices::Radios::{Radio, RadioKind, RadioState};
+use windows::Devices::Radios::{Radio, RadioAccessStatus, RadioKind, RadioState};
 use windows::Devices::WiFi::{WiFiAccessStatus, WiFiAdapter, WiFiAvailableNetwork, WiFiConnectionStatus, WiFiReconnectionKind};
 use windows::Networking::Connectivity::NetworkAuthenticationType;
 use windows::Security::Credentials::PasswordCredential;
@@ -19,7 +19,6 @@ use crate::menubar::net;
 
 static ADAPTER: Mutex<Option<WiFiAdapter>> = Mutex::new(None);
 static ASKED: Mutex<bool> = Mutex::new(false);
-static RADIO: Mutex<Option<Radio>> = Mutex::new(None);
 
 fn mta() {
     unsafe {
@@ -45,27 +44,25 @@ pub fn adapter() -> Option<WiFiAdapter> {
 }
 
 /// Blocking.
-pub fn radio() -> Option<Radio> {
-    let mut r = RADIO.lock().unwrap();
-    if r.is_none() {
-        let _ = Radio::RequestAccessAsync().and_then(|o| o.get());
-        if let Ok(all) = Radio::GetRadiosAsync().and_then(|o| o.get()) {
-            *r = all.into_iter().find(|x| x.Kind().is_ok_and(|k| k == RadioKind::WiFi));
-        }
-    }
-    r.clone()
+fn radio() -> Option<Radio> {
+    Radio::GetRadiosAsync().ok()?.get().ok()?.into_iter().find(|r| r.Kind().ok() == Some(RadioKind::WiFi))
 }
 
-/// Blocking.
-pub fn is_on() -> bool {
-    radio().map_or(true, |r| r.State().map_or(true, |s| s != RadioState::Off))
+/// None means Windows has no readable, switchable Wi-Fi radio.
+pub fn is_on() -> Option<bool> {
+    match radio()?.State().ok()? {
+        RadioState::On => Some(true),
+        RadioState::Off => Some(false),
+        _ => None,
+    }
 }
 
-/// Blocking.
-pub fn set_on(on: bool) {
-    if let Some(r) = radio() {
-        let _ = r.SetStateAsync(if on { RadioState::On } else { RadioState::Off }).and_then(|o| o.get());
+pub fn set_on(on: bool) -> bool {
+    let Some(r) = radio() else { return false };
+    if Radio::RequestAccessAsync().and_then(|o| o.get()).ok() != Some(RadioAccessStatus::Allowed) {
+        return false;
     }
+    r.SetStateAsync(if on { RadioState::On } else { RadioState::Off }).and_then(|o| o.get()).ok() == Some(RadioAccessStatus::Allowed)
 }
 
 /// Run `f` on an MTA worker and wake the flyout when it is done.
@@ -91,7 +88,7 @@ struct NetInfo {
 #[derive(Default)]
 struct State {
     loaded: bool,
-    on: bool,
+    on: Option<bool>,
     current: Option<(String, u8)>,
     nets: Vec<NetInfo>,
     status: String,
@@ -145,13 +142,18 @@ fn reload(st: &Mutex<State>, scan: bool) {
         let mut s = st.lock().unwrap();
         s.on = on;
         s.loaded = true;
-        if !on {
+        if on != Some(true) {
             s.current = None;
             s.nets.clear();
-            s.status = "Wi-Fi is off".into();
+            s.expanded = None;
+            s.status = match on {
+                Some(false) => "Wi-Fi is off",
+                _ if net::wired() => "Wi-Fi unavailable · using Ethernet",
+                _ => "Wi-Fi unavailable",
+            }.into();
             return;
         }
-        if s.status == "Wi-Fi is off" {
+        if matches!(s.status.as_str(), "Wi-Fi is off" | "Wi-Fi unavailable" | "Wi-Fi unavailable · using Ethernet") {
             s.status.clear();
         }
     }
@@ -212,7 +214,7 @@ fn reload(st: &Mutex<State>, scan: bool) {
 impl WifiFly {
     pub fn new() -> WifiFly {
         // show the connected network at once; the scan fills in the rest
-        let st = State { on: true, current: net::current(), ..Default::default() };
+        let st = State { current: net::current(), ..Default::default() };
         WifiFly { hwnd: 0, st: Arc::new(Mutex::new(st)), scroll: 0, password: String::new() }
     }
 
@@ -297,19 +299,22 @@ impl Content for WifiFly {
     fn click(&mut self, id: u32, _fx: f32) -> Cmd {
         match id {
             ID_SWITCH => {
-                let on = !self.st.lock().unwrap().on;
-                {
-                    let mut s = self.st.lock().unwrap();
-                    s.on = on;
-                    s.status = if on { "Turning on…".into() } else { String::new() };
-                }
+                let s = self.st.lock().unwrap();
+                let Some(current) = s.on else { return Cmd::None };
+                if s.busy { return Cmd::None; }
+                drop(s);
                 self.run(move |st| {
-                    set_on(on);
-                    std::thread::sleep(std::time::Duration::from_millis(if on { 1500 } else { 200 }));
-                    if on {
-                        st.lock().unwrap().status.clear();
+                    let requested = !current;
+                    let allowed = set_on(requested);
+                    if allowed {
+                        std::thread::sleep(std::time::Duration::from_millis(if requested { 1500 } else { 200 }));
                     }
-                    reload(st, on);
+                    st.lock().unwrap().status.clear();
+                    reload(st, requested && allowed);
+                    let mut s = st.lock().unwrap();
+                    if s.on.is_some() && s.on != Some(requested) {
+                        s.status = "Windows could not change Wi-Fi state".into();
+                    }
                 });
             }
             ID_CURRENT => self.run(|st| {
@@ -319,7 +324,10 @@ impl Content for WifiFly {
                 std::thread::sleep(std::time::Duration::from_millis(800));
                 reload(st, false);
             }),
-            ID_SETTINGS => return Cmd::Launch("ms-settings:network-wifi".into()),
+            ID_SETTINGS => {
+                let page = if self.st.lock().unwrap().on.is_some() { "ms-settings:network-wifi" } else { "ms-settings:network-status" };
+                return Cmd::Launch(page.into());
+            }
             ID_JOIN => self.submit(),
             id if id >= ID_NET => {
                 let n = self.st.lock().unwrap().nets.get((id - ID_NET) as usize).cloned();
@@ -365,13 +373,17 @@ impl Content for WifiFly {
         let st = self.st.lock().unwrap();
         // header
         ui.text_mid(8.0, 10.0, "Wi-Fi", 13.5, 600, white(0xF2), 0.0);
-        ui.switch(ID_SWITCH, w - 4.0 - 36.0, 0.0, st.on);
+        if let Some(on) = st.on {
+            ui.switch(ID_SWITCH, w - 4.0 - 36.0, 0.0, on);
+        }
         let mut y = 26.0;
-        if !st.status.is_empty() {
+        if !st.loaded {
+            y += ui.text_wrap(8.0, y, crate::i18n::t("Checking Wi-Fi…"), 11.5, 400, white(0x80), w - 16.0) + 4.0;
+        } else if !st.status.is_empty() {
             y += ui.text_wrap(8.0, y, crate::i18n::t(&st.status), 11.5, 400, white(0x80), w - 16.0) + 4.0;
         }
         // the joined network
-        if st.on {
+        if st.on == Some(true) {
             if let Some((ssid, bars)) = &st.current {
                 ui.row(ID_CURRENT, 0.0, y, w, ROW_H + 4.0);
                 net_row(ui, y + 2.0, w, ssid, *bars, true, true);
@@ -379,7 +391,7 @@ impl Content for WifiFly {
             }
         }
         // other networks
-        if st.on && !st.nets.is_empty() {
+        if st.on == Some(true) && !st.nets.is_empty() {
             y += 4.0;
             ui.text(8.0, y, crate::i18n::t("Other Networks"), 11.5, 600, white(0x80), 0.0);
             y += ui.line_h(11.5, 600) + 2.0;
@@ -429,7 +441,7 @@ impl Content for WifiFly {
         ui.fill(8.0, y, w - 16.0, 1.0, 0.0, white(0x1A));
         y += 1.0 + 8.0;
         ui.row(ID_SETTINGS, 0.0, y, w, 30.0);
-        ui.text_mid(8.0, y + 15.0, crate::i18n::t("Wi-Fi Settings…"), 13.0, 400, white(0xF2), 0.0);
+        ui.text_mid(8.0, y + 15.0, crate::i18n::t(if st.on.is_some() { "Wi-Fi Settings…" } else { "Network Settings…" }), 13.0, 400, white(0xF2), 0.0);
         y + 30.0 - 3.0
     }
 }
@@ -451,5 +463,28 @@ fn net_row(ui: &mut Ui, y: f32, w: f32, ssid: &str, bars: u8, secured: bool, con
     }
     if secured {
         ui.glyph(w - 8.0 - 6.0, cy, '\u{E72E}', 11.0, white(0x80));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires an Ethernet connection and no Wi-Fi radio"]
+    fn ethernet_only_flyout() {
+        mta();
+        let mut fly = WifiFly::new();
+        reload(&fly.st, true);
+        {
+            let s = fly.st.lock().unwrap();
+            assert!(s.loaded);
+            assert_eq!(s.on, None);
+            assert_eq!(s.status, "Wi-Fi unavailable · using Ethernet");
+            assert!(s.nets.is_empty());
+        }
+        fly.click(ID_SWITCH, 0.0);
+        assert!(!fly.st.lock().unwrap().busy);
+        assert!(matches!(fly.click(ID_SETTINGS, 0.0), Cmd::Launch(uri) if uri == "ms-settings:network-status"));
     }
 }
