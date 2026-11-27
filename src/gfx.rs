@@ -716,6 +716,79 @@ pub fn shrink(mut img: Pixmap, w: u32) -> Pixmap {
     img
 }
 
+/// `img` resized to `w` x `h` by area averaging: every output pixel is the weighted mean of the source pixels it
+/// covers. For shrinking, where Bilinear / Bicubic sample only a few source pixels each and small text breaks up
+/// into jagged dots. Separable, premultiplied, all four channels.
+pub fn resize_area(img: &Pixmap, w: u32, h: u32) -> Option<Pixmap> {
+    let (sw, sh) = (img.width() as usize, img.height() as usize);
+    let (w, h) = (w.max(1) as usize, h.max(1) as usize);
+    // for each output index, the source indices it covers with their weights (summing to 1)
+    fn spans(src: usize, dst: usize) -> Vec<Vec<(usize, f32)>> {
+        let k = src as f32 / dst as f32;
+        (0..dst)
+            .map(|o| {
+                let (a, b) = (o as f32 * k, (o as f32 + 1.0) * k);
+                let mut v = Vec::new();
+                let mut i = a.floor() as usize;
+                while (i as f32) < b && i < src {
+                    let cover = (b.min(i as f32 + 1.0) - a.max(i as f32)).max(0.0);
+                    if cover > 0.0 {
+                        v.push((i, cover / k));
+                    }
+                    i += 1;
+                }
+                if v.is_empty() {
+                    v.push(((a as usize).min(src - 1), 1.0));
+                }
+                v
+            })
+            .collect()
+    }
+    let (xs, ys) = (spans(sw, w), spans(sh, h));
+    let src = img.data();
+    // rows first: sh x w, as f32
+    let mut mid = vec![0f32; sh * w * 4];
+    for y in 0..sh {
+        let row = &src[y * sw * 4..(y + 1) * sw * 4];
+        for (ox, sp) in xs.iter().enumerate() {
+            let mut acc = [0f32; 4];
+            for &(i, wt) in sp {
+                for c in 0..4 {
+                    acc[c] += row[i * 4 + c] as f32 * wt;
+                }
+            }
+            mid[(y * w + ox) * 4..(y * w + ox) * 4 + 4].copy_from_slice(&acc);
+        }
+    }
+    let mut out = Pixmap::new(w as u32, h as u32)?;
+    let dst = out.data_mut();
+    for (oy, sp) in ys.iter().enumerate() {
+        for x in 0..w {
+            let mut acc = [0f32; 4];
+            for &(j, wt) in sp {
+                for c in 0..4 {
+                    acc[c] += mid[(j * w + x) * 4 + c] * wt;
+                }
+            }
+            let a = acc[3].round().clamp(0.0, 255.0);
+            for c in 0..4 {
+                // premultiplied: a colour can never exceed its alpha
+                dst[(oy * w + x) * 4 + c] = acc[c].round().clamp(0.0, a) as u8;
+            }
+        }
+    }
+    Some(out)
+}
+
+/// `src` drawn through `t` like `draw_pixmap`, but with anti-aliased edges: tiny-skia's draw_pixmap fills its
+/// rectangle without anti-aliasing, which leaves a turned picture with stair-stepped sides.
+pub fn draw_pixmap_aa(dst: &mut PixmapMut, src: &Pixmap, opacity: f32, quality: tiny_skia::FilterQuality, t: tiny_skia::Transform) {
+    let Some(rect) = tiny_skia::Rect::from_xywh(0.0, 0.0, src.width() as f32, src.height() as f32) else { return };
+    let shader = tiny_skia::Pattern::new(src.as_ref(), tiny_skia::SpreadMode::Pad, quality, opacity, tiny_skia::Transform::identity());
+    let paint = tiny_skia::Paint { shader, anti_alias: true, ..Default::default() };
+    dst.fill_rect(rect, &paint, t, None);
+}
+
 /// Decode an image file (PNG etc.) with WIC into premultiplied BGRA, shrunk to fit `max_px` if larger.
 pub fn image_file(path: &str, max_px: u32) -> Option<Pixmap> {
     unsafe {

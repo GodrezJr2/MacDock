@@ -246,10 +246,15 @@ fn make_card(pic: Option<Pixmap>, icon: Option<&Pixmap>, title: &str, s: f32) ->
     match pic {
         Some(p) => {
             let p = gfx::shrink(p, cw as u32);
-            // cover the card, top aligned so the window's title bar shows
+            // cover the card, top aligned so the window's title bar shows; shrunk by area averaging and put down
+            // pixel for pixel, as Bicubic on a 0.5-1x shrink broke small text into jagged dots
             let k = (cw / p.width() as f32).max(ch / p.height() as f32);
-            let x = (cw - p.width() as f32 * k) / 2.0;
-            pm.draw_pixmap(0, 0, p.as_ref(), &q, Transform::from_row(k, 0.0, 0.0, k, x, 0.0), None);
+            let (tw, th) = ((p.width() as f32 * k).round().max(cw) as u32, (p.height() as f32 * k).round().max(ch) as u32);
+            let x = ((cw - tw as f32) / 2.0).round() as i32;
+            match (k < 1.0).then(|| gfx::resize_area(&p, tw, th)).flatten() {
+                Some(r) => pm.draw_pixmap(x, 0, r.as_ref(), &PixmapPaint::default(), Transform::identity(), None),
+                None => pm.draw_pixmap(0, 0, p.as_ref(), &q, Transform::from_row(k, 0.0, 0.0, k, x as f32, 0.0), None),
+            }
         }
         None => {
             pm.fill(Color::from_rgba8(0x2E, 0x2A, 0x2A, 0xFF));
@@ -561,8 +566,8 @@ impl Fan {
                 let pp = PixmapPaint { opacity: a * (0.75 + 0.25 * c.lift), quality: FilterQuality::Bilinear, ..Default::default() };
                 pm.draw_pixmap(0, 0, sh.as_ref(), &pp, t.pre_translate(*ox, *oy), None);
             }
-            let pp = PixmapPaint { opacity: a, quality: FilterQuality::Bilinear, ..Default::default() };
-            pm.draw_pixmap(0, 0, c.img.as_ref(), &pp, t, None);
+            // the cards sit turned on the arc: anti-aliased sides, where draw_pixmap leaves them stair-stepped
+            gfx::draw_pixmap_aa(pm, &c.img, a, FilterQuality::Bilinear, t);
         }
     }
 
@@ -665,17 +670,20 @@ mod tests {
     }
 
     /// Render a fan of five made-up windows over a plain backdrop to target/fan.png, the third card hovered
-    /// (cargo test fan_snapshot -- --ignored).
+    /// (cargo test fan_snapshot -- --ignored). FAN_PIC=<png> puts that picture on every card instead, to judge
+    /// how sharp real window text comes out; FAN_SCALE sets the DPI scale (default 1.25).
     #[test]
     #[ignore]
     fn fan_snapshot() {
-        let s = 1.25;
+        let s: f32 = std::env::var("FAN_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.25);
+        let real = std::env::var("FAN_PIC").ok().and_then(|f| { let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED) }; gfx::image_file(&f, 4096) });
         let colours = [(0x1E, 0x1E, 0x1E), (0x0C, 0x30, 0x60), (0xF2, 0xF2, 0xF2), (0x30, 0x10, 0x40), (0x12, 0x40, 0x22)];
         let cards: Vec<Card> = angles(5).into_iter().zip(colours).enumerate().map(|(i, (angle, (r, g, b)))| {
             let mut pic = Pixmap::new(1600, 1000).unwrap();
             pic.fill(Color::from_rgba8(b, g, r, 255));
             let bar = Rect::from_xywh(0.0, 0.0, 1600.0, 70.0).unwrap();
             pic.fill_rect(bar, &paint_rgba(0x55, 0x55, 0x60, 255), Transform::identity(), None);
+            let pic = real.clone().unwrap_or(pic);
             let img = make_card(Some(pic), None, &format!("Window {} — some long title to cut short here", i + 1), s).unwrap();
             let (w, h) = (img.width() as f32, img.height() as f32);
             let shadow = gfx::rrect_shadow(0.0, 6.0 * s, w, h, CORNER * s, 16.0 * s, (0, 0, 0, 0x80));
@@ -731,6 +739,20 @@ mod tests {
         }
         assert!(seen.iter().all(|&s| s == seen[0]), "hover changed: {seen:?}");
         assert_eq!(seen[0], Some(1));
+    }
+
+    #[test]
+    fn resize_area_keeps_flat_colour_and_averages() {
+        let mut p = Pixmap::new(300, 200).unwrap();
+        p.fill(Color::from_rgba8(40, 80, 120, 255));
+        let r = gfx::resize_area(&p, 117, 71).unwrap();
+        assert_eq!((r.width(), r.height()), (117, 71));
+        assert!(r.data().chunks(4).all(|c| c == [40, 80, 120, 255]));
+        // black and white columns, 2:1 shrink: grey
+        let mut p = Pixmap::new(4, 1).unwrap();
+        p.data_mut().copy_from_slice(&[0, 0, 0, 255, 255, 255, 255, 255, 0, 0, 0, 255, 255, 255, 255, 255]);
+        let r = gfx::resize_area(&p, 2, 1).unwrap();
+        assert_eq!(r.data(), &[128, 128, 128, 255, 128, 128, 128, 255]);
     }
 
     #[test]
