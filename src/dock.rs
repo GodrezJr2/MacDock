@@ -166,9 +166,11 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
             crate::genie::restore_system_animation();
         }
         WM_DESTROY if PRIMARY_HWND.get() == h.0 as isize => PostQuitMessage(0),
-        // HSHELL_FLASH: an app flashes its taskbar button (FlashWindowEx) asking for attention
+        // HSHELL_FLASH: an app flashes its taskbar button (FlashWindowEx) asking for attention. It is
+        // HSHELL_REDRAW (6, the title changed) plus the high bit, so compare it whole: masked, every title change
+        // of a window in the background bounced its icon (a terminal with a spinner in its title: forever).
         m if m != 0 && m == SHELLHOOK.get() => {
-            if w.0 & 0x7FFF == HSHELL_FLASH & 0x7FFF {
+            if w.0 == HSHELL_FLASH {
                 ev(h, DockEv::Flash(l.0));
             }
         }
@@ -224,6 +226,8 @@ struct Item {
     attention: bool,
     attention_bounce: bool,
     attention_started: Instant,
+    /// the last flash of this app's request; a flash soon after its bounces ended is the same request
+    attention_last: Option<Instant>,
     dot: f64,
     badge: u32,
     badge_text: Option<(u32, Pixmap)>,
@@ -235,7 +239,7 @@ impl Item {
             key, name, launch: None, aumid: None, profile_directory: None, exe: None, trash: false, stack: false, sep_before: false, icon, wins: Vec::new(),
             scale: 1.0, presence, leaving: false, x: 0.0, size: 0.0, bounce_t: 0.0,
             launching: false, launch_started: Instant::now(), wins_at_launch: 0,
-            attention: false, attention_bounce: false, attention_started: Instant::now(),
+            attention: false, attention_bounce: false, attention_started: Instant::now(), attention_last: None,
             dot: 0.0, badge: 0, badge_text: None,
         }
     }
@@ -1132,7 +1136,11 @@ impl Dock {
             return;
         }
         let Some(it) = self.items.iter_mut().find(|i| !i.leaving && i.wins.iter().any(|w| w.hwnd == h)) else { return };
-        if it.attention {
+        // FlashWindowEx with a timer flashes the button about once a second until the app is opened: bounce a
+        // few times for that request, not again after every flash
+        let same = it.attention_last.is_some_and(|t| t.elapsed() < Duration::from_secs(5));
+        it.attention_last = Some(Instant::now());
+        if it.attention || same {
             return;
         }
         it.attention = true;
