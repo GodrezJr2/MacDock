@@ -10,6 +10,7 @@ mod config;
 mod display;
 mod dock;
 mod dropfiles;
+mod fan;
 mod ai_usage;
 mod apps;
 mod spotlight;
@@ -38,6 +39,7 @@ mod tile;
 mod tray;
 mod update;
 mod widgets;
+mod winkey;
 
 use std::cell::RefCell;
 
@@ -118,7 +120,11 @@ struct App {
 
 impl App {
     fn awake(&self) -> bool {
-        self.dock.awake || self.secondary.iter().any(|d| d.awake) || self.genie.as_ref().is_some_and(|g| g.busy())
+        self.dock.awake
+            || self.secondary.iter().any(|d| d.awake)
+            || self.genie.as_ref().is_some_and(|g| g.busy())
+            || self.fly.as_ref().is_some_and(|f| f.animating())
+            || self.win.as_ref().is_some_and(|f| f.animating())
     }
 
     /// The dock icon a window belongs to, in screen pixels.
@@ -251,7 +257,12 @@ impl App {
         if self.bar.is_some() {
             return self.toggle_flyout(menubar::Extra::Spotlight, 0);
         }
+        // the same key again closes it, as with the menu bar (a Windows key pressed by mistake is one more tap)
+        let open = self.fly.as_ref().is_some_and(|f| f.kind == menubar::Extra::Spotlight);
         self.close_flyout();
+        if open {
+            return;
+        }
         let content = Box::new(spotlight::Spotlight::new(!self.dock.config().reduce_motion));
         self.fly = Some(flyout::Flyout::open(menubar::Extra::Spotlight, content, 0, (80.0 * self.dock.dpi) as i32, self.dock.dpi));
     }
@@ -297,6 +308,13 @@ impl App {
             Change::ResetAnimations => {
                 self.dock.update_config(fly_settings::reset_animations);
             }
+            Change::ResetAll => {
+                // one change at a time, so each gets the same follow-up as when it is set by hand
+                for (k, v) in fly_settings::defaults_differing(self.dock.config()) {
+                    self.on_settings(Change::Set(k, v, true));
+                }
+                return true;
+            }
             Change::Set(k, v, d) => {
                 done = d;
                 let mut changed = false;
@@ -306,6 +324,7 @@ impl App {
                 }
                 let c = self.dock.config().clone();
                 match k {
+                    Key::WinSpotlight => winkey::set(c.win_spotlight),
                     Key::Genie => {
                         if c.genie && self.genie.is_none() {
                             let mut g = genie::Genie::new();
@@ -770,7 +789,9 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
     }
     if want_switcher {
         switcher::start();
+        fan::start();
     }
+    winkey::set(app.dock.config().win_spotlight);
     update::cleanup();
     update::start();
     if std::env::args().any(|a| a == "--settings") {
@@ -828,6 +849,12 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
                     app.dock.frame();
                 }
                 for d in &mut app.secondary { if d.awake { d.frame(); } }
+                // an opening or moving flyout steps with the screen too
+                for f in [app.fly.as_mut(), app.win.as_mut()].into_iter().flatten() {
+                    if f.animating() {
+                        f.anim_tick();
+                    }
+                }
                 let t1 = std::time::Instant::now();
                 if let Some(g) = app.genie.as_mut() {
                     g.frame();

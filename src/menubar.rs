@@ -182,6 +182,40 @@ fn read_net() -> Net {
     }
 }
 
+/// The network icon's state, read every 5 s on a thread of its own. The WinRT calls take ~7 ms on the UI
+/// thread (measured 27 Nov 2026), which held up a dock frame every 5 s; here they hold up nothing.
+static NET: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(u8::MAX);
+
+fn watch_net() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = std::thread::Builder::new().name("net-watch".into()).spawn(|| {
+            unsafe {
+                let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+            }
+            loop {
+                let c = match read_net() {
+                    Net::Wifi(b) => b.min(3),
+                    Net::Wired => 4,
+                    Net::Off => 5,
+                };
+                NET.store(c, std::sync::atomic::Ordering::Relaxed);
+                std::thread::sleep(Duration::from_secs(5));
+            }
+        });
+    });
+}
+
+/// The last state the watcher read, or None before its first read.
+fn net_now() -> Option<Net> {
+    match NET.load(std::sync::atomic::Ordering::Relaxed) {
+        b @ 0..=3 => Some(Net::Wifi(b)),
+        4 => Some(Net::Wired),
+        5 => Some(Net::Off),
+        _ => None,
+    }
+}
+
 fn clock_text() -> String {
     const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -322,7 +356,6 @@ pub struct MenuBar {
     update: bool, // a newer release is out: dot on the logo, item in its menu
     battery: Option<(u8, bool, bool)>,
     net: Net,
-    ticks: u32,
     tracking: bool,
     dirty: bool,
     pub auto_hide_dock: bool,
@@ -333,12 +366,13 @@ impl MenuBar {
         let (sw, sh, dpi) = crate::dock::primary_screen();
         let b = power();
         let n = read_net();
+        watch_net();
         MenuBar {
             hwnd, shell: Shell::default(), dpi, screen_w: sw, screen_h: sh, appbar: false, hidden: false, tray, battery_pct,
             ai, ai_gen: u64::MAX, ai_label: String::new(), ai_pct: None, ai_live: false,
             surface: None, dark_text: false, slots: Vec::new(), hover: None, open: None, target: HWND::default(),
             app_name: "File Explorer".into(), names: HashMap::new(), clock: clock_text(), update: false, battery: b, net: n,
-            ticks: 0, tracking: false, dirty: true, auto_hide_dock: false,
+            tracking: false, dirty: true, auto_hide_dock: false,
         }
     }
 
@@ -439,7 +473,7 @@ impl MenuBar {
             } else {
                 SetTimer(self.hwnd, TIMER_TICK, 1000, None);
                 let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
-                self.tick(true);
+                self.tick();
                 self.dirty = true;
                 self.render();
             }
@@ -487,8 +521,7 @@ impl MenuBar {
     }
 
     /// Clock every second; battery too; the network every 5 s.
-    fn tick(&mut self, all: bool) {
-        self.ticks += 1;
+    fn tick(&mut self) {
         let c = clock_text();
         if c != self.clock {
             self.clock = c;
@@ -507,12 +540,9 @@ impl MenuBar {
         if self.ai {
             self.read_ai();
         }
-        if all || self.ticks % 5 == 1 {
-            let n = read_net();
-            if n != self.net {
-                self.net = n;
-                self.dirty = true;
-            }
+        if let Some(n) = net_now().filter(|n| *n != self.net) {
+            self.net = n;
+            self.dirty = true;
         }
     }
 
@@ -575,7 +605,7 @@ impl MenuBar {
                     _ => {}
                 }
             }
-            BarEv::Timer(TIMER_TICK) => self.tick(false),
+            BarEv::Timer(TIMER_TICK) => self.tick(),
             BarEv::Timer(TIMER_DISPLAY) => {
                 unsafe {
                     let _ = KillTimer(self.hwnd, TIMER_DISPLAY);

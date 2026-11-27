@@ -22,6 +22,7 @@ pub enum Key {
     Magnify,
     AutoHide,
     Recents,
+    WindowFan,
     Downloads,
     Tiles,
     Badges,
@@ -29,6 +30,7 @@ pub enum Key {
     MenuBar,
     Widgets,
     Switcher,
+    WinSpotlight,
     BatteryPct,
     SecondaryDocks,
     AiUsage,
@@ -51,6 +53,8 @@ pub enum Change {
     /// a switch (value 0/1), a slider value or a choice; `done` is false while a slider is still being dragged
     Set(Key, f64, bool),
     ResetAnimations,
+    /// every setting in this window back to its default (pinned apps, icons and widget layout stay)
+    ResetAll,
     Restart,
     OpenConfig,
     Open,
@@ -109,6 +113,7 @@ pub fn apply(c: &mut Config, k: Key, v: f64) -> bool {
         }
         Key::AutoHide => Some(&mut c.auto_hide),
         Key::Recents => Some(&mut c.show_recents),
+        Key::WindowFan => Some(&mut c.window_fan),
         Key::Downloads => Some(&mut c.downloads_stack),
         Key::Tiles => Some(&mut c.icon_tiles),
         Key::Badges => Some(&mut c.badges),
@@ -116,6 +121,7 @@ pub fn apply(c: &mut Config, k: Key, v: f64) -> bool {
         Key::MenuBar => Some(&mut c.menu_bar),
         Key::Widgets => Some(&mut c.desktop_widgets),
         Key::Switcher => Some(&mut c.app_switcher),
+        Key::WinSpotlight => Some(&mut c.win_spotlight),
         Key::BatteryPct => Some(&mut c.battery_percent),
         Key::SecondaryDocks => Some(&mut c.secondary_docks),
         Key::AiUsage => Some(&mut c.ai_usage),
@@ -143,6 +149,15 @@ pub fn reset_animations(c: &mut Config) {
     c.reduce_motion = d.reduce_motion;
 }
 
+/// The settings in this window whose value differs from the default, with the default value.
+pub fn defaults_differing(c: &Config) -> Vec<(Key, f64)> {
+    let d = Config::default();
+    ALL.iter().filter_map(|&k| {
+        let v = value_of(&d, k);
+        (value_of(c, k) != v).then_some((k, v))
+    }).collect()
+}
+
 /// Set up once at start: a change only takes effect after a restart.
 fn needs_restart(k: Key) -> bool {
     matches!(k, Key::MenuBar | Key::Widgets | Key::Switcher | Key::ClaudeOAuth)
@@ -166,6 +181,7 @@ enum Row {
 const ID_RESTART: u32 = 100;
 const ID_CONFIG: u32 = 101;
 const ID_RESET: u32 = 102;
+const ID_RESET_ALL: u32 = 103;
 const ID_CLOSE: u32 = 110;
 const ID_MIN: u32 = 111;
 const ID_ZOOM: u32 = 112;
@@ -189,6 +205,7 @@ fn dock_rows() -> Vec<Row> {
         Row::Slider(Key::Magnify, "Magnification", 1.0, 3.0),
         Row::Switch(Key::AutoHide, "Automatically hide the dock"),
         Row::Switch(Key::Recents, "Show recent apps"),
+        Row::Switch(Key::WindowFan, "Fan out windows on hover"),
         Row::Switch(Key::Downloads, "Show Downloads stack"),
         Row::Switch(Key::Tiles, "Icons on rounded tiles"),
         Row::Switch(Key::Badges, "Notification badges"),
@@ -205,6 +222,7 @@ fn desktop_rows() -> Vec<Row> {
         Row::Switch(Key::ClaudeOAuth, "Claude limits from your Claude login"),
         Row::Switch(Key::Widgets, "Desktop widgets"),
         Row::Switch(Key::Switcher, "Mac-style Alt+Tab"),
+        Row::Switch(Key::WinSpotlight, "Windows key opens Spotlight"),
         Row::Switch(Key::SecondaryDocks, "Docks on secondary monitors"),
     ]
 }
@@ -251,11 +269,13 @@ pub struct Settings {
     cfg: Config,
     /// the restart-only settings as this process started with them
     started: [bool; 4],
+    /// "Reset to Defaults" was clicked once: the next click on it resets
+    confirm_reset: bool,
 }
 
 impl Settings {
     pub fn new(cfg: &Config) -> Settings {
-        Settings { cfg: cfg.clone(), started: restart_state(cfg) }
+        Settings { cfg: cfg.clone(), started: restart_state(cfg), confirm_reset: false }
     }
 
     /// The restart-only settings this process is actually running with.
@@ -268,35 +288,7 @@ impl Settings {
     }
 
     fn value(&self, k: Key) -> f64 {
-        let c = &self.cfg;
-        let b = |x: bool| if x { 1.0 } else { 0.0 };
-        match k {
-            Key::IconSize => c.icon_size,
-            Key::Magnify => c.magnify,
-            Key::GenieMs => c.genie_ms,
-            Key::MagnifySpeed => c.magnify_speed,
-            Key::HideDelay => c.hide_delay_ms,
-            Key::HideSpeed => c.hide_speed,
-            Key::InterfaceFont => crate::gfx::interface_font_index(&c.interface_font) as f64,
-            Key::Language => LANGUAGES.iter().position(|&(code, _)| code == c.language).unwrap_or(0) as f64,
-            Key::LaunchpadStyle => STYLES.iter().position(|l| *l == c.launchpad_style).unwrap_or(0) as f64,
-            Key::AutoHide => b(c.auto_hide),
-            Key::Recents => b(c.show_recents),
-            Key::Downloads => b(c.downloads_stack),
-            Key::Tiles => b(c.icon_tiles),
-            Key::Badges => b(c.badges),
-            Key::HideTaskbar => b(c.hide_taskbar),
-            Key::MenuBar => b(c.menu_bar),
-            Key::Widgets => b(c.desktop_widgets),
-            Key::Switcher => b(c.app_switcher),
-            Key::BatteryPct => b(c.battery_percent),
-            Key::SecondaryDocks => b(c.secondary_docks),
-            Key::AiUsage => b(c.ai_usage),
-            Key::ClaudeOAuth => b(c.claude_usage_oauth),
-            Key::TrayIcons => b(c.tray_icons),
-            Key::Genie => b(c.genie),
-            Key::ReduceMotion => b(c.reduce_motion),
-        }
+        value_of(&self.cfg, k)
     }
 
     fn label(&self, k: Key) -> String {
@@ -439,14 +431,48 @@ impl Settings {
     }
 }
 
+/// A setting's value as the window shows it: a switch as 0/1, a choice as its index.
+fn value_of(c: &Config, k: Key) -> f64 {
+    let b = |x: bool| if x { 1.0 } else { 0.0 };
+    match k {
+        Key::IconSize => c.icon_size,
+        Key::Magnify => c.magnify,
+        Key::GenieMs => c.genie_ms,
+        Key::MagnifySpeed => c.magnify_speed,
+        Key::HideDelay => c.hide_delay_ms,
+        Key::HideSpeed => c.hide_speed,
+        Key::InterfaceFont => crate::gfx::interface_font_index(&c.interface_font) as f64,
+        Key::Language => LANGUAGES.iter().position(|&(code, _)| code == c.language).unwrap_or(0) as f64,
+        Key::LaunchpadStyle => STYLES.iter().position(|l| *l == c.launchpad_style).unwrap_or(0) as f64,
+        Key::AutoHide => b(c.auto_hide),
+        Key::Recents => b(c.show_recents),
+        Key::WindowFan => b(c.window_fan),
+        Key::Downloads => b(c.downloads_stack),
+        Key::Tiles => b(c.icon_tiles),
+        Key::Badges => b(c.badges),
+        Key::HideTaskbar => b(c.hide_taskbar),
+        Key::MenuBar => b(c.menu_bar),
+        Key::Widgets => b(c.desktop_widgets),
+        Key::Switcher => b(c.app_switcher),
+        Key::WinSpotlight => b(c.win_spotlight),
+        Key::BatteryPct => b(c.battery_percent),
+        Key::SecondaryDocks => b(c.secondary_docks),
+        Key::AiUsage => b(c.ai_usage),
+        Key::ClaudeOAuth => b(c.claude_usage_oauth),
+        Key::TrayIcons => b(c.tray_icons),
+        Key::Genie => b(c.genie),
+        Key::ReduceMotion => b(c.reduce_motion),
+    }
+}
+
 fn note_h(ui: &Ui, s: &str, w: f32) -> f32 {
     let lines = ui.wrapped_lines(s, 11.5, 400, w - 2.0 * INSET);
     lines.len() as f32 * ui.line_h(11.5, 400) + 16.0
 }
 
-const ALL: [Key; 25] = [
-    Key::IconSize, Key::Magnify, Key::AutoHide, Key::Recents, Key::Downloads, Key::Tiles, Key::Badges,
-    Key::HideTaskbar, Key::MenuBar, Key::Widgets, Key::Switcher, Key::BatteryPct, Key::AiUsage, Key::ClaudeOAuth,
+const ALL: [Key; 27] = [
+    Key::IconSize, Key::Magnify, Key::AutoHide, Key::Recents, Key::WindowFan, Key::Downloads, Key::Tiles, Key::Badges,
+    Key::HideTaskbar, Key::MenuBar, Key::Widgets, Key::Switcher, Key::WinSpotlight, Key::BatteryPct, Key::AiUsage, Key::ClaudeOAuth,
     Key::TrayIcons, Key::SecondaryDocks, Key::Genie, Key::GenieMs, Key::MagnifySpeed, Key::HideDelay, Key::HideSpeed, Key::ReduceMotion,
     Key::Language, Key::LaunchpadStyle, Key::InterfaceFont,
 ];
@@ -481,6 +507,14 @@ fn button(ui: &mut Ui, id: u32, x: f32, y: f32, w: f32, text: &str, primary: boo
     ui.fill(x, y, w, 30.0, 8.0, fill);
     let tw = ui.text_w(text, 13.0, 500);
     ui.text_mid(x + (w - tw) / 2.0, y + 15.0, text, 13.0, 500, white(0xF2), 0.0);
+}
+
+/// A button for a step that cannot be undone, asking to be clicked again.
+fn button_red(ui: &mut Ui, id: u32, x: f32, y: f32, w: f32, text: &str) {
+    let hov = ui.hit(id, x, y, w, 30.0);
+    ui.fill(x, y, w, 30.0, 8.0, if hov { (0xFF, 0x4D, 0x45, 255) } else { (0xE5, 0x3E, 0x36, 255) });
+    let tw = ui.text_w(text, 13.0, 500);
+    ui.text_mid(x + (w - tw) / 2.0, y + 15.0, text, 13.0, 500, white(0xFF), 0.0);
 }
 
 /// Close, minimize, zoom: macOS window buttons at the left of the title row, their marks shown on hover.
@@ -556,7 +590,12 @@ impl Content for Settings {
         let msg = t(if due { "Restart MacDock to apply the menu bar, widgets and Alt+Tab changes." } else { "Changes apply right away and are saved to config.json." });
         ry += ui.text_wrap(x + 4.0, ry, msg, 11.5, 400, if due { white(0xD9) } else { white(0x80) }, col - 8.0) + 10.0;
         let bw = (col - 10.0) / 2.0;
-        button(ui, ID_RESTART, x, ry, col, t("Restart MacDock"), due);
+        button(ui, ID_RESTART, x, ry, bw, t("Restart MacDock"), due);
+        if self.confirm_reset {
+            button_red(ui, ID_RESET_ALL, x + bw + 10.0, ry, bw, t("Click again to reset"));
+        } else {
+            button(ui, ID_RESET_ALL, x + bw + 10.0, ry, bw, t("Reset to Defaults"), false);
+        }
         ry += 40.0;
         button(ui, ID_RESET, x, ry, bw, t("Reset Animations"), false);
         button(ui, ID_CONFIG, x + bw + 10.0, ry, bw, t("Open config.json"), false);
@@ -623,7 +662,17 @@ impl Content for Settings {
     }
 
     fn click(&mut self, id: u32, _fx: f32) -> Cmd {
+        // a second click on Reset to Defaults confirms it; anything else in between cancels
+        let confirming = std::mem::take(&mut self.confirm_reset);
         match id {
+            ID_RESET_ALL if !confirming => self.confirm_reset = true,
+            ID_RESET_ALL => {
+                for (k, v) in defaults_differing(&self.cfg) {
+                    apply(&mut self.cfg, k, v);
+                }
+                crate::i18n::set(&self.cfg.language);
+                push(Ev::Settings(Change::ResetAll));
+            }
             ID_CLOSE => return Cmd::Close,
             ID_MIN => return Cmd::Minimize,
             ID_ZOOM => return Cmd::Zoom,
@@ -681,6 +730,24 @@ mod tests {
         assert_eq!(font_menu_layout(830, 0, 900, 96), (804, 280, true));
         assert_eq!(font_menu_layout(-90, -400, 0, 144), (-129, 259, true));
         assert_eq!(font_menu_layout(140, 0, 300, 96), (140, 152, false));
+    }
+
+    #[test]
+    fn reset_all_brings_every_setting_back() {
+        let mut c = Config::default();
+        assert!(defaults_differing(&c).is_empty());
+        c.pinned = vec!["x.exe".into()];
+        apply(&mut c, Key::IconSize, 80.0);
+        apply(&mut c, Key::WindowFan, 0.0);
+        apply(&mut c, Key::Language, 2.0);
+        apply(&mut c, Key::ReduceMotion, 1.0);
+        let diff = defaults_differing(&c);
+        assert_eq!(diff.len(), 4);
+        for (k, v) in diff {
+            apply(&mut c, k, v);
+        }
+        assert!(defaults_differing(&c).is_empty());
+        assert_eq!(c.pinned, vec!["x.exe".to_string()]); // not a setting of this window
     }
 
     #[test]

@@ -53,6 +53,8 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 const ATTENTION_HOP: f64 = 0.5;
 const ATTENTION_CYCLE: f64 = 1.1;
 const LAUNCH_PERIOD: f64 = 0.62;
+/// seconds the pointer rests on an app with several windows before they fan out
+const FAN_DWELL: f64 = 0.4;
 
 // ------------------------------------------------------------------ window messages → events
 // The window procedure only queues events; the main loop handles them. That keeps re-entrant calls
@@ -82,6 +84,8 @@ pub enum DockEv {
     DragFiles(bool),
     /// files dropped at screen px (x, y)
     DropFiles(Vec<String>, i32, i32),
+    /// a card of the window fan was clicked: bring this window up
+    FanPick(isize),
 }
 
 /// What the dock wants done by the app around it.
@@ -155,15 +159,18 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
         WM_SETTINGCHANGE if w.0 == SPI_SETDESKWALLPAPER => ev(h, DockEv::Wallpaper),
         CB_APPBAR => ev(h, DockEv::AppBar(w.0, l.0)),
         crate::backdrop::WM_BACKDROP => ev(h, DockEv::Backdrop(w.0 == 1)),
+        crate::fan::WM_FAN_PICK => ev(h, DockEv::FanPick(w.0 as isize)),
         // the session is ending and we may not get another chance: put the taskbar back now
         WM_ENDSESSION if w.0 != 0 => {
             taskbar::restore(false);
             crate::genie::restore_system_animation();
         }
         WM_DESTROY if PRIMARY_HWND.get() == h.0 as isize => PostQuitMessage(0),
-        // HSHELL_FLASH: an app flashes its taskbar button (FlashWindowEx) asking for attention
+        // HSHELL_FLASH: an app flashes its taskbar button (FlashWindowEx) asking for attention. It is
+        // HSHELL_REDRAW (6, the title changed) plus the high bit, so compare it whole: masked, every title change
+        // of a window in the background bounced its icon (a terminal with a spinner in its title: forever).
         m if m != 0 && m == SHELLHOOK.get() => {
-            if w.0 & 0x7FFF == HSHELL_FLASH & 0x7FFF {
+            if w.0 == HSHELL_FLASH {
                 ev(h, DockEv::Flash(l.0));
             }
         }
@@ -219,7 +226,11 @@ struct Item {
     attention: bool,
     attention_bounce: bool,
     attention_started: Instant,
+    /// the last flash of this app's request; a flash soon after its bounces ended is the same request
+    attention_last: Option<Instant>,
     dot: f64,
+    /// the running dot is drawn dark: the glass right under it is light
+    dot_dark: bool,
     badge: u32,
     badge_text: Option<(u32, Pixmap)>,
 }
@@ -230,8 +241,8 @@ impl Item {
             key, name, launch: None, aumid: None, profile_directory: None, exe: None, trash: false, stack: false, sep_before: false, icon, wins: Vec::new(),
             scale: 1.0, presence, leaving: false, x: 0.0, size: 0.0, bounce_t: 0.0,
             launching: false, launch_started: Instant::now(), wins_at_launch: 0,
-            attention: false, attention_bounce: false, attention_started: Instant::now(),
-            dot: 0.0, badge: 0, badge_text: None,
+            attention: false, attention_bounce: false, attention_started: Instant::now(), attention_last: None,
+            dot: 0.0, dot_dark: false, badge: 0, badge_text: None,
         }
     }
 
@@ -376,6 +387,7 @@ pub struct Dock {
     glass: Option<Pixmap>, // the wallpaper at half the screen's pixels, lightly blurred: what Liquid Glass shows
     system_dark: bool,
     wall_settle: u8, // looks left while a new wallpaper fades in
+    wall_sig: (u64, u8), // gfx::wallpaper_sig at the last desktop render, and quiet checks since then
     backdrop: Option<crate::backdrop::Backdrop>, // live captures of the windows behind the plate
     backdrop_gen: u64,
     bd_due: (bool, bool), // backdrop events waiting for the next allowed repaint: (frames, layout)
@@ -421,6 +433,8 @@ pub struct Dock {
     look_pending: bool,
     toasts: Vec<(String, i64)>,
     toast_job: Option<Arc<Mutex<Option<Vec<(String, i64)>>>>>,
+    /// the item the pointer rests on, since when, and whether its window fan was opened this time
+    fan_hover: Option<(String, Instant, bool)>,
 }
 
 impl Dock {
@@ -449,14 +463,14 @@ impl Dock {
         let now = Instant::now();
         Dock {
             hwnd, cfg, display, config_dirty: false, shell: Shell::default(), dpi, screen_w, screen_h, fit_b: f64::MAX,
-            win_w: 1.0, win_h: 1.0, items: Vec::new(), icons: HashMap::new(), surface: None, drawn: Vec::new(), frost: None, glass: None, system_dark: crate::sysctl::system_dark(), wall_settle: 0, backdrop: crate::backdrop::Backdrop::new(hwnd, display.primary), backdrop_gen: 0, bd_due: (false, false), bd_last: 0.0, bd_timer: false, behind: None, glass_layer: None, over: None, wall_strip: None,
+            win_w: 1.0, win_h: 1.0, items: Vec::new(), icons: HashMap::new(), surface: None, drawn: Vec::new(), frost: None, glass: None, system_dark: crate::sysctl::system_dark(), wall_settle: 0, wall_sig: (0, 0), backdrop: crate::backdrop::Backdrop::new(hwnd, display.primary), backdrop_gen: 0, bd_due: (false, false), bd_last: 0.0, bd_timer: false, behind: None, glass_layer: None, over: None, wall_strip: None,
             label: None, label_alpha: 0.0, menu_up: false, drag_files: false, label_at: (0.0, 0.0, 0.0, 0.0), hovered: None, plate_left: 0.0,
             plate_w: 0.0, seps: Vec::new(), running_now: HashMap::new(), clock: now, last_t: 0.0, awake: false, hidden: false,
             sig: String::new(), refreshes: 0, appbar: false, reserved: None,
             hide: 0.0, peek_until: now, last_near: now,
             pressed: None, press_pt: (0.0, 0.0), dragging: false, drag_out: false, drag_x: 0.0,
             last_app: unsafe { GetForegroundWindow() },
-            seen: None, toasts: Vec::new(), toast_job: None, look_pending: false,
+            seen: None, toasts: Vec::new(), toast_job: None, look_pending: false, fan_hover: None,
         }
     }
 
@@ -716,6 +730,15 @@ impl Dock {
 
     /// Read the desktop again, cheaply, and rebuild the glass only if it changed.
     fn reload_frost_if_changed(&mut self) -> bool {
+        // Rendering the desktop to compare cost ~40 ms per dock every 30 s. Do it only when the wallpaper's
+        // fingerprint moved, and every 10th check anyway (5 min) for a live wallpaper app drawing on the desktop.
+        let sig = gfx::wallpaper_sig();
+        if sig == self.wall_sig.0 && self.wall_sig.1 < 10 {
+            self.wall_sig.1 += 1;
+            return false;
+        }
+        // just moved: look once more next time too, in case this render caught the new picture mid fade
+        self.wall_sig = (sig, if sig == self.wall_sig.0 { 0 } else { 10 });
         let fh = (240.0 * self.screen_h / self.screen_w).round().max(1.0) as u32;
         let now = gfx::wallpaper_on(Some(self.display.rect), 240, fh);
         let changed = now.as_ref().map(|p| p.data()) != self.frost.as_ref().map(|p| p.data());
@@ -1108,7 +1131,11 @@ impl Dock {
             return;
         }
         let Some(it) = self.items.iter_mut().find(|i| !i.leaving && i.wins.iter().any(|w| w.hwnd == h)) else { return };
-        if it.attention {
+        // FlashWindowEx with a timer flashes the button about once a second until the app is opened: bounce a
+        // few times for that request, not again after every flash
+        let same = it.attention_last.is_some_and(|t| t.elapsed() < Duration::from_secs(5));
+        it.attention_last = Some(Instant::now());
+        if it.attention || same {
             return;
         }
         it.attention = true;
@@ -1137,6 +1164,7 @@ impl Dock {
     }
 
     fn on_down(&mut self) {
+        crate::fan::hide();
         let p = self.cursor();
         self.press_pt = p;
         self.pressed = self.item_at(p.0).map(|i| self.items[i].key.clone());
@@ -1285,6 +1313,7 @@ impl Dock {
     }
 
     fn context_menu(&mut self) -> Option<Act> {
+        crate::fan::hide();
         let (mx, my) = self.cursor();
         let on_plate = my >= self.win_h - BOTTOM_GAP - self.plate_h() - 4.0;
         let idx = self.item_at(mx).filter(|&i| self.items[i].size > 0.5 && (on_plate || my >= self.win_h - BOTTOM_GAP - PAD - self.items[i].size - 4.0));
@@ -1622,7 +1651,7 @@ impl Dock {
 
         let kh = self.cfg.ease(dt, 13.0, self.cfg.hide_speed);
         if self.cfg.auto_hide {
-            if hovering || self.dragging || self.pressed.is_some() || self.at_bottom_edge() {
+            if hovering || self.dragging || self.pressed.is_some() || self.at_bottom_edge() || crate::fan::is_open() {
                 self.last_near = now;
             }
             // linger a moment after the pointer leaves, like macOS
@@ -1730,7 +1759,8 @@ impl Dock {
             crate::dropfiles::set_zones(self.hwnd, zones);
         }
 
-        let want = if self.hovered.is_some() && !self.menu_up { 1.0 } else { 0.0 };
+        self.fan_tick(plate_bottom);
+        let want = if self.hovered.is_some() && !self.menu_up && !crate::fan::is_open() { 1.0 } else { 0.0 };
         self.label_alpha = approach(self.label_alpha, want, 1.0 - (-dt * 22.0).exp());
         if self.label_alpha != want {
             settled = false;
@@ -1743,6 +1773,53 @@ impl Dock {
         if settled && self.hide == hide_target && !hovering && self.items.iter().all(|i| !i.leaving) {
             self.awake = false; // sleep in GetMessage until the pointer, a timer or a launch wakes us
         }
+    }
+
+    /// Rest on an app with two or more windows and they fan out above its icon (once per visit).
+    fn fan_tick(&mut self, plate_bottom: f64) {
+        let cand = self
+            .hovered
+            .filter(|_| self.cfg.window_fan && !self.menu_up && !self.dragging && self.pressed.is_none() && self.hide < 0.05)
+            .filter(|&i| !self.items[i].leaving && self.items[i].wins.len() >= 2);
+        let Some(i) = cand else {
+            self.fan_hover = None;
+            return;
+        };
+        let key = self.items[i].key.clone();
+        match &mut self.fan_hover {
+            Some((k, since, done)) if *k == key => {
+                if *done || since.elapsed().as_secs_f64() < FAN_DWELL {
+                    return;
+                }
+                *done = true;
+            }
+            _ => {
+                self.fan_hover = Some((key, Instant::now(), false));
+                return;
+            }
+        }
+        let it = &self.items[i];
+        if crate::fan::open_for(&it.key) {
+            return;
+        }
+        let (d, wx, wy) = (self.dpi, self.win_x(), self.win_y() + self.slide());
+        let top = plate_bottom - PAD - it.size;
+        let anchor = windows::Win32::Foundation::RECT {
+            left: ((wx + it.x) * d).round() as i32,
+            top: ((wy + top) * d).round() as i32,
+            right: ((wx + it.x + it.size) * d).round() as i32,
+            bottom: ((wy + top + it.size) * d).round() as i32,
+        };
+        crate::fan::show(crate::fan::Request {
+            key: it.key.clone(),
+            wins: it.wins.iter().map(|w| (w.hwnd.0 as isize, w.title.clone())).collect(),
+            icon: it.icon.as_deref().cloned(),
+            anchor,
+            monitor: self.display.rect,
+            scale: d as f32,
+            motion: !self.cfg.reduce_motion,
+            dock: self.hwnd.0 as isize,
+        });
     }
 
     fn frame_key(&self, plate_top: f64, plate_bottom: f64, win_x: f64, win_y: f64, slide: f64, px: (u32, u32)) -> Vec<u64> {
@@ -1822,7 +1899,7 @@ impl Dock {
             return;
         }
         // only what is behind the plate changed: keep the icon layer, redraw just the glass under it
-        let only_backdrop = self.over.is_some() && key.len() == self.drawn.len() && key[..key.len() - 1] == self.drawn[..key.len() - 1];
+        let mut only_backdrop = self.over.is_some() && key.len() == self.drawn.len() && key[..key.len() - 1] == self.drawn[..key.len() - 1];
         self.drawn = key;
         let Some(surface) = self.surface.as_mut() else { return };
         let mut pm = surface.pixmap();
@@ -1922,13 +1999,36 @@ impl Dock {
                 );
                 pm.fill_path(plate, &paint, FillRule::Winding, base, None);
             }
+            // Tint the live glass and the wallpaper fallback alike; retain some backdrop detail.
+            let tint = if self.system_dark { Color::from_rgba8(36, 31, 28, 186) } else { Color::from_rgba8(249, 247, 245, 194) };
+            let mut paint = Paint::default();
+            paint.anti_alias = true;
+            paint.set_color(tint);
+            pm.fill_path(plate, &paint, FillRule::Winding, base, None);
+        }
+        // The running dot is light on dark glass and dark on light glass, as on macOS. Decide it per icon from
+        // the glass just drawn right under the dot: one guess from the whole wallpaper strip missed a light patch
+        // behind the plate (issue #8), and could not follow windows moving behind the live glass.
+        {
+            let (w, h) = (pm.width() as i32, pm.height() as i32);
+            let px = pm.data_mut();
+            let cy = ((plate_bottom - 3.5 + slide) * dpi).round() as i32;
+            let r = (3.0 * dpi).round().max(1.0) as i32;
+            for it in self.items.iter_mut().filter(|i| i.size >= 0.5) {
+                let cx = ((it.x + it.size / 2.0) * dpi).round() as i32;
+                let dark = dot_dark_on(px, w, h, cx, cy, r, it.dot_dark).unwrap_or(!self.system_dark);
+                if dark != it.dot_dark {
+                    it.dot_dark = dark;
+                    only_backdrop = false;
+                }
+            }
         }
         // everything over the glass goes on its own layer, kept for frames where only the backdrop changed
         let mut over = self.over.take().filter(|o| (o.width(), o.height()) == (pw, ph)).or_else(|| Pixmap::new(pw.max(1), ph.max(1)));
         if let (false, Some(over)) = (only_backdrop, over.as_mut()) {
         over.fill(Color::TRANSPARENT);
         let mut pm = over.as_mut();
-        if let Some(plate) = &plate {
+        if plate.is_some() {
             let mut paint = Paint::default();
             paint.anti_alias = true;
             let grad = |a: u8, b: u8| LinearGradient::new(
@@ -1936,10 +2036,6 @@ impl Dock {
                 vec![GradientStop::new(0.0, white(a)), GradientStop::new(1.0, white(b))],
                 SpreadMode::Pad, Transform::identity(),
             );
-            // Tint the live glass and the wallpaper fallback alike; retain some backdrop detail.
-            let tint = if self.system_dark { Color::from_rgba8(36, 31, 28, 186) } else { Color::from_rgba8(249, 247, 245, 194) };
-            paint.set_color(tint);
-            pm.fill_path(plate, &paint, FillRule::Winding, base, None);
             // macOS edge: a faint dark outline for separation, and a thin light rim just inside it,
             // brightest along the top like light catching glass
             let hair = Stroke { width: 1.0 / dpi as f32, ..Default::default() };
@@ -2011,7 +2107,7 @@ impl Dock {
                 if let Some(c) = PathBuilder::from_circle((ix + it.size / 2.0) as f32, (plate_bottom - 3.5) as f32, 2.2) {
                     let mut paint = Paint::default();
                     paint.anti_alias = true;
-                    if !self.system_dark {
+                    if it.dot_dark {
                         paint.set_color(Color::from_rgba8(0x22, 0x1C, 0x1C, (0xC0 as f64 * a) as u8));
                     } else {
                         paint.set_color(Color::from_rgba8(0xF2, 0xF2, 0xF2, (0xE0 as f64 * a) as u8));
@@ -2127,6 +2223,17 @@ impl Dock {
                 self.wake();
             }
             DockEv::DropFiles(files, x, y) => self.drop_files(&files, x, y),
+            DockEv::FanPick(v) => {
+                let h = HWND(v as *mut _);
+                if !unsafe { IsWindow(h) }.as_bool() {
+                    return None;
+                }
+                // a minimized one comes back out of the icon with the genie; one on screen just comes forward
+                if unsafe { IsIconic(h) }.as_bool() {
+                    return Some(Act::Restore { front: h, minimized: vec![h] });
+                }
+                shell::activate(h);
+            }
             DockEv::Edge => {
                 if !self.hidden && ((self.hide > 0.0 && self.at_bottom_edge()) || (self.hide < 1.0 && !self.awake)) {
                     self.wake();
@@ -2219,6 +2326,48 @@ fn downloads_dir() -> Option<String> {
         }
         let s = format!("{}\\Downloads", std::env::var("USERPROFILE").ok()?);
         std::path::Path::new(&s).is_dir().then_some(s)
+    }
+}
+
+/// Whether the running dot centred at (cx, cy) should be dark, from the glass under it in a BGRA premultiplied
+/// buffer w x h (a 3-row band 2r+1 wide). None where nothing opaque is under it. ~0.49 is where both dots stand
+/// out equally; the gap around it (was_dark) keeps a dot from flickering over a moving backdrop.
+fn dot_dark_on(px: &[u8], w: i32, h: i32, cx: i32, cy: i32, r: i32, was_dark: bool) -> Option<bool> {
+    let (mut sum, mut n) = (0.0, 0);
+    for y in (cy - 1).max(0)..=(cy + 1).min(h - 1) {
+        for x in (cx - r).max(0)..=(cx + r).min(w - 1) {
+            let i = (y * w + x) as usize * 4;
+            let a = px[i + 3] as f64;
+            if a >= 128.0 {
+                sum += (0.0722 * px[i] as f64 + 0.7152 * px[i + 1] as f64 + 0.2126 * px[i + 2] as f64) / a;
+                n += 1;
+            }
+        }
+    }
+    let l = (n > 0).then(|| sum / n as f64)?;
+    Some(if was_dark { l > 0.45 } else { l > 0.53 })
+}
+
+#[cfg(test)]
+mod dot_tests {
+    #[test]
+    fn running_dot_follows_the_glass_under_it() {
+        let (w, h) = (40, 10);
+        let fill = |b: u8, g: u8, r: u8, a: u8| (0..w * h).flat_map(|_| [b, g, r, a]).collect::<Vec<u8>>();
+        let dark = |px: &[u8], was| super::dot_dark_on(px, w, h, 20, 5, 3, was);
+        // light glass (issue #8: a pale wallpaper) gets the dark dot, dark glass the light one
+        assert_eq!(dark(&fill(235, 235, 235, 255), false), Some(true));
+        assert_eq!(dark(&fill(30, 30, 30, 255), true), Some(false));
+        // premultiplied: half-transparent white still reads as white
+        assert_eq!(dark(&fill(128, 128, 128, 128), false), Some(true));
+        // green weighs most (BGRA): bright green is light, bright blue is not
+        assert_eq!(dark(&fill(0, 220, 0, 255), false), Some(true));
+        assert_eq!(dark(&fill(220, 0, 0, 255), false), Some(false));
+        // mid grey near the switch point keeps whatever it was
+        assert_eq!(dark(&fill(126, 126, 126, 255), true), Some(true));
+        assert_eq!(dark(&fill(126, 126, 126, 255), false), Some(false));
+        // nothing opaque under it: no opinion
+        assert_eq!(dark(&fill(0, 0, 0, 0), false), None);
     }
 }
 

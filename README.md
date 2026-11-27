@@ -150,7 +150,7 @@ notification-area icons (Discord, Steam, …).
 - Dock and menu bar are real **AppBars**: maximized windows stop at them.
 - A fullscreen game hides both, puts the render loop to sleep and removes the mouse hook. On the
   author's laptop that measured 0.00% CPU and a 17 MB working set while a game was in front.
-- Idle on the desktop: 0.03% of the CPU (about 1% of one core) and about 90 MB private memory. Most of that
+- Idle on the desktop: 0.03% of the CPU (about 1% of one core) and about 117 MB private memory. Most of that
   memory is the one Direct3D device the live Liquid Glass and the GPU genie share (the Intel iGPU driver alone
   reserves ~50 MB for it); the 13 MB of 0.1 had no live glass. Nothing redraws unless something is moving
   (see [Performance](#performance)).
@@ -274,13 +274,21 @@ MacDock started as C# / WPF on .NET 10 and was rewritten in Rust (plain Win32, t
 Manager shows it; with 32 cores that number is small, so the brackets give the same load as a share of one core
 (on a 4-core laptop, Task Manager would show about 8 times the first number).
 
-| | C# / WPF | Rust 0.1 | Rust 0.4.2 |
-| --- | --- | --- | --- |
-| Private memory | 320-379 MB | 12.9 MB | 91.7 MB |
-| CPU idle | 0.04-0.6% (1-19% of a core) | 0% | 0.03% (1% of a core) |
-| CPU while magnifying | 2.0-2.3% (64-74% of a core) | 1.65% (53% of a core) | 1.38% (44% of a core) |
-| Threads | 21-26 | 11 | 38 |
-| On disk | 30 MB + .NET runtime | 1.1 MB exe | 1.66 MB exe |
+| | C# / WPF | Rust 0.1 | Rust 0.4.2 | Rust 0.5.1 | Rust 0.5.2 |
+| --- | --- | --- | --- | --- | --- |
+| Private memory | 320-379 MB | 12.9 MB | 91.7 MB | 117 MB | 117 MB |
+| CPU idle | 0.04-0.6% (1-19% of a core) | 0% | 0.03% (1% of a core) | 0.05-0.09% (1.5-3% of a core) | 0.03-0.04% (0.9-1.2% of a core) |
+| CPU while magnifying | 2.0-2.3% (64-74% of a core) | 1.65% (53% of a core) | 1.38% (44% of a core) | 1.50-1.58% (48-50% of a core) | 1.39-1.52% (45-49% of a core) |
+| Threads | 21-26 | 11 | 38 | 27-28 | 28-29 |
+| On disk | 30 MB + .NET runtime | 1.1 MB exe | 1.66 MB exe | 1.79 MB exe | 1.81 MB exe |
+
+0.5.1 and 0.5.2 were measured back to back on
+27 Nov 2026, two runs each, with the same apps open. 0.5.2 no longer renders the whole desktop every 30 s to
+check the wallpaper, re-reads only recent AI usage logs between folder walks, and reads the network state off the
+dock's thread. The biggest change does not show in this table: in 0.5.1, any app in the background whose window
+title kept changing (a terminal with a spinner, such as Claude Code at work) bounced its dock icon without end,
+and the dock drew every frame for it, about 264 ms of CPU a second (a quarter of a core). With the fix that is
+about 5 ms a second.
 
 0.4.2 does a lot more than 0.1: live Liquid Glass and the GPU genie (one Direct3D device, most of the memory),
 the Alt+Tab switcher and its keyboard hook, desktop widgets, the Apps window and Spotlight. Each of those that

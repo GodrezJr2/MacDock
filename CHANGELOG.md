@@ -6,6 +6,60 @@ Each release on GitHub uses its section from this file as its notes.
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-11-27
+
+### Fixed
+- The running-app dot was hard to see on a light background ([#8](https://github.com/GodrezJr2/MacDock/issues/8)). Its
+  colour was picked once from the wallpaper, so a white window behind the dock still got light dots. Each dot
+  now reads the glass right under it: dark on light glass, light on dark glass.
+
+## [0.5.2] - 2026-11-27
+
+### Fixed
+- A dock icon bounced whenever that app changed its window title in the background, as if it were asking for
+  attention. A terminal with a spinner in its title (Claude Code, for one) bounced without end and kept the dock
+  redrawing every frame. Only a real taskbar flash bounces now, and a request that keeps flashing bounces a few
+  times and stops, as on macOS.
+
+- Window fan cards looked soft and jagged: tilted cards now have smooth edges, and the window picture is
+  shrunk by averaging its pixels instead of skipping them, so text and detail stay sharp.
+
+### Changed
+- The window fan and the menu bar panels (Control Center, Wi-Fi and the rest) animate once per screen refresh.
+  They ran on a 64 Hz timer, which skipped a few frames a second on a 60 Hz screen and used under half the frames
+  on a 144-165 Hz one.
+- Lighter when idle: the dock no longer renders the whole desktop every 30 seconds to see if the wallpaper changed
+  (it checks the wallpaper files first), AI usage re-reads only recent logs between its once-a-minute folder walk,
+  and the menu bar reads the network state on its own thread instead of the one that draws the dock.
+
+## [0.5.1] - 2026-11-27
+
+### Added
+- **Window fan**: rest the pointer on a dock app that has two or more windows and pictures of them fan out above
+  its icon like a hand of cards on an arc. Hovering a card lifts it in front of the others; clicking it brings
+  that window up (a minimized one comes back with the genie). Minimized windows show the picture saved when they
+  went into the dock, or the app icon. Can be turned off in Settings (**Fan out windows on hover**, `WindowFan`).
+- **Reset to Defaults** in Settings puts every setting of that window back to its default (click twice to
+  confirm). Pinned apps, picked icons and the widget layout stay as they are.
+- **Windows key opens Spotlight** (Settings › Desktop, `WinKeySpotlight`, off by default): a tap of the Windows key
+  on its own opens Spotlight instead of Start. Win with another key (Win+E, Win+Shift+S, Win+L…) works as before,
+  and Ctrl+Esc still opens Start. Tapping it again (or Esc) closes Spotlight, so a stray press is undone with
+  one more tap.
+- The Wi-Fi menu has a refresh button next to the switch, and shows a spinner there while it scans, also when you
+  are already connected (it used to say "Searching…" only with no network joined). It scans again every 15 seconds
+  while it stays open, and its text follows the interface language.
+
+### Changed
+- Each time the window fan opens it notes what each card was made from in `%APPDATA%\MacDock\fan.log` (kept under
+  256 KB), to track down an empty card that sometimes shows up.
+
+### Fixed
+- Minimizing several windows of one app from the dock (a few Chrome windows, say) gives every one of them its genie
+  again, and they come back with it too. Only the newest window's picture fitted in the snapshot memory, and Chrome
+  draws covered windows black, so the others went into the dock and came back without the animation. Older
+  pictures are now kept at half size instead of dropped, and a window that can't be pictured falls back to its
+  earlier picture if it hasn't moved.
+
 ## [0.5.0] - 2026-11-26
 
 ### Added
@@ -181,7 +235,10 @@ First public release: a macOS-style dock (magnification, genie minimize and rest
 attention bounce, recent apps and a Downloads stack) and menu bar (battery, Wi-Fi, Control Center, tray icons and
 AI usage flyouts) for Windows 11, written in Rust.
 
-[Unreleased]: https://github.com/GodrezJr2/MacDock/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/GodrezJr2/MacDock/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/GodrezJr2/MacDock/compare/v0.5.2...v0.5.3
+[0.5.2]: https://github.com/GodrezJr2/MacDock/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/GodrezJr2/MacDock/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/GodrezJr2/MacDock/compare/v0.4.5...v0.5.0
 [0.4.5]: https://github.com/GodrezJr2/MacDock/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/GodrezJr2/MacDock/compare/v0.4.3...v0.4.4

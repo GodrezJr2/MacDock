@@ -21,7 +21,6 @@ pub const ACCENT4: (u8, u8, u8, u8) = (0x0A, 0x84, 0xFF, 0xFF);
 const WM_MOUSELEAVE: u32 = 0x02A3;
 pub const WM_FLY_DATA: u32 = WM_APP + 30;
 const TIMER_TICK: usize = 1;
-const TIMER_ANIM: usize = 2;
 /// how long a full-screen panel takes to zoom and fade in
 const STAGE_IN_MS: f32 = 240.0;
 /// a panel under the menu bar: fade and grow in, fade out
@@ -697,6 +696,7 @@ pub struct Flyout {
     stage: bool,
     born: std::time::Instant,
     anim_timer: bool,
+    last_anim: std::time::Instant,
     /// a panel taller than the screen scrolls: how far (DIPs), and how far it can
     scroll: f32,
     overflow: f32,
@@ -712,7 +712,7 @@ impl Flyout {
         let mut f = Flyout {
             hwnd, kind, content, dpi: dpi as f32, right_px, top_px, screen_w_px, pos: (0, 0), mouse: None, hot: None,
             press: None, spots: Vec::new(), surface: None, stage_pm: None, glass: None, under: None, glass_h: 0.0, tracking: false, stay_open: window, window, moved: None,
-            full: false, view: (dpi as f32, 0.0, 0.0), stage: false, born: std::time::Instant::now(), anim_timer: false,
+            full: false, view: (dpi as f32, 0.0, 0.0), stage: false, born: std::time::Instant::now(), anim_timer: false, last_anim: std::time::Instant::now(),
             scroll: 0.0, overflow: 0.0,
         };
         f.content.opened(hwnd.0 as isize);
@@ -733,8 +733,8 @@ impl Flyout {
 
     pub fn close(&mut self) {
         self.content.closing();
+        self.anim_timer = false;
         unsafe {
-            let _ = KillTimer(self.hwnd, TIMER_ANIM);
             if !motion() || IsIconic(self.hwnd).as_bool() {
                 let _ = DestroyWindow(self.hwnd);
                 return;
@@ -922,21 +922,27 @@ impl Flyout {
         self.keep_ticking();
     }
 
-    /// Run a frame-rate timer while the open zoom or the content is moving.
+    /// Whether the open zoom or the content is moving: then the main loop ticks this flyout once per screen
+    /// refresh (`animating`, `anim_tick`). A 15 ms timer used to: it runs at 64 Hz, which skips a few steps a
+    /// second on a 60 Hz screen and is under half the frames at 144 Hz.
     fn keep_ticking(&mut self) {
         let dur = if self.stage { STAGE_IN_MS } else if self.content.glass().is_some() { GLASS_IN_MS } else { PANEL_IN_MS };
         let opening = motion() && self.content.motion() && !self.full && self.born.elapsed().as_secs_f32() * 1000.0 < dur + 40.0; // one frame past the end, so the last one is whole
-        let want = opening || self.content.animating();
-        if want != self.anim_timer {
-            self.anim_timer = want;
-            unsafe {
-                if want {
-                    SetTimer(self.hwnd, TIMER_ANIM, 15, None);
-                } else {
-                    let _ = KillTimer(self.hwnd, TIMER_ANIM);
-                }
-            }
+        self.anim_timer = opening || self.content.animating();
+    }
+
+    pub fn animating(&self) -> bool {
+        self.anim_timer
+    }
+
+    /// One animation frame, from the main loop (called once per refresh). At most every 10 ms: every refresh at
+    /// 60 Hz, every other one at 144-165 Hz, still in step with the screen but half the drawing.
+    pub fn anim_tick(&mut self) {
+        if self.last_anim.elapsed() < std::time::Duration::from_millis(10) {
+            return;
         }
+        self.last_anim = std::time::Instant::now();
+        let _ = self.handle(FlyEv::Tick);
     }
 
     /// Full screen over the blurred wallpaper, no panel; zooms down and fades in when it opens.
