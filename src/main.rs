@@ -120,7 +120,11 @@ struct App {
 
 impl App {
     fn awake(&self) -> bool {
-        self.dock.awake || self.secondary.iter().any(|d| d.awake) || self.genie.as_ref().is_some_and(|g| g.busy())
+        self.dock.awake
+            || self.secondary.iter().any(|d| d.awake)
+            || self.genie.as_ref().is_some_and(|g| g.busy())
+            || self.fly.as_ref().is_some_and(|f| f.animating())
+            || self.win.as_ref().is_some_and(|f| f.animating())
     }
 
     /// The dock icon a window belongs to, in screen pixels.
@@ -836,6 +840,12 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
                     app.dock.frame();
                 }
                 for d in &mut app.secondary { if d.awake { d.frame(); } }
+                // an opening or moving flyout steps with the screen too
+                for f in [app.fly.as_mut(), app.win.as_mut()].into_iter().flatten() {
+                    if f.animating() {
+                        f.anim_tick();
+                    }
+                }
                 let t1 = std::time::Instant::now();
                 if let Some(g) = app.genie.as_mut() {
                     g.frame();

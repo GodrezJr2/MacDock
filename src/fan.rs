@@ -42,7 +42,6 @@ pub struct Request {
 pub const WM_FAN_PICK: u32 = WM_APP + 40;
 const WM_FAN_SHOW: u32 = WM_APP + 1;
 const WM_FAN_HIDE: u32 = WM_APP + 2;
-const TIMER_TICK: usize = 1;
 
 // DIPs
 const CARD_W: f32 = 232.0;
@@ -400,8 +399,8 @@ impl Fan {
         self.render();
         unsafe {
             let _ = SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-            SetTimer(self.hwnd, TIMER_TICK, 15, None);
         }
+        // from here the thread's loop ticks once per screen refresh until finish() empties the cards
     }
 
     /// Lay the hand out in screen px with its pivot under the icon, lifted clear of it, kept on the monitor;
@@ -460,7 +459,6 @@ impl Fan {
 
     fn finish(&mut self) {
         unsafe {
-            let _ = KillTimer(self.hwnd, TIMER_TICK);
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
         self.cards.clear();
@@ -599,10 +597,6 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             with(|f| f.close());
             return LRESULT(0);
         }
-        WM_TIMER if wp.0 == TIMER_TICK => {
-            with(|f| f.tick());
-            return LRESULT(0);
-        }
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
         WM_LBUTTONUP => {
             let (x, y) = ((lp.0 & 0xFFFF) as i16 as f32, ((lp.0 >> 16) & 0xFFFF) as i16 as f32);
@@ -640,10 +634,38 @@ pub fn start() {
             })
         });
         HWND_FAN.store(hwnd.0 as isize, Ordering::Relaxed);
+        let open = || with(|f| !f.cards.is_empty()).unwrap_or(false);
         let mut msg = MSG::default();
-        while GetMessageW(&mut msg, HWND::default(), 0, 0).as_bool() {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+        loop {
+            if !open() {
+                // closed: sleep until asked to show
+                if !GetMessageW(&mut msg, HWND::default(), 0, 0).as_bool() {
+                    return;
+                }
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            while PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_REMOVE).as_bool() {
+                if msg.message == WM_QUIT {
+                    return;
+                }
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            if open() {
+                // One step per screen refresh, in step with it: the 15 ms timer this replaces runs at 64 Hz, so on
+                // a 60 Hz screen a few steps a second never showed (judder) and at 144 Hz it ran at under half.
+                // at most every 10 ms: every refresh at 60 Hz, every other one at 144-165 Hz
+                let t = Instant::now();
+                if with(|f| t.duration_since(f.last).as_millis() >= 10).unwrap_or(false) {
+                    with(|f| f.tick());
+                }
+                let _ = windows::Win32::Graphics::Dwm::DwmFlush();
+                // no compositor wait (screen off, remote session): don't spin
+                if let Some(rest) = std::time::Duration::from_millis(4).checked_sub(t.elapsed()) {
+                    std::thread::sleep(rest);
+                }
+            }
         }
     });
 }
