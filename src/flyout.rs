@@ -330,6 +330,28 @@ impl Ui<'_> {
         self.draw_text(x, y, &s, f, c)
     }
 
+    /// Rasterize small app labels at double resolution, then average each 2x2 block.
+    pub fn app_label(&mut self, cx: f32, y: f32, label: &str, size: f32, color: (u8, u8, u8, u8), max_w: f32) {
+        let font = self.font(size * 2.0, 400, false);
+        let limit = (max_w * self.s * 2.0) as i32;
+        let mut text = label.to_owned();
+        if gfx::measure(&text, font).0 > limit {
+            loop {
+                text.pop();
+                let shortened = format!("{text}…");
+                if text.is_empty() || gfx::measure(&shortened, font).0 <= limit {
+                    text = shortened;
+                    break;
+                }
+            }
+        }
+        let Some(img) = gfx::text_ex(&text, font, (color.0, color.1, color.2)) else { return };
+        let x = ((self.ox + cx) * self.s - (img.width() - 2) as f32 / 4.0).round();
+        let y = ((self.oy + y) * self.s).round();
+        let paint = PixmapPaint { opacity: color.3 as f32 / 255.0, quality: tiny_skia::FilterQuality::Bilinear, ..Default::default() };
+        self.pm.draw_pixmap(0, 0, img.as_ref(), &paint, Transform::from_scale(0.5, 0.5).post_translate(x, y), None);
+    }
+
     /// Text vertically centred on cy.
     pub fn text_mid(&mut self, x: f32, cy: f32, s: &str, size: f32, weight: i32, c: (u8, u8, u8, u8), max_w: f32) -> f32 {
         let h = gfx::measure("Ag", self.font(size, weight, false)).1 as f32 / self.fs;

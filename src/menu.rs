@@ -63,7 +63,7 @@ pub enum Anchor {
 
 const MARGIN: f64 = 14.0; // room for the shadow around the panel
 const PAD: f64 = 5.0;
-const ITEM_H: f64 = 25.0;
+const ITEM_H: f64 = 28.0;
 const SEP_H: f64 = 11.0;
 const MIN_W: f64 = 200.0;
 
@@ -175,7 +175,7 @@ pub fn popup(owner: HWND, entries: &[Entry], at: Anchor, dpi: f64) -> Option<usi
         return None;
     }
     register();
-    let font = Font { face: gfx::ui_face(), px: (13.0 * dpi).round() as i32, weight: 400 };
+    let font = Font { face: gfx::ui_face(), px: (14.0 * dpi).round() as i32, weight: 400 };
     // texts first: their widths size the panel
     let mut texts: Vec<Option<(Pixmap, Option<Pixmap>)>> = Vec::new();
     let mut rows = Vec::new();
@@ -183,8 +183,8 @@ pub fn popup(owner: HWND, entries: &[Entry], at: Anchor, dpi: f64) -> Option<usi
     for e in entries {
         match e {
             Entry::Item { text, gesture, enabled, .. } => {
-                let t = gfx::text_ex(text, font, (255, 255, 255));
-                let g = if gesture.is_empty() { None } else { gfx::text_ex(gesture, font, (255, 255, 255)) };
+                let t = gfx::smooth_text(text, font);
+                let g = if gesture.is_empty() { None } else { gfx::smooth_text(gesture, font) };
                 text_w = text_w.max(t.as_ref().map(|p| p.width() as f64 / dpi).unwrap_or(0.0));
                 gest_w = gest_w.max(g.as_ref().map(|p| p.width() as f64 / dpi + 28.0).unwrap_or(0.0));
                 texts.push(t.map(|t| (t, g)));
@@ -313,7 +313,7 @@ fn paint(sf: &mut Surface, entries: &[Entry], texts: &[Option<(Pixmap, Option<Pi
 
     let (left, top) = (MARGIN + PAD, MARGIN + PAD);
     let mut y = top;
-    let check = gfx::text_ex("✓", Font { face: gfx::ui_face(), px: (12.0 * dpi).round() as i32, weight: 400 }, (255, 255, 255));
+    let check = gfx::smooth_text("✓", Font { face: gfx::ui_face(), px: (12.0 * dpi).round() as i32, weight: 400 });
     for (i, e) in entries.iter().enumerate() {
         match e {
             Entry::Sep => {
@@ -337,7 +337,7 @@ fn paint(sf: &mut Surface, entries: &[Entry], texts: &[Option<(Pixmap, Option<Pi
                     pm.draw_pixmap(0, 0, t.as_ref(), &pp, Transform::from_translate(((left + 24.0) * dpi).round() as f32, ty), None);
                     if let Some(g) = g {
                         let gx = ((left + cw - 12.0) * dpi).round() as f32 - g.width() as f32;
-                        let gp = PixmapPaint { opacity: op * 0.5, ..Default::default() };
+                        let gp = PixmapPaint { opacity: op * 0.72, ..Default::default() };
                         pm.draw_pixmap(0, 0, g.as_ref(), &gp, Transform::from_translate(gx, ty), None);
                     }
                     if *checked {

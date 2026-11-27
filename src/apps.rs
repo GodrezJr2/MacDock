@@ -92,7 +92,7 @@ pub(crate) fn remember(spec: &str) {
     let mut r = load_recents();
     r.retain(|s| s != spec);
     r.insert(0, spec.to_string());
-    r.truncate(COLS * 2);
+    r.truncate(14);
     let _ = std::fs::create_dir_all(crate::config::dir());
     let _ = std::fs::write(recents_path(), r.join("\n"));
 }
@@ -100,17 +100,19 @@ pub(crate) fn remember(spec: &str) {
 const DEFAULT_W: f32 = 560.0;
 const PAD: (f32, f32) = (16.0, 12.0);
 const DEFAULT_H: f32 = 372.0;
-const COLS: usize = 7;
+const COLS: usize = 5;
+const LABEL_SIZE: f32 = 14.0;
+const CHIP_SIZE: f32 = 12.0;
 const HEAD_LINE: f32 = 31.0;
 const CHIP_Y: f32 = 39.0;
-const CHIP_H: f32 = 21.0;
-const GRID_Y: f32 = 68.0;
-const CELL_H: f32 = 72.0;
-const ICON: f32 = 42.0;
+const CHIP_H: f32 = 25.0;
+const GRID_Y: f32 = 76.0;
+const CELL_H: f32 = 88.0;
+const ICON: f32 = 46.0;
 /// the line between the recent row and the rest
 const DIVIDER_H: f32 = 13.0;
 /// a mouse wheel notch scrolls this far; touchpad units move the list this many DIPs each
-const NOTCH: f32 = 72.0;
+const NOTCH: f32 = CELL_H;
 const TOUCH: f32 = 0.55;
 const TOUCH_END_MS: u128 = 90;
 
@@ -365,7 +367,7 @@ impl Apps {
 
     fn draw_chips(&mut self, ui: &mut Ui) {
         let cw = ui.w;
-        let widths: Vec<f32> = self.cats.iter().map(|&c| ui.text_w(t(CATS[c].0), 11.0, 400) + 16.0).collect();
+        let widths: Vec<f32> = self.cats.iter().map(|&c| ui.text_w(t(CATS[c].0), CHIP_SIZE, 400) + 16.0).collect();
         let gap = 6.0;
         let total: f32 = widths.iter().sum::<f32>() + gap * (widths.len().saturating_sub(1)) as f32;
         self.chip_max = (total - cw).max(0.0);
@@ -386,7 +388,7 @@ impl Apps {
                 let pressed = ui.pressed == Some(id);
                 let bg = self.ink(if on { 0x52 } else if pressed { 0x33 } else if hov { 0x28 } else { 0x17 });
                 ui.fill(x, CHIP_Y, w, CHIP_H, 6.0, bg);
-                ui.text_mid(x + 8.0, CHIP_Y + CHIP_H / 2.0, t(CATS[c].0), 11.0, 400, self.ink(if on { 0xFF } else { 0xD9 }), 0.0);
+                ui.text_mid(x + 8.0, CHIP_Y + CHIP_H / 2.0, t(CATS[c].0), CHIP_SIZE, 400, self.ink(if on { 0xFF } else { 0xD9 }), 0.0);
                 x += w + gap + extra;
             }
         });
@@ -410,10 +412,7 @@ impl Apps {
         if ui.pressed == Some(id) {
             ui.fill(ix + ICON * 0.06, iy + ICON * 0.06, ICON * 0.88, ICON * 0.88, ICON * 0.22, (0, 0, 0, 0x55));
         }
-        let max = cell_w - 8.0;
-        let tw = ui.text_w(a.display_name(), 10.5, 400).min(max);
-        let (tx, ty) = (x + (cell_w - tw) / 2.0, iy + ICON + 5.0);
-        ui.text(tx, ty, a.display_name(), 10.5, 400, self.ink(0xF0), max);
+        ui.app_label(x + cell_w / 2.0, iy + ICON + 7.0, a.display_name(), LABEL_SIZE, self.ink(0xF0), cell_w - 8.0);
     }
 
     fn draw_grid(&mut self, ui: &mut Ui) {
@@ -762,11 +761,16 @@ mod tests {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         }
+        let cfg = crate::config::Config::load();
+        crate::i18n::set(&cfg.language);
+        crate::gfx::set_interface_font(&cfg.interface_font);
         crate::launchpad::load_now();
         let mut a = Apps::empty(Vec::new(), load_recents(), false);
+        let (area, dpi) = crate::display::cursor_work_area();
+        a.fit_work_area(area, dpi);
         a.pick_up();
         assert!(a.apps.len() > 10, "only {} apps", a.apps.len());
-        let (w, h, px) = crate::flyout::snapshot_glass(&mut a, 1.25);
+        let (w, h, px) = crate::flyout::snapshot_glass(&mut a, dpi as f32);
         let path = format!(r"{}\target\apps.png", env!("CARGO_MANIFEST_DIR"));
         assert!(crate::gfx::save_png(&path, w, h, &px));
     }

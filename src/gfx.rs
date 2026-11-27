@@ -375,11 +375,6 @@ pub fn ui_face() -> &'static str {
 }
 pub const ICONS: &str = "Segoe Fluent Icons";
 
-/// White text as a premultiplied mask (Segoe UI Variable, grayscale antialiasing), `px` tall.
-pub fn text(s: &str, px: i32) -> Option<Pixmap> {
-    text_ex(s, Font { face: ui_face(), px, weight: 400 }, (255, 255, 255))
-}
-
 /// Measure text in pixels without rasterizing it.
 /// Text is drawn and measured over and over with the same strings (every frame of an animation, every
 /// redraw of a panel), and each GDI round trip makes a font, a DC and a bitmap; so both are remembered.
@@ -389,7 +384,7 @@ const TEXT_PIX_MAX: usize = 400;
 
 thread_local! {
     static MEASURED: std::cell::RefCell<std::collections::HashMap<(String, Font), (i32, i32)>> = Default::default();
-    static RENDERED: std::cell::RefCell<std::collections::HashMap<(String, Font, (u8, u8, u8)), Option<Pixmap>>> = Default::default();
+    static RENDERED: std::cell::RefCell<std::collections::HashMap<(String, Font, (u8, u8, u8), bool), Option<Pixmap>>> = Default::default();
 }
 
 pub fn measure(s: &str, f: Font) -> (i32, i32) {
@@ -435,14 +430,35 @@ unsafe fn make_font(f: Font) -> HFONT {
 
 /// Text in a colour (r, g, b) as a premultiplied BGRA pixmap, sized to the text's cell.
 pub fn text_ex(s: &str, f: Font, rgb: (u8, u8, u8)) -> Option<Pixmap> {
+    cached_text(s, f, rgb, false)
+}
+
+/// Render white interface text at twice the target pixel size and cache the filtered result.
+pub fn smooth_text(s: &str, f: Font) -> Option<Pixmap> {
+    cached_text(s, f, (255, 255, 255), true)
+}
+
+pub fn smooth_text_width(s: &str, f: Font) -> f64 {
+    f64::from(measure(s, Font { px: f.px * 2, ..f }).0) / 2.0
+}
+
+fn cached_text(s: &str, f: Font, rgb: (u8, u8, u8), smooth: bool) -> Option<Pixmap> {
     if s.is_empty() {
         return None;
     }
-    let key = (s.to_string(), f, rgb);
+    let key = (s.to_string(), f, rgb, smooth);
     if let Some(v) = RENDERED.with(|m| m.borrow().get(&key).cloned()) {
         return v;
     }
-    let v = text_gdi(s, f, rgb);
+    let v = if smooth {
+        let mask = text_gdi(s, Font { px: f.px * 2, ..f }, rgb)?;
+        let mut out = Pixmap::new(mask.width().div_ceil(2), mask.height().div_ceil(2))?;
+        let paint = tiny_skia::PixmapPaint { quality: tiny_skia::FilterQuality::Bilinear, ..Default::default() };
+        out.draw_pixmap(0, 0, mask.as_ref(), &paint, tiny_skia::Transform::from_scale(0.5, 0.5), None);
+        Some(out)
+    } else {
+        text_gdi(s, f, rgb)
+    };
     RENDERED.with(|m| {
         let mut m = m.borrow_mut();
         if m.len() > TEXT_PIX_MAX {
@@ -983,4 +999,22 @@ pub fn d3d() -> Option<(windows::Win32::Graphics::Direct3D11::ID3D11Device, wind
         }
         c.clone()
     })
+}
+
+#[cfg(test)]
+mod smooth_text_tests {
+    use super::*;
+
+    #[test]
+    fn measured_menu_width_matches_filtered_glyphs() {
+        for px in [14, 18, 21, 28] {
+            for label in ["编辑", "Microsoft Edge", "Ctrl+Shift+S"] {
+                let font = Font { face: "Microsoft YaHei UI", px, weight: 400 };
+                let img = smooth_text(label, font).unwrap();
+                // The GDI bitmap includes two padding pixels before downsampling.
+                assert_eq!(img.width(), smooth_text_width(label, font).ceil() as u32 + 1);
+                assert!(img.data().chunks_exact(4).any(|p| p[3] > 0 && p[3] < 255));
+            }
+        }
+    }
 }

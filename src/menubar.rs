@@ -24,7 +24,7 @@ use crate::shell::{self, Shell};
 use crate::{push, Ev};
 
 const H: f64 = 30.0;
-const FONT_PX: f64 = 13.5;
+const FONT_PX: f64 = 14.0;
 const GLYPH_PX: f64 = 15.0;
 const PAD_X: f64 = 9.0; // inside each button
 const GAP: f64 = 1.0; // between buttons
@@ -972,7 +972,7 @@ Open the release page to update by hand?", "安装 MacDock {v} 失败：{e}。
     }
 
     fn text_w(&self, s: &str, f: Font) -> f64 {
-        gfx::measure(s, f).0 as f64 / self.dpi
+        gfx::smooth_text_width(s, f) / self.dpi
     }
 
     fn battery_text(&self) -> String {
@@ -987,8 +987,8 @@ Open the release page to update by hand?", "安装 MacDock {v} 失败：{e}。
     fn content_w(&self, it: Item) -> f64 {
         match it {
             Item::Logo => 13.0,
-            Item::App => self.text_w(self.display_app_name(), self.font(700)),
-            Item::Menu(m) => self.text_w(crate::i18n::t(m), self.font(500)),
+            Item::App => self.text_w(self.display_app_name(), self.font(600)),
+            Item::Menu(m) => self.text_w(crate::i18n::t(m), self.font(400)),
             Item::Chevron => self.text_w("\u{E70E}", self.glyph_font(11.0)),
             Item::Ai => 14.0 + if self.ai_label.is_empty() { 0.0 } else { 5.0 + self.text_w(&self.ai_label, self.font(400)) },
             Item::Battery => {
@@ -1077,8 +1077,8 @@ Open the release page to update by hand?", "安装 MacDock {v} 失败：{e}。
                         }
                     }
                 }
-                Item::App => self.draw_text(&mut content, self.display_app_name(), self.font(700), cx, mid),
-                Item::Menu(m) => self.draw_text(&mut content, crate::i18n::t(m), self.font(500), cx, mid),
+                Item::App => self.draw_text(&mut content, self.display_app_name(), self.font(600), cx, mid),
+                Item::Menu(m) => self.draw_text(&mut content, crate::i18n::t(m), self.font(400), cx, mid),
                 Item::Chevron => self.draw_text(&mut content, "\u{E70E}", self.glyph_font(11.0), cx, mid),
                 Item::Ai => {
                     draw_ai_ring(&mut content, cx + 7.0 * dpi, mid, 6.0 * dpi, dpi, self.ai_pct, self.ai_label.ends_with("/s"));
@@ -1146,7 +1146,7 @@ Open the release page to update by hand?", "安装 MacDock {v} 失败：{e}。
     }
 
     fn draw_text(&self, pm: &mut Pixmap, s: &str, f: Font, x: f32, mid: f32) {
-        if let Some(t) = gfx::text_ex(s, f, (255, 255, 255)) {
+        if let Some(t) = gfx::smooth_text(s, f) {
             let y = (mid - t.height() as f32 / 2.0).round() as i32;
             pm.draw_pixmap(x.round() as i32, y, t.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
         }

@@ -374,7 +374,7 @@ pub struct Dock {
     drawn: Vec<u64>, // everything the last rendered frame depended on; same again = skip the frame
     frost: Option<Pixmap>,
     glass: Option<Pixmap>, // the wallpaper at half the screen's pixels, lightly blurred: what Liquid Glass shows
-    light_glass: bool,
+    system_dark: bool,
     wall_settle: u8, // looks left while a new wallpaper fades in
     backdrop: Option<crate::backdrop::Backdrop>, // live captures of the windows behind the plate
     backdrop_gen: u64,
@@ -384,7 +384,7 @@ pub struct Dock {
     wall_strip: Option<(windows::Win32::Foundation::RECT, usize, Pixmap)>, // the wallpaper under the plate, scaled once
     over: Option<Pixmap>, // icons, rim, labels: everything drawn over the glass
     glass_layer: Option<([u32; 6], Pixmap, i32, i32)>, // the finished glass, kept while the plate and what is behind stay put
-    behind: Option<(windows::Win32::Foundation::RECT, u64, usize, Pixmap)>, // the composed backdrop, kept while nothing behind changes // the wallpaper behind the dock is bright: dark running dots, else light ones
+    behind: Option<(windows::Win32::Foundation::RECT, u64, usize, Pixmap)>, // the composed backdrop, kept while nothing behind changes
     label: Option<(String, Pixmap)>,
     label_alpha: f64,
     menu_up: bool, // a dock menu is open: no hover label over it
@@ -449,7 +449,7 @@ impl Dock {
         let now = Instant::now();
         Dock {
             hwnd, cfg, display, config_dirty: false, shell: Shell::default(), dpi, screen_w, screen_h, fit_b: f64::MAX,
-            win_w: 1.0, win_h: 1.0, items: Vec::new(), icons: HashMap::new(), surface: None, drawn: Vec::new(), frost: None, glass: None, light_glass: false, wall_settle: 0, backdrop: crate::backdrop::Backdrop::new(hwnd, display.primary), backdrop_gen: 0, bd_due: (false, false), bd_last: 0.0, bd_timer: false, behind: None, glass_layer: None, over: None, wall_strip: None,
+            win_w: 1.0, win_h: 1.0, items: Vec::new(), icons: HashMap::new(), surface: None, drawn: Vec::new(), frost: None, glass: None, system_dark: crate::sysctl::system_dark(), wall_settle: 0, backdrop: crate::backdrop::Backdrop::new(hwnd, display.primary), backdrop_gen: 0, bd_due: (false, false), bd_last: 0.0, bd_timer: false, behind: None, glass_layer: None, over: None, wall_strip: None,
             label: None, label_alpha: 0.0, menu_up: false, drag_files: false, label_at: (0.0, 0.0, 0.0, 0.0), hovered: None, plate_left: 0.0,
             plate_w: 0.0, seps: Vec::new(), running_now: HashMap::new(), clock: now, last_t: 0.0, awake: false, hidden: false,
             sig: String::new(), refreshes: 0, appbar: false, reserved: None,
@@ -735,17 +735,6 @@ impl Dock {
             gfx::blur(&mut p, 1.0);
             p
         });
-        // how bright the bottom strip (behind the plate) is decides the dot colour
-        if let Some(fr) = &self.frost {
-            let (fw, fh) = (fr.width() as usize, fr.height() as usize);
-            let rows = ((fh as f64 * 0.08).ceil() as usize).max(1);
-            let d = fr.data();
-            let mut sum = 0.0;
-            for i in ((fh - rows) * fw..fh * fw).map(|p| p * 4) {
-                sum += 0.0722 * d[i] as f64 + 0.7152 * d[i + 1] as f64 + 0.2126 * d[i + 2] as f64;
-            }
-            self.light_glass = sum / (rows * fw) as f64 / 255.0 > 0.6;
-        }
         self.drawn.clear();
         self.wake();
     }
@@ -1798,7 +1787,7 @@ impl Dock {
             self.surface = Surface::new(pw.max(1), ph.max(1));
             self.drawn.clear();
         }
-        // the label text is rasterized by GDI at the real pixel size, once per name
+        // Cache the filtered label while the same icon is hovered.
         if let Some(i) = self.hovered {
             let item = &self.items[i];
             let name = if item.key == "trash" || item.key == "downloads" || item.launch.as_deref() == Some(APPS_ITEM) {
@@ -1807,7 +1796,8 @@ impl Dock {
                 &item.name
             };
             if self.label.as_ref().map(|l| l.0.as_str()) != Some(name) {
-                self.label = gfx::text(name, (13.0 * dpi).round() as i32).map(|p| (name.to_string(), p));
+                let font = Font { face: gfx::ui_face(), px: (14.0 * dpi).round() as i32, weight: 400 };
+                self.label = gfx::smooth_text(name, font).map(|p| (name.to_string(), p));
             }
         }
         // badge numbers, rasterized at the largest size they get drawn at
@@ -1844,7 +1834,6 @@ impl Dock {
         // colours are (b, g, r, a): the surface is BGRA
         let white = |a: u8| Color::from_rgba8(255, 255, 255, a);
 
-        let mut has_glass = false;
         if let Some(plate) = &plate {
             // soft drop shadow: stacked, growing, faint pills (cheap stand-in for a blur, redrawn every frame).
             // Only the ring outside the plate is filled: the glass covers the rest.
@@ -1933,7 +1922,6 @@ impl Dock {
                 );
                 pm.fill_path(plate, &paint, FillRule::Winding, base, None);
             }
-            has_glass = glass.is_some();
         }
         // everything over the glass goes on its own layer, kept for frames where only the backdrop changed
         let mut over = self.over.take().filter(|o| (o.width(), o.height()) == (pw, ph)).or_else(|| Pixmap::new(pw.max(1), ph.max(1)));
@@ -1948,10 +1936,10 @@ impl Dock {
                 vec![GradientStop::new(0.0, white(a)), GradientStop::new(1.0, white(b))],
                 SpreadMode::Pad, Transform::identity(),
             );
-            if let (false, Some(g)) = (has_glass, grad(0x24, 0x10)) {
-                paint.shader = g;
-                pm.fill_path(plate, &paint, FillRule::Winding, base, None);
-            }
+            // Tint the live glass and the wallpaper fallback alike; retain some backdrop detail.
+            let tint = if self.system_dark { Color::from_rgba8(36, 31, 28, 186) } else { Color::from_rgba8(249, 247, 245, 194) };
+            paint.set_color(tint);
+            pm.fill_path(plate, &paint, FillRule::Winding, base, None);
             // macOS edge: a faint dark outline for separation, and a thin light rim just inside it,
             // brightest along the top like light catching glass
             let hair = Stroke { width: 1.0 / dpi as f32, ..Default::default() };
@@ -1970,7 +1958,7 @@ impl Dock {
         for &sx in &self.seps {
             if let Some(r) = Rect::from_xywh(sx as f32, pt + 11.0, 1.0, phgt - 22.0) {
                 let mut paint = Paint::default();
-                paint.set_color(white(0x70));
+                paint.set_color(if self.system_dark { white(0x70) } else { Color::from_rgba8(32, 32, 32, 0x50) });
                 pm.fill_rect(r, &paint, base, None);
             }
         }
@@ -2023,7 +2011,7 @@ impl Dock {
                 if let Some(c) = PathBuilder::from_circle((ix + it.size / 2.0) as f32, (plate_bottom - 3.5) as f32, 2.2) {
                     let mut paint = Paint::default();
                     paint.anti_alias = true;
-                    if self.light_glass {
+                    if !self.system_dark {
                         paint.set_color(Color::from_rgba8(0x22, 0x1C, 0x1C, (0xC0 as f64 * a) as u8));
                     } else {
                         paint.set_color(Color::from_rgba8(0xF2, 0xF2, 0xF2, (0xE0 as f64 * a) as u8));
@@ -2069,7 +2057,7 @@ impl Dock {
         // tooltip label above the hovered icon; fades out where it was
         if let (Some(i), Some((_, txt))) = (self.hovered, &self.label) {
             let it = &self.items[i];
-            let (lw, lh) = (txt.width() as f64 / dpi + 22.0, txt.height() as f64 / dpi + 9.0);
+            let (lw, lh) = (txt.width() as f64 / dpi + 22.0, txt.height() as f64 / dpi + 10.0);
             let lx = (it.x + it.size / 2.0 - lw / 2.0).clamp(4.0, (self.win_w - lw - 4.0).max(4.0));
             self.label_at = (lx, plate_bottom - PAD - it.size - lh - 10.0, lw, lh);
         }
@@ -2085,7 +2073,7 @@ impl Dock {
                     paint.set_color(white((0x40 as f64 * la) as u8));
                     pm.stroke_path(&bg, &paint, &Stroke { width: 0.8, ..Default::default() }, base, None);
                 }
-                let tf = Transform::from_translate(((lx + 11.0) * dpi).round() as f32, ((ly + 4.0 + slide) * dpi).round() as f32);
+                let tf = Transform::from_translate(((lx + 11.0) * dpi).round() as f32, ((ly + 5.0 + slide) * dpi).round() as f32);
                 pm.draw_pixmap(0, 0, txt.as_ref(), &PixmapPaint { opacity: la as f32, ..Default::default() }, tf, None);
             }
         }
@@ -2114,6 +2102,12 @@ impl Dock {
             DockEv::Up => return self.on_up(),
             DockEv::RightUp => return self.context_menu(),
             DockEv::Refresh => {
+                let dark = crate::sysctl::system_dark();
+                if self.system_dark != dark {
+                    self.system_dark = dark;
+                    self.drawn.clear();
+                    self.wake();
+                }
                 if self.display.primary && self.cfg.hide_taskbar {
                     taskbar::keep_hidden();
                 }
