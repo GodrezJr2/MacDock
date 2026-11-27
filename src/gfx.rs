@@ -179,6 +179,28 @@ pub fn wallpaper_on(mon: Option<RECT>, fw: u32, fh: u32) -> Option<Pixmap> {
     }
 }
 
+/// A cheap fingerprint of what the desktop shows: the wallpaper setting, the background colour, and the size and
+/// time of Windows' own copies of the pictures on screen (Themes\Transcoded*, rewritten on every slideshow or
+/// Spotlight change, one per monitor). Rendering the desktop to compare takes ~40 ms; this takes well under 1 ms.
+pub fn wallpaper_sig() -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    spi_wallpaper().hash(&mut h);
+    unsafe { GetSysColor(COLOR_BACKGROUND) }.hash(&mut h);
+    if let Some(dir) = std::env::var_os("APPDATA").map(|a| std::path::PathBuf::from(a).join("Microsoft\\Windows\\Themes")) {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            let mut v: Vec<_> = rd
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().starts_with("Transcoded"))
+                .filter_map(|e| Some((e.file_name(), e.metadata().ok()?.len(), e.metadata().ok()?.modified().ok()?)))
+                .collect();
+            v.sort();
+            v.hash(&mut h);
+        }
+    }
+    h.finish()
+}
+
 /// The last desktop render, reused for a moment: one wallpaper change sends several windows asking at once
 /// (dock, menu bar, widgets, each in two sizes), and a render of a big screen takes ~40 ms.
 static DESKTOP_SHOT: std::sync::Mutex<Option<(std::time::Instant, SendBitmap, RECT)>> = std::sync::Mutex::new(None);

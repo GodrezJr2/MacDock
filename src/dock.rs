@@ -381,6 +381,7 @@ pub struct Dock {
     glass: Option<Pixmap>, // the wallpaper at half the screen's pixels, lightly blurred: what Liquid Glass shows
     light_glass: bool,
     wall_settle: u8, // looks left while a new wallpaper fades in
+    wall_sig: (u64, u8), // gfx::wallpaper_sig at the last desktop render, and quiet checks since then
     backdrop: Option<crate::backdrop::Backdrop>, // live captures of the windows behind the plate
     backdrop_gen: u64,
     bd_due: (bool, bool), // backdrop events waiting for the next allowed repaint: (frames, layout)
@@ -456,7 +457,7 @@ impl Dock {
         let now = Instant::now();
         Dock {
             hwnd, cfg, display, config_dirty: false, shell: Shell::default(), dpi, screen_w, screen_h, fit_b: f64::MAX,
-            win_w: 1.0, win_h: 1.0, items: Vec::new(), icons: HashMap::new(), surface: None, drawn: Vec::new(), frost: None, glass: None, light_glass: false, wall_settle: 0, backdrop: crate::backdrop::Backdrop::new(hwnd, display.primary), backdrop_gen: 0, bd_due: (false, false), bd_last: 0.0, bd_timer: false, behind: None, glass_layer: None, over: None, wall_strip: None,
+            win_w: 1.0, win_h: 1.0, items: Vec::new(), icons: HashMap::new(), surface: None, drawn: Vec::new(), frost: None, glass: None, light_glass: false, wall_settle: 0, wall_sig: (0, 0), backdrop: crate::backdrop::Backdrop::new(hwnd, display.primary), backdrop_gen: 0, bd_due: (false, false), bd_last: 0.0, bd_timer: false, behind: None, glass_layer: None, over: None, wall_strip: None,
             label: None, label_alpha: 0.0, menu_up: false, drag_files: false, label_at: (0.0, 0.0, 0.0, 0.0), hovered: None, plate_left: 0.0,
             plate_w: 0.0, seps: Vec::new(), running_now: HashMap::new(), clock: now, last_t: 0.0, awake: false, hidden: false,
             sig: String::new(), refreshes: 0, appbar: false, reserved: None,
@@ -719,6 +720,15 @@ impl Dock {
 
     /// Read the desktop again, cheaply, and rebuild the glass only if it changed.
     fn reload_frost_if_changed(&mut self) -> bool {
+        // Rendering the desktop to compare cost ~40 ms per dock every 30 s. Do it only when the wallpaper's
+        // fingerprint moved, and every 10th check anyway (5 min) for a live wallpaper app drawing on the desktop.
+        let sig = gfx::wallpaper_sig();
+        if sig == self.wall_sig.0 && self.wall_sig.1 < 10 {
+            self.wall_sig.1 += 1;
+            return false;
+        }
+        // just moved: look once more next time too, in case this render caught the new picture mid fade
+        self.wall_sig = (sig, if sig == self.wall_sig.0 { 0 } else { 10 });
         let fh = (240.0 * self.screen_h / self.screen_w).round().max(1.0) as u32;
         let now = gfx::wallpaper_on(Some(self.display.rect), 240, fh);
         let changed = now.as_ref().map(|p| p.data()) != self.frost.as_ref().map(|p| p.data());
