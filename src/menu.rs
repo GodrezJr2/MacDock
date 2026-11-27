@@ -169,10 +169,26 @@ fn register() {
     });
 }
 
-/// Show the menu and wait for a choice. `owner` gets focus back afterwards. Returns the entry index.
+pub enum MenuResult {
+    Chosen(usize),
+    BarClick(i32),
+    Dismissed,
+}
+
 pub fn popup(owner: HWND, entries: &[Entry], at: Anchor, dpi: f64) -> Option<usize> {
+    match track(owner, entries, at, dpi, false) {
+        MenuResult::Chosen(i) => Some(i),
+        _ => None,
+    }
+}
+
+pub fn bar_popup(owner: HWND, entries: &[Entry], left: i32, top: i32, dpi: f64) -> MenuResult {
+    track(owner, entries, Anchor::Below(left, top), dpi, true)
+}
+
+fn track(owner: HWND, entries: &[Entry], at: Anchor, dpi: f64, from_bar: bool) -> MenuResult {
     if entries.is_empty() {
-        return None;
+        return MenuResult::Dismissed;
     }
     register();
     let font = Font { face: gfx::ui_face(), px: (14.0 * dpi).round() as i32, weight: 400 };
@@ -234,10 +250,10 @@ pub fn popup(owner: HWND, entries: &[Entry], at: Anchor, dpi: f64) -> Option<usi
     };
     let Ok(hwnd) = hwnd else {
         STATE.with(|s| *s.borrow_mut() = None);
-        return None;
+        return MenuResult::Dismissed;
     };
-    let mut drawn_hover = Some(usize::MAX);
-    let mut result = None;
+    let mut drawn_hover = None;
+    let mut result = MenuResult::Dismissed;
     unsafe {
         let draw = |surface: &mut Option<Surface>, hover: Option<usize>| {
             if let Some(sf) = surface.as_mut() {
@@ -247,14 +263,15 @@ pub fn popup(owner: HWND, entries: &[Entry], at: Anchor, dpi: f64) -> Option<usi
         };
         draw(&mut surface, None);
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        let previous = GetForegroundWindow();
         let _ = SetForegroundWindow(hwnd);
         let _ = SetFocus(hwnd);
         SetCapture(hwnd);
-        drawn_hover = None;
+        let mut pressed_bar = false;
         let mut msg = MSG::default();
         loop {
             if let Some(r) = with(|st| st.result).flatten() {
-                result = r;
+                if let Some(i) = r { result = MenuResult::Chosen(i); }
                 break;
             }
             if GetCapture() != hwnd {
@@ -264,6 +281,20 @@ pub fn popup(owner: HWND, entries: &[Entry], at: Anchor, dpi: f64) -> Option<usi
             if !GetMessageW(&mut msg, HWND::default(), 0, 0).as_bool() {
                 PostQuitMessage(msg.wParam.0 as i32);
                 break;
+            }
+            // The popup owns capture, including over its shadow and neighbouring bar titles.
+            if from_bar && msg.hwnd == hwnd && matches!(msg.message, WM_LBUTTONDOWN | WM_LBUTTONUP) {
+                let mut bar = windows::Win32::Foundation::RECT::default();
+                let over_bar = GetWindowRect(owner, &mut bar).is_ok()
+                    && msg.pt.x >= bar.left && msg.pt.x < bar.right && msg.pt.y >= bar.top && msg.pt.y < bar.bottom;
+                if msg.message == WM_LBUTTONDOWN && over_bar {
+                    pressed_bar = true;
+                    continue;
+                }
+                if msg.message == WM_LBUTTONUP && pressed_bar {
+                    if over_bar { result = MenuResult::BarClick(msg.pt.x - bar.left); }
+                    break;
+                }
             }
             // keys go to the menu even if the owner still has focus
             if msg.message == WM_KEYDOWN {
@@ -279,12 +310,15 @@ pub fn popup(owner: HWND, entries: &[Entry], at: Anchor, dpi: f64) -> Option<usi
         }
         STATE.with(|s| *s.borrow_mut() = None);
         let _ = ReleaseCapture();
+        // Destroying an active unowned popup lets Windows select an unrelated app.
+        if from_bar && GetForegroundWindow() == hwnd && IsWindow(previous).as_bool() {
+            let _ = SetForegroundWindow(previous);
+        }
         let _ = DestroyWindow(hwnd);
         if !owner.0.is_null() {
             crate::ensure_no_activate(owner);
         }
     }
-    let _ = drawn_hover;
     result
 }
 

@@ -19,7 +19,7 @@ use windows::Win32::UI::Shell::{ABE_TOP, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::gfx::{self, Font, Surface};
-use crate::menu::{self, Anchor, Entry};
+use crate::menu::{self, Entry};
 use crate::shell::{self, Shell};
 use crate::{push, Ev};
 
@@ -698,10 +698,37 @@ impl MenuBar {
 
     // -------------------------------------------------------------- menus
 
-    fn show_menu(&mut self, i: usize) -> Option<BarAct> {
-        let item = self.slots[i].item;
+    fn show_menu(&mut self, mut i: usize) -> Option<BarAct> {
+        loop {
+            let (entries, acts) = self.menu_entries(self.slots[i].item);
+            self.open = Some(i);
+            self.dirty = true;
+            self.render();
+            let result = menu::bar_popup(self.hwnd, &entries, self.px(self.slots[i].x), self.px(H) + 1, self.dpi);
+            self.open = None;
+            self.hover = None;
+            self.dirty = true;
+            if let menu::MenuResult::BarClick(x) = result {
+                if let Some(next) = self.slot_at(x).filter(|&next| next != i) {
+                    if matches!(self.slots[next].item, Item::Logo | Item::App | Item::Menu(_)) {
+                        i = next;
+                        continue;
+                    }
+                    self.render();
+                    return self.click(next);
+                }
+            }
+            self.render();
+            return match result {
+                menu::MenuResult::Chosen(row) => self.run(acts.into_iter().nth(row)?),
+                _ => None,
+            };
+        }
+    }
+
+    fn menu_entries(&self, item: Item) -> (Vec<Entry>, Vec<Do>) {
         let app = self.display_app_name().to_string();
-        let (entries, acts): (Vec<Entry>, Vec<Do>) = match item {
+        match item {
             Item::Logo => self.system_menu(),
             Item::App => split(vec![
                 (Entry::item(crate::i18n::fill("Hide {}", &app)), Do::HideApp),
@@ -753,19 +780,8 @@ impl MenuBar {
                 (Entry::item(crate::i18n::fill("{} Help", &app)).gesture("F1"), Do::Keys(&[0x70])),
                 (Entry::item("Windows Tips"), Do::Launch("ms-get-started:")),
             ]),
-            _ => return None,
-        };
-        self.open = Some(i);
-        self.dirty = true;
-        self.render();
-        let s = &self.slots[i];
-        let chosen = menu::popup(self.hwnd, &entries, Anchor::Below(self.px(s.x), self.px(H) + 1), self.dpi);
-        crate::ensure_no_activate(self.hwnd);
-        self.open = None;
-        self.hover = None;
-        self.dirty = true;
-        self.render();
-        self.run(acts.into_iter().nth(chosen?)?)
+            _ => unreachable!("only menu titles have entries"),
+        }
     }
 
     fn system_menu(&self) -> (Vec<Entry>, Vec<Do>) {
