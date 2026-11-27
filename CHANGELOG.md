@@ -27,6 +27,13 @@ Each release on GitHub uses its section from this file as its notes.
 - Each time the window fan opens it notes what each card was made from in `%APPDATA%\MacDock\fan.log` (kept under
   256 KB), to track down an empty card that sometimes shows up.
 
+### Fixed
+- Minimizing several windows of one app from the dock (a few Chrome windows, say) gives every one of them its genie
+  again, and they come back with it too. Only the newest window's picture fitted in the snapshot memory, and Chrome
+  draws covered windows black, so the others went into the dock and came back without the animation. Older
+  pictures are now kept at half size instead of dropped, and a window that can't be pictured falls back to its
+  earlier picture if it hasn't moved.
+
 ## [0.5.0] - 2026-11-26
 
 ### Added
