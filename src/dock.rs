@@ -229,6 +229,8 @@ struct Item {
     /// the last flash of this app's request; a flash soon after its bounces ended is the same request
     attention_last: Option<Instant>,
     dot: f64,
+    /// the running dot is drawn dark: the glass right under it is light
+    dot_dark: bool,
     badge: u32,
     badge_text: Option<(u32, Pixmap)>,
 }
@@ -240,7 +242,7 @@ impl Item {
             scale: 1.0, presence, leaving: false, x: 0.0, size: 0.0, bounce_t: 0.0,
             launching: false, launch_started: Instant::now(), wins_at_launch: 0,
             attention: false, attention_bounce: false, attention_started: Instant::now(), attention_last: None,
-            dot: 0.0, badge: 0, badge_text: None,
+            dot: 0.0, dot_dark: false, badge: 0, badge_text: None,
         }
     }
 
@@ -1898,7 +1900,7 @@ impl Dock {
             return;
         }
         // only what is behind the plate changed: keep the icon layer, redraw just the glass under it
-        let only_backdrop = self.over.is_some() && key.len() == self.drawn.len() && key[..key.len() - 1] == self.drawn[..key.len() - 1];
+        let mut only_backdrop = self.over.is_some() && key.len() == self.drawn.len() && key[..key.len() - 1] == self.drawn[..key.len() - 1];
         self.drawn = key;
         let Some(surface) = self.surface.as_mut() else { return };
         let mut pm = surface.pixmap();
@@ -2001,6 +2003,23 @@ impl Dock {
             }
             has_glass = glass.is_some();
         }
+        // The running dot is light on dark glass and dark on light glass, as on macOS. Decide it per icon from
+        // the glass just drawn right under the dot: one guess from the whole wallpaper strip missed a light patch
+        // behind the plate (issue #8), and could not follow windows moving behind the live glass.
+        {
+            let (w, h) = (pm.width() as i32, pm.height() as i32);
+            let px = pm.data_mut();
+            let cy = ((plate_bottom - 3.5 + slide) * dpi).round() as i32;
+            let r = (3.0 * dpi).round().max(1.0) as i32;
+            for it in self.items.iter_mut().filter(|i| i.size >= 0.5) {
+                let cx = ((it.x + it.size / 2.0) * dpi).round() as i32;
+                let dark = dot_dark_on(px, w, h, cx, cy, r, it.dot_dark).unwrap_or(self.light_glass);
+                if dark != it.dot_dark {
+                    it.dot_dark = dark;
+                    only_backdrop = false;
+                }
+            }
+        }
         // everything over the glass goes on its own layer, kept for frames where only the backdrop changed
         let mut over = self.over.take().filter(|o| (o.width(), o.height()) == (pw, ph)).or_else(|| Pixmap::new(pw.max(1), ph.max(1)));
         if let (false, Some(over)) = (only_backdrop, over.as_mut()) {
@@ -2089,7 +2108,7 @@ impl Dock {
                 if let Some(c) = PathBuilder::from_circle((ix + it.size / 2.0) as f32, (plate_bottom - 3.5) as f32, 2.2) {
                     let mut paint = Paint::default();
                     paint.anti_alias = true;
-                    if self.light_glass {
+                    if it.dot_dark {
                         paint.set_color(Color::from_rgba8(0x22, 0x1C, 0x1C, (0xC0 as f64 * a) as u8));
                     } else {
                         paint.set_color(Color::from_rgba8(0xF2, 0xF2, 0xF2, (0xE0 as f64 * a) as u8));
@@ -2302,6 +2321,48 @@ fn downloads_dir() -> Option<String> {
         }
         let s = format!("{}\\Downloads", std::env::var("USERPROFILE").ok()?);
         std::path::Path::new(&s).is_dir().then_some(s)
+    }
+}
+
+/// Whether the running dot centred at (cx, cy) should be dark, from the glass under it in a BGRA premultiplied
+/// buffer w x h (a 3-row band 2r+1 wide). None where nothing opaque is under it. ~0.49 is where both dots stand
+/// out equally; the gap around it (was_dark) keeps a dot from flickering over a moving backdrop.
+fn dot_dark_on(px: &[u8], w: i32, h: i32, cx: i32, cy: i32, r: i32, was_dark: bool) -> Option<bool> {
+    let (mut sum, mut n) = (0.0, 0);
+    for y in (cy - 1).max(0)..=(cy + 1).min(h - 1) {
+        for x in (cx - r).max(0)..=(cx + r).min(w - 1) {
+            let i = (y * w + x) as usize * 4;
+            let a = px[i + 3] as f64;
+            if a >= 128.0 {
+                sum += (0.0722 * px[i] as f64 + 0.7152 * px[i + 1] as f64 + 0.2126 * px[i + 2] as f64) / a;
+                n += 1;
+            }
+        }
+    }
+    let l = (n > 0).then(|| sum / n as f64)?;
+    Some(if was_dark { l > 0.45 } else { l > 0.53 })
+}
+
+#[cfg(test)]
+mod dot_tests {
+    #[test]
+    fn running_dot_follows_the_glass_under_it() {
+        let (w, h) = (40, 10);
+        let fill = |b: u8, g: u8, r: u8, a: u8| (0..w * h).flat_map(|_| [b, g, r, a]).collect::<Vec<u8>>();
+        let dark = |px: &[u8], was| super::dot_dark_on(px, w, h, 20, 5, 3, was);
+        // light glass (issue #8: a pale wallpaper) gets the dark dot, dark glass the light one
+        assert_eq!(dark(&fill(235, 235, 235, 255), false), Some(true));
+        assert_eq!(dark(&fill(30, 30, 30, 255), true), Some(false));
+        // premultiplied: half-transparent white still reads as white
+        assert_eq!(dark(&fill(128, 128, 128, 128), false), Some(true));
+        // green weighs most (BGRA): bright green is light, bright blue is not
+        assert_eq!(dark(&fill(0, 220, 0, 255), false), Some(true));
+        assert_eq!(dark(&fill(220, 0, 0, 255), false), Some(false));
+        // mid grey near the switch point keeps whatever it was
+        assert_eq!(dark(&fill(126, 126, 126, 255), true), Some(true));
+        assert_eq!(dark(&fill(126, 126, 126, 255), false), Some(false));
+        // nothing opaque under it: no opinion
+        assert_eq!(dark(&fill(0, 0, 0, 0), false), None);
     }
 }
 

@@ -6,6 +6,11 @@ Each release on GitHub uses its section from this file as its notes.
 
 ## [Unreleased]
 
+### Fixed
+- The running-app dot was hard to see on a light background ([#8](https://github.com/GodrezJr2/MacDock/issues/8)). Its
+  colour was picked once from the wallpaper, so a white window behind the dock still got light dots. Each dot
+  now reads the glass right under it: dark on light glass, light on dark glass.
+
 ## [0.5.2] - 2026-11-27
 
 ### Fixed
