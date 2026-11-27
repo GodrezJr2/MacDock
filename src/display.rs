@@ -2,7 +2,7 @@
 use windows::Win32::Foundation::{BOOL, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, MonitorFromPoint, HDC, HMONITOR, MONITORINFO, MONITOR_DEFAULTTOPRIMARY};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Display {
@@ -39,6 +39,19 @@ impl Display {
     pub fn at_bottom(self, p: POINT) -> bool {
         let r = self.bottom_strip(2);
         p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom
+    }
+}
+
+/// Work area and scale of the monitor from which the user opens the Apps window.
+pub fn cursor_work_area() -> (RECT, f64) {
+    unsafe {
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        let id = MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY);
+        let display = Display::read(id).unwrap_or_else(Display::primary);
+        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let rect = if GetMonitorInfoW(display.id, &mut info).as_bool() { info.rcWork } else { display.rect };
+        (rect, display.scale)
     }
 }
 

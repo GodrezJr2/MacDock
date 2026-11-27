@@ -35,7 +35,7 @@ impl TrayFly {
     fn with_icon(&self, id: u32, f: impl FnOnce(&tray::Icon)) {
         let Some(&(h, u)) = self.shown.get(id.wrapping_sub(ID_ICON) as usize) else { return };
         tray::with_icons(|icons| {
-            if let Some(ic) = icons.and_then(|v| v.iter().find(|i| i.hwnd == h && i.uid == u)) {
+            if let Some(ic) = icons.and_then(|v| v.iter().find(|i| i.hwnd == h && i.uid == u && i.active())) {
                 f(ic);
             }
         });
@@ -67,7 +67,8 @@ impl Content for TrayFly {
         let w = ui.w;
         let mut shown = Vec::new();
         let h = tray::with_icons(|icons| {
-            let visible: Vec<&tray::Icon> = icons.map(|v| v.iter().filter(|i| i.image.is_some() && !i.hidden).collect()).unwrap_or_default();
+            let now = Instant::now();
+            let visible: Vec<&tray::Icon> = icons.map(|v| v.iter().filter(|i| i.visible(now)).collect()).unwrap_or_default();
             let n = visible.len();
             // header: the hovered icon's tooltip, else the title; count on the right
             let hot_tip = self.hot.and_then(|id| visible.get(id.wrapping_sub(ID_ICON) as usize)).map(|i| match i.tip.lines().next().map(str::trim).filter(|t| !t.is_empty()) { Some(t) => t.to_string(), None => i.name.clone() }).filter(|t| !t.is_empty());

@@ -30,7 +30,7 @@ const PANEL_OUT_MS: u64 = 140;
 /// a glass window (the Apps window): springs up from 90% as it fades in
 const GLASS_IN_MS: f32 = 420.0;
 /// the glass window's corners
-const GLASS_R: f32 = 26.0;
+pub(crate) const GLASS_R: f32 = 26.0;
 
 /// false while Reduce motion is on: panels appear and go at once.
 static MOTION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -540,6 +540,9 @@ pub trait Content {
     fn glass(&self) -> Option<f32> {
         None
     }
+    fn centered_work_area(&self) -> Option<(windows::Win32::Foundation::RECT, f64)> {
+        None
+    }
     /// A glass window that grows downward as it fills (Spotlight): its top at this fraction of the screen
     /// height, and the tallest it gets. The window is that tall from the start; the glass follows the content.
     fn glass_top(&self) -> Option<(f32, f32)> {
@@ -664,6 +667,7 @@ pub struct Flyout {
 impl Flyout {
     /// Open under the menu bar item whose right edge is `right_px`; `top_px` is the bar's bottom.
     pub fn open(kind: crate::menubar::Extra, content: Box<dyn Content>, right_px: i32, top_px: i32, dpi: f64) -> Flyout {
+        let dpi = content.centered_work_area().map_or(dpi, |(_, scale)| scale);
         let window = kind.is_window();
         let hwnd = create_window(window);
         let screen_w_px = unsafe { GetSystemMetrics(SM_CXSCREEN) };
@@ -987,6 +991,9 @@ impl Flyout {
             // centred, a little above the middle as macOS places it, and never under the menu bar
             None => ((sh - ph as i32) / 2 - (24.0 * s) as i32).max(self.top_px - (40.0 * s) as i32).max(0),
         };
+        let (x, y) = self.content.centered_work_area().map_or((x, y), |(r, _)| {
+            (r.left + (r.right - r.left - pw as i32) / 2, r.top + (r.bottom - r.top - ph as i32) / 2)
+        });
         self.pos = (x, y);
         let stale = self.glass.as_ref().is_none_or(|g| g.width() != pw || g.height() != ph);
         if top.is_none() {
