@@ -288,6 +288,10 @@ struct State {
     codex_plan: Option<String>,
     have_claude: bool,
     have_codex: bool,
+    /// passes since the last full walk of the log folders
+    since_walk: u32,
+    /// logs written in the hour before the last full walk (true = Claude), re-read every pass in between
+    hot: Vec<(PathBuf, bool)>,
 }
 
 impl State {
@@ -312,6 +316,8 @@ impl State {
             codex_plan: None,
             have_claude: false,
             have_codex: false,
+            since_walk: u32::MAX,
+            hot: Vec::new(),
         }
     }
 
@@ -323,14 +329,29 @@ impl State {
         self.have_claude = claude_dir.is_dir();
         self.have_codex = codex_dir.is_dir();
 
-        let mut files = Vec::new();
-        walk(&claude_dir, since, &mut files);
-        for f in files.drain(..) {
-            self.read(&f, true);
-        }
-        walk(&codex_dir, since, &mut files);
-        for f in files.drain(..) {
-            self.read(&f, false);
+        // Walking ~/.claude/projects cost ~80 ms a pass (hundreds of project folders, most holding only memory/),
+        // so the full walk that finds new logs runs every WALK_EVERY passes; in between only the logs written
+        // lately are read again. A new session shows up within a minute.
+        self.since_walk = self.since_walk.saturating_add(1);
+        if self.since_walk >= WALK_EVERY {
+            self.since_walk = 0;
+            self.hot.clear();
+            let recent = SystemTime::now() - Duration::from_secs(3600);
+            for (dir, claude) in [(&claude_dir, true), (&codex_dir, false)] {
+                let mut files = Vec::new();
+                walk(dir, since, &mut files);
+                for (f, t) in files {
+                    self.read(&f, claude);
+                    if t >= recent {
+                        self.hot.push((f, claude));
+                    }
+                }
+            }
+        } else {
+            for (f, claude) in std::mem::take(&mut self.hot) {
+                self.read(&f, claude);
+                self.hot.push((f, claude));
+            }
         }
         self.read_codex_titles(&codex_dir.with_file_name("session_index.jsonl"));
 
@@ -615,16 +636,28 @@ pub fn model_name(m: &str) -> String {
     if ver.is_empty() { n } else { format!("{n} {}", ver.join(".")) }
 }
 
-/// *.jsonl under `dir` modified since `since`.
-fn walk(dir: &Path, since: SystemTime, out: &mut Vec<PathBuf>) {
+/// Passes between full walks of the log folders (passes are 10 s apart on AC, 30 s on battery).
+const WALK_EVERY: u32 = 6;
+
+/// *.jsonl under `dir` modified since `since`, with their modified time.
+fn walk(dir: &Path, since: SystemTime, out: &mut Vec<(PathBuf, SystemTime)>) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for e in rd.flatten() {
         let Ok(ft) = e.file_type() else { continue };
-        let p = e.path();
         if ft.is_dir() {
-            walk(&p, since, out);
-        } else if p.extension().is_some_and(|x| x == "jsonl") && e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t >= since) {
-            out.push(p);
+            // Claude Code keeps no logs in these (memory notes, saved tool output), and every project folder
+            // has a memory/: skipping them halves the walk
+            let n = e.file_name();
+            if n != "memory" && n != "tool-results" {
+                walk(&e.path(), since, out);
+            }
+            continue;
+        }
+        let p = e.path();
+        if p.extension().is_some_and(|x| x == "jsonl") {
+            if let Some(t) = e.metadata().and_then(|m| m.modified()).ok().filter(|t| *t >= since) {
+                out.push((p, t));
+            }
         }
     }
 }
@@ -781,9 +814,19 @@ mod tests {
         let mut st = State::new(None);
         let s = st.pass();
         println!("first pass {:?}", t.elapsed());
-        let t = std::time::Instant::now();
-        let _ = st.pass();
-        println!("second pass {:?}", t.elapsed());
-        println!("{s:#?}");
+        for _ in 0..4 {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let t = std::time::Instant::now();
+            let _ = st.pass();
+            println!("next pass {:?}", t.elapsed());
+        }
+        let since = SystemTime::now() - Duration::from_secs(KEEP_SECS as u64);
+        for d in [st.home.join(".claude").join("projects"), st.home.join(".codex").join("sessions")] {
+            let t = std::time::Instant::now();
+            let mut v = Vec::new();
+            walk(&d, since, &mut v);
+            println!("walk {} {:?} ({} files)", d.display(), t.elapsed(), v.len());
+        }
+        let _ = s;
     }
 }
