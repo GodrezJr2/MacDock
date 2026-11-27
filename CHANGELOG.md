@@ -6,6 +6,17 @@ Each release on GitHub uses its section from this file as its notes.
 
 ## [Unreleased]
 
+### Fixed
+- A dock icon bounced whenever that app changed its window title in the background, as if it were asking for
+  attention. A terminal with a spinner in its title (Claude Code, for one) bounced without end and kept the dock
+  redrawing every frame. Only a real taskbar flash bounces now, and a request that keeps flashing bounces a few
+  times and stops, as on macOS.
+
+### Changed
+- Lighter when idle: the dock no longer renders the whole desktop every 30 seconds to see if the wallpaper changed
+  (it checks the wallpaper files first), AI usage re-reads only recent logs between its once-a-minute folder walk,
+  and the menu bar reads the network state on its own thread instead of the one that draws the dock.
+
 ## [0.5.1] - 2026-11-27
 
 ### Added
