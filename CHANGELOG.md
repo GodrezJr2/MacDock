@@ -6,6 +6,8 @@ Each release on GitHub uses its section from this file as its notes.
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-11-27
+
 ### Fixed
 - The running-app dot was hard to see on a light background ([#8](https://github.com/GodrezJr2/MacDock/issues/8)). Its
   colour was picked once from the wallpaper, so a white window behind the dock still got light dots. Each dot
@@ -233,7 +235,8 @@ First public release: a macOS-style dock (magnification, genie minimize and rest
 attention bounce, recent apps and a Downloads stack) and menu bar (battery, Wi-Fi, Control Center, tray icons and
 AI usage flyouts) for Windows 11, written in Rust.
 
-[Unreleased]: https://github.com/GodrezJr2/MacDock/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/GodrezJr2/MacDock/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/GodrezJr2/MacDock/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/GodrezJr2/MacDock/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/GodrezJr2/MacDock/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/GodrezJr2/MacDock/compare/v0.4.5...v0.5.0
