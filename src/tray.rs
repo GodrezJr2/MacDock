@@ -10,10 +10,9 @@
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
-use tiny_skia::{IntSize, Pixmap};
+use tiny_skia::Pixmap;
 use windows::core::{w, GUID};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -157,50 +156,6 @@ fn guid_at(b: &[u8], o: usize) -> Option<GUID> {
     (g != GUID::zeroed()).then_some(g)
 }
 
-/// An HICON as premultiplied BGRA: drawn on black and on white, alpha from the difference (works for 32-bit
-/// icons and for old masked ones alike).
-pub fn icon_pixmap(hicon: u32, px: u32) -> Option<Pixmap> {
-    if hicon == 0 {
-        return None;
-    }
-    let h = HICON(hicon as usize as *mut _);
-    let draw = |bg: u8| -> Option<Vec<u8>> {
-        unsafe {
-            let dc = CreateCompatibleDC(HDC::default());
-            let bmi = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER {
-                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: px as i32, biHeight: -(px as i32), biPlanes: 1,
-                    biBitCount: 32, biCompression: BI_RGB.0, ..Default::default()
-                },
-                ..Default::default()
-            };
-            let mut bits = std::ptr::null_mut();
-            let bmp = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).ok()?;
-            let old = SelectObject(dc, bmp);
-            std::ptr::write_bytes(bits as *mut u8, bg, (px * px * 4) as usize);
-            let ok = DrawIconEx(dc, 0, 0, h, px as i32, px as i32, 0, HBRUSH::default(), DI_NORMAL).is_ok();
-            let _ = GdiFlush();
-            let v = std::slice::from_raw_parts(bits as *const u8, (px * px * 4) as usize).to_vec();
-            SelectObject(dc, old);
-            let _ = DeleteObject(bmp);
-            let _ = DeleteDC(dc);
-            ok.then_some(v)
-        }
-    };
-    let (b, wh) = (draw(0)?, draw(255)?);
-    let mut out = vec![0u8; b.len()];
-    for i in (0..b.len()).step_by(4) {
-        // on black: c·a ; on white: c·a + (1 - a)·255  →  a = 255 - (white - black)
-        let d = (0..3).map(|k| wh[i + k] as i32 - b[i + k] as i32).max().unwrap_or(0);
-        let a = (255 - d).clamp(0, 255) as u8;
-        for k in 0..3 {
-            out[i + k] = b[i + k].min(a);
-        }
-        out[i + 3] = a;
-    }
-    Pixmap::from_vec(out, IntSize::from_wh(px, px)?)
-}
-
 fn app_name(hwnd: u32) -> String {
     let pid = crate::shell::window_pid(HWND(hwnd as usize as *mut _));
     let exe = crate::shell::Shell::default().process_info(pid).0;
@@ -254,7 +209,7 @@ fn on_notify(host: &mut Host, b: &[u8]) -> bool {
             if flags & 2 != 0 {
                 let hicon = u32_at(n, 20);
                 if hicon != ic.hicon || ic.image.is_none() {
-                    if let Some(image) = icon_pixmap(hicon, 32) {
+                    if let Some(image) = crate::gfx::icon_pixmap(HICON(hicon as usize as *mut _), 32) {
                         ic.hicon = hicon;
                         ic.image = Some(image);
                     }

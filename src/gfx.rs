@@ -14,7 +14,7 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::Graphics::Imaging::*;
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetClassNameW, GetWindowRect, IsWindowVisible, SystemParametersInfoW, UpdateLayeredWindow, SPI_GETDESKWALLPAPER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ULW_ALPHA,
+    DrawIconEx, HICON, DI_NORMAL, EnumWindows, GetClassNameW, GetWindowRect, IsWindowVisible, SystemParametersInfoW, UpdateLayeredWindow, SPI_GETDESKWALLPAPER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ULW_ALPHA,
 };
 
 use crate::shell::wide;
@@ -758,7 +758,22 @@ pub fn image_bytes(bytes: &[u8], max_px: u32) -> Option<Pixmap> {
 
 unsafe fn decode(f: &IWICImagingFactory, dec: &IWICBitmapDecoder, max_px: u32) -> Option<Pixmap> {
     {
-        let frame = dec.GetFrame(0).ok()?;
+        let mut frame = dec.GetFrame(0).ok()?;
+        if dec.GetContainerFormat().ok() == Some(GUID_ContainerFormatIco) {
+            // ICO frames are alternative sizes; other multi-frame images keep their first frame.
+            let rank = |edge: u32| (edge < max_px, edge.abs_diff(max_px));
+            let mut best = None;
+            for i in 0..dec.GetFrameCount().unwrap_or(0) {
+                let Ok(candidate) = dec.GetFrame(i) else { continue };
+                let (mut w, mut h) = (0, 0);
+                if candidate.GetSize(&mut w, &mut h).is_err() || w == 0 || h == 0 { continue; }
+                let score = rank(w.max(h));
+                if best.is_none_or(|old| score < old) {
+                    best = Some(score);
+                    frame = candidate;
+                }
+            }
+        }
         let (mut w, mut h) = (0u32, 0u32);
         frame.GetSize(&mut w, &mut h).ok()?;
         if w == 0 || h == 0 {
@@ -774,6 +789,69 @@ unsafe fn decode(f: &IWICImagingFactory, dec: &IWICBitmapDecoder, max_px: u32) -
         cv.CopyPixels(std::ptr::null(), dw * 4, &mut v).ok()?;
         Pixmap::from_vec(v, IntSize::from_wh(dw, dh)?)
     }
+}
+
+#[cfg(test)]
+#[test]
+fn ico_selects_the_smallest_sufficient_frame_or_the_largest_available() {
+    unsafe { let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED); }
+    // Each frame has a distinct colour so simply resizing the first frame cannot pass.
+    let ico = include_bytes!("../tests/fixtures/icon-sizes.ico");
+    for (request, size, bgra) in [
+        (16, 16, [0, 0, 255, 255]), (48, 48, [0, 128, 0, 255]),
+        (91, 91, [255, 0, 0, 255]), (256, 128, [255, 0, 0, 255]),
+    ] {
+        let pm = image_bytes(ico, request).unwrap();
+        assert_eq!((pm.width(), pm.height()), (size, size));
+        assert_eq!(&pm.data()[..4], &bgra);
+    }
+}
+
+/// An HICON as premultiplied BGRA: drawn on black and on white, alpha from the difference (works for 32-bit
+/// icons and for old masked ones alike).
+pub fn icon_pixmap(h: HICON, px: u32) -> Option<Pixmap> {
+    if h.0.is_null() || px == 0 {
+        return None;
+    }
+    let draw = |bg: u8| -> Option<Vec<u8>> {
+        unsafe {
+            let dc = CreateCompatibleDC(HDC::default());
+            let bmi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: px as i32, biHeight: -(px as i32), biPlanes: 1,
+                    biBitCount: 32, biCompression: BI_RGB.0, ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut bits = std::ptr::null_mut();
+            if dc.0.is_null() { return None; }
+            let Ok(bmp) = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0) else {
+                let _ = DeleteDC(dc);
+                return None;
+            };
+            let old = SelectObject(dc, bmp);
+            std::ptr::write_bytes(bits as *mut u8, bg, (px * px * 4) as usize);
+            let ok = DrawIconEx(dc, 0, 0, h, px as i32, px as i32, 0, HBRUSH::default(), DI_NORMAL).is_ok();
+            let _ = GdiFlush();
+            let v = std::slice::from_raw_parts(bits as *const u8, (px * px * 4) as usize).to_vec();
+            SelectObject(dc, old);
+            let _ = DeleteObject(bmp);
+            let _ = DeleteDC(dc);
+            ok.then_some(v)
+        }
+    };
+    let (b, wh) = (draw(0)?, draw(255)?);
+    let mut out = vec![0u8; b.len()];
+    for i in (0..b.len()).step_by(4) {
+        // on black: c·a ; on white: c·a + (1 - a)·255  →  a = 255 - (white - black)
+        let d = (0..3).map(|k| wh[i + k] as i32 - b[i + k] as i32).max().unwrap_or(0);
+        let a = (255 - d).clamp(0, 255) as u8;
+        for k in 0..3 {
+            out[i + k] = b[i + k].min(a);
+        }
+        out[i + 3] = a;
+    }
+    Pixmap::from_vec(out, IntSize::from_wh(px, px)?)
 }
 
 /// Write opaque BGRA pixels as a PNG with WIC. Callable from any thread (initializes COM for it).
