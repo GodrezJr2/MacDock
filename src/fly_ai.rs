@@ -51,9 +51,9 @@ fn pts(p: f64) -> String {
 
 fn ago(secs: i64) -> String {
     if secs < 60 {
-        "active now".into()
+        crate::i18n::t("active now").into()
     } else {
-        format!("{} ago", span(secs))
+        crate::i18n::fmt!("{} ago", "{}前", span(secs))
     }
 }
 
@@ -97,7 +97,7 @@ impl AiFly {
             ui.fill(px, cy + (title_h - 16.0) / 2.0, pw, 16.0, 8.0, white(0x14));
             ui.text_mid(px + 6.0, cy + title_h / 2.0, plan, 10.0, 600, white(0xA0), 0.0);
         }
-        let status = if p.rate5() > 0.0 { "active now".to_string() } else if p.last > 0 { ago(now - p.last) } else { String::new() };
+        let status = if p.rate5() > 0.0 { crate::i18n::t("active now").to_string() } else if p.last > 0 { ago(now - p.last) } else { String::new() };
         let sw = ui.text_w(&status, 11.0, 400);
         let sc = if p.rate5() > 0.0 { a(GREEN, 255) } else { white(0x80) };
         ui.text_mid(x0 + iw - sw, cy + title_h / 2.0, &status, 11.0, 400, sc, 0.0);
@@ -105,12 +105,12 @@ impl AiFly {
 
         // limits
         if let Some(n) = &p.note {
-            ui.text(x0, cy, &format!("Limits: {n}"), 11.0, 500, a(AMBER, 255), iw);
+            ui.text(x0, cy, &crate::i18n::fmt!("Limits: {n}", "额度：{n}"), 11.0, 500, a(AMBER, 255), iw);
             cy += lab_h + 6.0;
         }
         if p.limits.is_empty() {
             if let Some((start, tok)) = p.block {
-                let t = format!("5-hour block  ·  {} tokens  ·  ends in {}", compact(tok as f64), span(start + 5 * 3600 - now));
+                let t = crate::i18n::fmt!("5-hour block  ·  {} tokens  ·  ends in {}", "5 小时周期 · {} 词元 · {}后结束", compact(tok as f64), span(start + 5 * 3600 - now));
                 ui.text(x0, cy, &t, 11.0, 500, white(0xB0), iw);
                 cy += lab_h + 6.0;
             }
@@ -123,16 +123,20 @@ impl AiFly {
         let gap = 6.0;
         let tw = (iw - gap * 2.0) / 3.0;
         let tiles = [
-            ("5 min", format!("{} tok/s", rate(p.rate5()))),
-            ("30 min", format!("{} tok/s", rate(p.rate30()))),
-            ("Today", format!("{} tok", compact(p.today as f64))),
+            (crate::i18n::t("5 min"), crate::i18n::fmt!("{} tok/s", "{} 词元/秒", rate(p.rate5()))),
+            (crate::i18n::t("30 min"), crate::i18n::fmt!("{} tok/s", "{} 词元/秒", rate(p.rate30()))),
+            (crate::i18n::t("Today"), crate::i18n::fmt!("{} tok", "{} 词元", compact(p.today as f64))),
         ];
         let th = tiles_h - 4.0;
         for (i, (lab, val)) in tiles.iter().enumerate() {
             let tx = x0 + i as f32 * (tw + gap);
             ui.fill(tx, cy, tw, th, 9.0, white(0x0C));
             ui.text(tx + 9.0, cy + 7.0, lab, 11.0, 500, white(0x90), tw - 14.0);
-            ui.text(tx + 9.0, cy + 7.0 + lab_h + 2.0, val, 16.0, 600, white(0xF2), tw - 12.0);
+            let mut size = 16.0;
+            while size > 10.0 && ui.text_w(val, size, 600) > tw - 12.0 {
+                size -= 1.0;
+            }
+            ui.text(tx + 9.0, cy + 7.0 + lab_h + 2.0, val, size, 600, white(0xF2), tw - 12.0);
         }
         y + card_h
     }
@@ -141,8 +145,8 @@ impl AiFly {
         const MAX: usize = 4;
         let w = ui.w;
         let busy = list.iter().filter(|s| s.tok5 > 0).count();
-        ui.text(0.0, y, "Sessions", 12.0, 600, white(0xD0), 0.0);
-        let head = if busy > 0 { format!("{busy} working  ·  {} in 30 min", list.len()) } else { format!("{} in 30 min", list.len()) };
+        ui.text(0.0, y, crate::i18n::t("Sessions"), 12.0, 600, white(0xD0), 0.0);
+        let head = if busy > 0 { crate::i18n::fmt!("{busy} working  ·  {} in 30 min", "{busy} 个进行中 · 半小时内共 {} 个", list.len()) } else { crate::i18n::fmt!("{} in 30 min", "半小时内共 {} 个", list.len()) };
         let hw = ui.text_w(&head, 11.0, 400);
         ui.text(w - hw, y + 1.0, &head, 11.0, 400, white(0x80), 0.0);
         y += ui.line_h(12.0, 600) + 6.0;
@@ -160,9 +164,9 @@ impl AiFly {
             }
             ui.circle(dx, dy, 4.0, a(tint, if se.tok5 > 0 { 255 } else { 0x90 }));
             let (rt, rc) = if se.tok5 > 0 {
-                (format!("{} tok/s", rate(se.rate5())), white(0xF2))
+                (crate::i18n::fmt!("{} tok/s", "{} 词元/秒", rate(se.rate5())), white(0xF2))
             } else {
-                (format!("idle {}", span(now - se.last)), white(0x70))
+                (crate::i18n::fmt!("idle {}", "已空闲{}", span(now - se.last)), white(0x70))
             };
             let rw = ui.text_w(&rt, 12.0, 600);
             ui.text(w - 10.0 - rw, cy, &rt, 12.0, 600, rc, 0.0);
@@ -177,12 +181,12 @@ impl AiFly {
             if let Some(b) = &se.branch {
                 sub.push(b.clone());
             }
-            sub.push(format!("{} tok", compact(se.total as f64)));
+            sub.push(crate::i18n::fmt!("{} tok", "{} 词元", compact(se.total as f64)));
             ui.text(24.0, cy + t_h + 1.0, &sub.join("  ·  "), 10.5, 400, white(0x80), w - 34.0);
             y += row_h + 4.0;
         }
         if list.len() > MAX {
-            let more = format!("+{} more", list.len() - MAX);
+            let more = crate::i18n::fmt!("+{} more", "另有 {} 个", list.len() - MAX);
             ui.text(24.0, y, &more, 10.5, 400, white(0x70), 0.0);
             y += ui.line_h(10.5, 400) + 2.0;
         }
@@ -193,7 +197,7 @@ impl AiFly {
         let lab_h = ui.line_h(11.0, 500);
         let sub_h = ui.line_h(10.5, 400);
         let c = level(l.used);
-        ui.text(x0, cy, &format!("{} limit", l.label), 11.0, 500, white(0xB0), 0.0);
+        ui.text(x0, cy, &crate::i18n::fmt!("{} limit", "{}额度", crate::i18n::t(&l.label)), 11.0, 500, white(0xB0), 0.0);
         let pct = format!("{:.0}%", l.used);
         let pw = ui.text_w(&pct, 11.0, 600);
         ui.text(x0 + iw - pw, cy, &pct, 11.0, 600, a(c, 255), 0.0);
@@ -202,9 +206,9 @@ impl AiFly {
         let fw = (iw * (l.used.clamp(0.0, 100.0) / 100.0) as f32).max(if l.used > 0.0 { 5.0 } else { 0.0 });
         ui.fill(x0, cy, fw, 5.0, 2.5, a(c, 255));
         cy += 5.0 + 6.0;
-        let mut sub = format!("{} / 5 min  ·  {} / 30 min", pts(l.d5), pts(l.d30));
+        let mut sub = crate::i18n::fmt!("{} / 5 min  ·  {} / 30 min", "5 分钟 {} · 30 分钟 {}", pts(l.d5), pts(l.d30));
         if l.resets_at > now {
-            sub += &format!("  ·  resets in {}", span(l.resets_at - now));
+            sub += &crate::i18n::fmt!("  ·  resets in {}", " · {}后重置", span(l.resets_at - now));
         }
         ui.text(x0, cy, &sub, 10.5, 400, white(0x80), iw);
         cy += sub_h;
@@ -213,9 +217,9 @@ impl AiFly {
             let per_s = l.d30 / 1800.0;
             let eta = ((100.0 - l.used).max(0.0) / per_s) as i64;
             let (t, col) = if l.resets_at > now && eta >= l.resets_at - now {
-                ("At this pace it lasts until the reset".to_string(), white(0x80))
+                (crate::i18n::t("At this pace it lasts until the reset").to_string(), white(0x80))
             } else {
-                (format!("At this pace the limit is hit in {}", span(eta)), a(if eta < 3600 { RED } else { AMBER }, 255))
+                (crate::i18n::fmt!("At this pace the limit is hit in {}", "按当前速度，{}后将用尽额度", span(eta)), a(if eta < 3600 { RED } else { AMBER }, 255))
             };
             ui.text(x0, cy, &t, 10.5, 500, col, iw);
             cy += sub_h;
@@ -251,15 +255,15 @@ impl Content for AiFly {
     fn draw(&mut self, ui: &mut Ui) -> f32 {
         let w = ui.w;
         let Some(s) = self.sum.clone() else {
-            ui.text_mid(0.0, 10.0, "AI Usage", 13.5, 600, white(0xF2), 0.0);
-            return 20.0 + 12.0 + ui.text(0.0, 32.0, "Reading logs…", 11.5, 400, white(0x80), 0.0).min(0.0) + ui.line_h(11.5, 400);
+            ui.text_mid(0.0, 10.0, crate::i18n::t("AI Usage"), 13.5, 600, white(0xF2), 0.0);
+            return 20.0 + 12.0 + ui.text(0.0, 32.0, crate::i18n::t("Reading logs…"), 11.5, 400, white(0x80), 0.0).min(0.0) + ui.line_h(11.5, 400);
         };
         let now = ai_usage::now();
         let r5 = s.rate5();
 
         // header + chip
-        ui.text_mid(0.0, 10.0, "AI Usage", 13.5, 600, white(0xF2), 0.0);
-        let (chip, tint) = if r5 > 0.0 { ("Burning", AMBER) } else { ("Idle", GREY) };
+        ui.text_mid(0.0, 10.0, crate::i18n::t("AI Usage"), 13.5, 600, white(0xF2), 0.0);
+        let (chip, tint) = if r5 > 0.0 { (crate::i18n::t("Burning"), AMBER) } else { (crate::i18n::t("Idle"), GREY) };
         let cw = ui.text_w(chip, 11.0, 600) + 16.0;
         ui.fill(w - cw, 10.0 - 9.5, cw, 19.0, 9.0, a(tint, 0x26));
         ui.text_mid(w - cw + 8.0, 9.5, chip, 11.0, 600, a(tint, 255), 0.0);
@@ -269,9 +273,9 @@ impl Content for AiFly {
         let big_h = ui.line_h(34.0, 600);
         let bw = ui.text(0.0, y, &rate(r5), 34.0, 600, white(255), 0.0);
         let small_h = ui.line_h(15.0, 500);
-        ui.text(bw + 5.0, y + big_h - 7.0 - small_h, "tok/s", 15.0, 500, white(0x8C), 0.0);
+        ui.text(bw + 5.0, y + big_h - 7.0 - small_h, crate::i18n::t("tok/s"), 15.0, 500, white(0x8C), 0.0);
         y += big_h - 3.0;
-        let line = format!("last 5 min  ·  30-min average {} tok/s", rate(s.rate30()));
+        let line = crate::i18n::fmt!("last 5 min  ·  30-min average {} tok/s", "最近 5 分钟 · 半小时平均 {} 词元/秒", rate(s.rate30()));
         ui.text(0.0, y, &line, 12.0, 400, white(0x99), w);
         y += ui.line_h(12.0, 400) + 14.0;
 
@@ -296,12 +300,12 @@ impl Content for AiFly {
         }
         y += chart_h + 5.0;
         let lh = ui.line_h(10.5, 400);
-        ui.text(0.0, y, "24 h ago", 10.5, 400, white(0x66), 0.0);
-        let peak = format!("peak {} tok/h", compact(max as f64));
+        ui.text(0.0, y, crate::i18n::t("24 h ago"), 10.5, 400, white(0x66), 0.0);
+        let peak = crate::i18n::fmt!("peak {} tok/h", "峰值 {} 词元/小时", compact(max as f64));
         let pw = ui.text_w(&peak, 10.5, 400);
         ui.text((w - pw) / 2.0, y, &peak, 10.5, 400, white(0x66), 0.0);
-        let nw = ui.text_w("now", 10.5, 400);
-        ui.text(w - nw, y, "now", 10.5, 400, white(0x66), 0.0);
+        let nw = ui.text_w(crate::i18n::t("now"), 10.5, 400);
+        ui.text(w - nw, y, crate::i18n::t("now"), 10.5, 400, white(0x66), 0.0);
         y += lh + 12.0;
 
         // sessions with tokens in the last 30 minutes
@@ -320,7 +324,7 @@ impl Content for AiFly {
             any = true;
         }
         if !any {
-            y += ui.text_wrap(0.0, y, "No Claude Code or Codex logs from the last 7 days.", 11.5, 400, white(0x80), w) + 8.0;
+            y += ui.text_wrap(0.0, y, crate::i18n::t("No Claude Code or Codex logs from the last 7 days."), 11.5, 400, white(0x80), w) + 8.0;
         }
 
         // note
@@ -332,10 +336,10 @@ impl Content for AiFly {
         } else {
             "Read from local logs. Codex limits are its own server reports; Claude's percentage is estimated from ClaudeLimit5h."
         };
-        y += ui.text_wrap(0.0, y, note, 10.5, 400, white(0x66), w);
+        y += ui.text_wrap(0.0, y, crate::i18n::t(note), 10.5, 400, white(0x66), w);
         y += 6.0;
-        let hov = ui.row(1, -6.0, y - 3.0, ui.text_w("Open config.json", 11.0, 500) + 12.0, ui.line_h(11.0, 500) + 6.0);
-        ui.text(0.0, y, "Open config.json", 11.0, 500, if hov { white(0xF2) } else { (0x0A, 0x84, 0xFF, 255) }, 0.0);
+        let hov = ui.row(1, -6.0, y - 3.0, ui.text_w(crate::i18n::t("Open config.json"), 11.0, 500) + 12.0, ui.line_h(11.0, 500) + 6.0);
+        ui.text(0.0, y, crate::i18n::t("Open config.json"), 11.0, 500, if hov { white(0xF2) } else { (0x0A, 0x84, 0xFF, 255) }, 0.0);
         y + ui.line_h(11.0, 500)
     }
 }
@@ -361,6 +365,11 @@ mod tests {
         }
         save(&mut AiFly::new(), "ai_real");
 
+    }
+
+    #[test]
+    #[ignore]
+    fn ai_sample_snapshot() {
         let now = crate::ai_usage::now();
         let mut hourly = [0u64; 24];
         for (i, h) in hourly.iter_mut().enumerate() {
@@ -394,5 +403,8 @@ mod tests {
         ];
         let mut f = AiFly { sum: Some(Arc::new(Summary { now, claude: Some(claude), codex: Some(codex), sessions })), gen: 0 };
         save(&mut f, "ai_busy");
+        crate::i18n::set("zh-CN");
+        save(&mut f, "ai_busy_zh_cn");
+        crate::i18n::set("en");
     }
 }

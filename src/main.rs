@@ -317,8 +317,16 @@ impl App {
                             }
                         }
                     }
+                    Key::InterfaceFont => {
+                        gfx::set_interface_font(&c.interface_font);
+                        if let Some(b) = self.bar.as_mut() { b.redraw(); }
+                    }
                     Key::Language => {
                         i18n::set(&c.language);
+                        if let Some(w) = &self.win {
+                            let title = shell::wide(i18n::t("MacDock Settings"));
+                            unsafe { let _ = SetWindowTextW(w.hwnd, windows::core::PCWSTR(title.as_ptr())); }
+                        }
                         if let Some(b) = self.bar.as_mut() {
                             b.redraw();
                         }
@@ -712,15 +720,18 @@ fn main() {
     if _single.is_none() {
         return;
     }
+    let cfg = Config::load();
+    i18n::set(&cfg.language);
+    gfx::set_interface_font(&cfg.interface_font);
     if low_integrity() {
         // Explorer refuses AppBars from a low-integrity process and %APPDATA% is read-only to it: this happens
         // when the exe sits in a folder with a Low Mandatory Label (e.g. a sandboxed build folder)
         unsafe {
             MessageBoxW(
                 None,
-                w!("MacDock is running at low integrity, so it cannot reserve screen space or save settings.
+                windows::core::PCWSTR(shell::wide(i18n::t("MacDock is running at low integrity, so it cannot reserve screen space or save settings.
 
-Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDock) and start it from there."),
+Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDock) and start it from there.")).as_ptr()),
                 w!("MacDock"),
                 MB_OK | MB_ICONWARNING,
             );
@@ -731,8 +742,6 @@ Copy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDo
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let _ = windows::Win32::System::Ole::OleInitialize(None); // drag and drop onto the dock
     }
-    let cfg = Config::load();
-    i18n::set(&cfg.language);
     if cfg.hide_taskbar {
         taskbar::hide();
     }

@@ -75,16 +75,16 @@ impl Content for TrayFly {
                 let cw = ui.text_w(&n.to_string(), 11.5, 400);
                 ui.text_mid(w - 2.0 - cw, 9.0, &n.to_string(), 11.5, 400, white(0x80), cw + 2.0);
             }
-            let title = hot_tip.unwrap_or_else(|| "Background apps".into());
+            let title = hot_tip.unwrap_or_else(|| crate::i18n::t("Background apps").into());
             ui.text_mid(2.0, 9.0, &title, 13.0, 600, white(0xF2), w - 34.0);
             let mut y = 22.0;
             if n == 0 {
                 let msg = if !self.hosted {
-                    "The notification area could not be hosted."
+                    crate::i18n::t("The notification area could not be hosted.")
                 } else if self.opened.elapsed().as_secs_f32() < 1.4 {
-                    "Loading…"
+                    crate::i18n::t("Loading…")
                 } else {
-                    "Nothing running in the background."
+                    crate::i18n::t("Nothing running in the background.")
                 };
                 y += 6.0;
                 let lh = ui.text_wrap(4.0, y, msg, 12.0, 400, white(0x80), w - 8.0);

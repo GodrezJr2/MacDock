@@ -326,12 +326,58 @@ pub struct Font {
     pub weight: i32,
 }
 
-pub const UI: &str = "Segoe UI Variable Text";
+const UI: &str = "Segoe UI Variable Text";
+static INTERFACE_FACE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub fn interface_fonts() -> &'static [String] {
+    static FAMILIES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    FAMILIES.get_or_init(|| {
+        unsafe extern "system" fn collect(font: *const LOGFONTW, _: *const TEXTMETRICW, _: u32, data: LPARAM) -> i32 {
+            let face = &(*font).lfFaceName;
+            let end = face.iter().position(|&c| c == 0).unwrap_or(face.len());
+            let name = String::from_utf16_lossy(&face[..end]);
+            if !name.is_empty() && !name.starts_with('@') {
+                (*(data.0 as *mut Vec<String>)).push(name);
+            }
+            1
+        }
+        let mut fonts = Vec::<String>::new();
+        unsafe {
+            let dc = GetDC(HWND::default());
+            if !dc.0.is_null() {
+                let query = LOGFONTW { lfCharSet: DEFAULT_CHARSET, ..Default::default() };
+                EnumFontFamiliesExW(dc, &query, Some(collect), LPARAM((&mut fonts as *mut Vec<String>) as isize), 0);
+                ReleaseDC(HWND::default(), dc);
+            }
+        }
+        fonts.sort_unstable();
+        fonts.dedup();
+        fonts.insert(0, "auto".into());
+        fonts
+    })
+}
+
+pub fn interface_font_index(face: &str) -> usize {
+    interface_fonts().iter().position(|name| name == face).unwrap_or(0)
+}
+
+pub fn set_interface_font(face: &str) {
+    let index = if face == "auto" { 0 } else { interface_font_index(face) };
+    INTERFACE_FACE.store(index, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn ui_face() -> &'static str {
+    match INTERFACE_FACE.load(std::sync::atomic::Ordering::Relaxed) {
+        0 if crate::i18n::lang() == crate::i18n::Lang::ZhCn => "Microsoft YaHei UI",
+        0 => UI,
+        i => &interface_fonts()[i],
+    }
+}
 pub const ICONS: &str = "Segoe Fluent Icons";
 
 /// White text as a premultiplied mask (Segoe UI Variable, grayscale antialiasing), `px` tall.
 pub fn text(s: &str, px: i32) -> Option<Pixmap> {
-    text_ex(s, Font { face: UI, px, weight: 400 }, (255, 255, 255))
+    text_ex(s, Font { face: ui_face(), px, weight: 400 }, (255, 255, 255))
 }
 
 /// Measure text in pixels without rasterizing it.

@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use crate::flyout::{white, Cmd, Content, Ui, ACCENT, MARGIN};
 use crate::i18n::t;
-use crate::launchpad::{ease_out, rank, refresh, App, BLINK_MS, CATALOG, NOTIFY, RESULTS_IN_MS};
+use crate::launchpad::{ease_out, refresh, App, BLINK_MS, CATALOG, NOTIFY, RESULTS_IN_MS};
 
 /// Categories in the order macOS shows them; an app goes in the first whose words its name has.
 const CATS: [(&str, &[&str]); 9] = [
@@ -188,7 +188,7 @@ impl Apps {
         let q = self.query.trim().to_lowercase();
         self.recent.clear();
         if !q.is_empty() {
-            let mut hits: Vec<(u8, usize)> = self.apps.iter().enumerate().filter_map(|(i, a)| rank(&a.name.to_lowercase(), &q).map(|r| (r, i))).collect();
+            let mut hits: Vec<(u8, usize)> = self.apps.iter().enumerate().filter_map(|(i, a)| a.search_rank(&q).map(|r| (r, i))).collect();
             hits.sort();
             self.shown = hits.into_iter().map(|h| h.1).collect();
         } else if let Some(c) = self.cat {
@@ -390,10 +390,10 @@ impl Apps {
             ui.fill(ix + ICON * 0.06, iy + ICON * 0.06, ICON * 0.88, ICON * 0.88, ICON * 0.22, (0, 0, 0, 0x55));
         }
         let max = cell_w - 8.0;
-        let tw = ui.text_w(&a.name, 10.5, 400).min(max);
+        let tw = ui.text_w(a.display_name(), 10.5, 400).min(max);
         let (tx, ty) = (x + (cell_w - tw) / 2.0, iy + ICON + 5.0);
-        ui.text(tx, ty + 0.8, &a.name, 10.5, 400, (0, 0, 0, 0x48), max);
-        ui.text(tx, ty, &a.name, 10.5, 400, white(0xF0), max);
+        ui.text(tx, ty + 0.8, a.display_name(), 10.5, 400, (0, 0, 0, 0x48), max);
+        ui.text(tx, ty, a.display_name(), 10.5, 400, white(0xF0), max);
     }
 
     fn draw_grid(&mut self, ui: &mut Ui) {

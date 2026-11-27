@@ -271,7 +271,7 @@ impl Widgets {
 
     /// Text helper. Anchor: 0 = left, 1 = center, 2 = right.
     fn text(&self, pm: &mut Pixmap, s: &str, dip: f32, weight: i32, c: (u8, u8, u8), a: u8, x: f32, y: f32, anchor: u8) -> f32 {
-        let Some(t) = gfx::text_ex(s, Font { face: gfx::UI, px: (dip * self.s).round() as i32, weight }, c) else { return 0.0 };
+        let Some(t) = gfx::text_ex(s, Font { face: gfx::ui_face(), px: (dip * self.s).round() as i32, weight }, c) else { return 0.0 };
         let w = t.width() as f32;
         let x = match anchor {
             1 => x - w / 2.0,
@@ -297,7 +297,7 @@ impl Widgets {
             let a = h as f32 / 12.0 * 2.0 * PI;
             let rr = r - 15.0 * s;
             let (x, y) = (c + a.sin() * rr, c - a.cos() * rr);
-            let fh = gfx::measure("8", Font { face: gfx::UI, px: (13.0 * s).round() as i32, weight: 600 }).1 as f32;
+            let fh = gfx::measure("8", Font { face: gfx::ui_face(), px: (13.0 * s).round() as i32, weight: 600 }).1 as f32;
             self.text(&mut pm, &h.to_string(), 13.0, 600, (0x1C, 0x1C, 0x1E), 0xFF, x, y - fh / 2.0, 1);
         }
         Some(pm)
@@ -357,7 +357,7 @@ impl Widgets {
         let t = unsafe { GetLocalTime() };
         let (pw, mem, dsk) = (power(), memory(), disk());
         let kinds: Vec<String> = (0..4).map(|i| self.widget_at(i).to_string()).collect();
-        let key = format!("{:?} {:?} {}:{} {} {:?} {:.0} {:.0} {:.0}", kinds, self.glass.is_some(), t.wHour, t.wMinute, t.wDay, pw, self.cpu * 100.0, mem * 100.0, dsk * 100.0);
+        let key = format!("{} {:?} {:?} {:?} {}:{} {} {:?} {:.0} {:.0} {:.0}", gfx::ui_face(), crate::i18n::lang(), kinds, self.glass.is_some(), t.wHour, t.wMinute, t.wDay, pw, self.cpu * 100.0, mem * 100.0, dsk * 100.0);
         if key == self.shown {
             return;
         }
@@ -388,16 +388,16 @@ impl Widgets {
                 }
                 "digital_clock" => {
                     // laid out like the date tile: day on top, the time big and light, the date below
-                    self.text(&mut pm, DAYS[t.wDayOfWeek as usize % 7], 12.0, 700, ORANGE, 0xFF, x + pad, y + pad, 0);
+                    self.text(&mut pm, crate::i18n::t(DAYS[t.wDayOfWeek as usize % 7]), 12.0, 700, ORANGE, 0xFF, x + pad, y + pad, 0);
                     let time = format!("{:02}:{:02}", t.wHour, t.wMinute);
                     self.text(&mut pm, &time, 46.0, 300, (255, 255, 255), 0xFF, x + pad - 2.0 * s, y + pad + 24.0 * s, 0);
-                    let date = format!("{} {}", t.wDay, MONTHS[(t.wMonth as usize + 11) % 12]);
+                    let date = if crate::i18n::lang() == crate::i18n::Lang::ZhCn { format!("{}月{}日", t.wMonth, t.wDay) } else { format!("{} {}", t.wDay, MONTHS[(t.wMonth as usize + 11) % 12]) };
                     self.text(&mut pm, &date, 13.0, 600, (255, 255, 255), 0xB0, x + pad, y + tw - pad - 18.0 * s, 0);
                 }
                 "date" | "calendar" => {
-                    self.text(&mut pm, DAYS[t.wDayOfWeek as usize % 7], 12.0, 700, RED, 0xFF, x + pad, y + pad, 0);
+                    self.text(&mut pm, crate::i18n::t(DAYS[t.wDayOfWeek as usize % 7]), 12.0, 700, RED, 0xFF, x + pad, y + pad, 0);
                     self.text(&mut pm, &t.wDay.to_string(), 58.0, 300, (255, 255, 255), 0xFF, x + pad - 3.0 * s, y + pad + 12.0 * s, 0);
-                    let month = format!("{} {}", MONTHS[(t.wMonth as usize + 11) % 12], t.wYear);
+                    let month = if crate::i18n::lang() == crate::i18n::Lang::ZhCn { format!("{}年{}月", t.wYear, t.wMonth) } else { format!("{} {}", MONTHS[(t.wMonth as usize + 11) % 12], t.wYear) };
                     self.text(&mut pm, &month, 13.0, 600, (255, 255, 255), 0xB0, x + pad, y + tw - pad - 18.0 * s, 0);
                 }
                 "battery" => {
@@ -414,18 +414,18 @@ impl Widgets {
                         }
                         None => ("AC Power", "—".to_string()),
                     };
-                    let fh = gfx::measure("8", Font { face: gfx::UI, px: (24.0 * s).round() as i32, weight: 600 }).1 as f32;
+                    let fh = gfx::measure("8", Font { face: gfx::ui_face(), px: (24.0 * s).round() as i32, weight: 600 }).1 as f32;
                     self.text(&mut pm, &pct, 24.0, 600, (255, 255, 255), 0xFF, c.0, c.1 - fh / 2.0, 1);
-                    self.text(&mut pm, label, 12.5, 600, (255, 255, 255), 0xB0, c.0, y + tw - pad - 16.0 * s, 1);
+                    self.text(&mut pm, crate::i18n::t(label), 12.5, 600, (255, 255, 255), 0xB0, c.0, y + tw - pad - 16.0 * s, 1);
                 }
                 "system" => {
-                    self.text(&mut pm, "System", 13.0, 700, (255, 255, 255), 0xF0, x + pad, y + pad - 2.0 * s, 0);
+                    self.text(&mut pm, crate::i18n::t("System"), 13.0, 700, (255, 255, 255), 0xF0, x + pad, y + pad - 2.0 * s, 0);
                     let rows = [("CPU", self.cpu, BLUE), ("Memory", mem, PURPLE), ("Disk C:", dsk, ORANGE)];
                     let bw = tw - 2.0 * pad;
                     let mut ry = y + pad + 26.0 * s;
                     for (name, v, colr) in rows {
                         let v = v.clamp(0.0, 1.0);
-                        self.text(&mut pm, name, 11.5, 600, (255, 255, 255), 0xC0, x + pad, ry, 0);
+                        self.text(&mut pm, crate::i18n::t(name), 11.5, 600, (255, 255, 255), 0xC0, x + pad, ry, 0);
                         self.text(&mut pm, &format!("{:.0}%", v * 100.0), 11.5, 600, (255, 255, 255), 0xF0, x + tw - pad, ry, 2);
                         let by = ry + 18.0 * s;
                         if let Some(p) = gfx::rrect(x + pad, by, bw, 6.0 * s, 3.0 * s) {
@@ -583,14 +583,14 @@ impl Widgets {
             3 => "Bottom Right",
             _ => "Tile",
         };
-        let slot_label = format!("Tile {} - {} ({})", slot + 1, slot_name, match cur_kind.as_str() {
+        let slot_label = crate::i18n::fmt!("Tile {} - {} ({})", "组件 {} · {}（{}）", slot + 1, crate::i18n::t(slot_name), crate::i18n::t(match cur_kind.as_str() {
             "clock" => "Analog Clock",
             "digital_clock" => "Digital Clock",
             "date" | "calendar" => "Calendar & Date",
             "battery" => "Battery",
             "system" => "System",
             _ => "Hidden",
-        });
+        }));
 
         let mut entries = Vec::new();
         let mut acts = Vec::new();
@@ -634,7 +634,7 @@ impl Widgets {
                         _ => ("clock", "Analog Clock"),
                     };
                     add(
-                        Entry::item(format!("Restore Slot {} ({}) as {}", h + 1, name, default_for_slot.1)),
+                        Entry::item(crate::i18n::fmt!("Restore Slot {} ({}) as {}", "恢复组件 {}（{}）为{}", h + 1, crate::i18n::t(name), crate::i18n::t(default_for_slot.1))),
                         Some(Act::RestoreSlot(h, default_for_slot.0)),
                     );
                 }

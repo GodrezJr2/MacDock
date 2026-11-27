@@ -23,7 +23,11 @@ impl Entry {
     pub fn item(text: impl Into<String>) -> Entry {
         // every menu shows in the interface language; strings without a translation stay English
         let text: String = text.into();
-        let text = crate::i18n::t(&text).to_string();
+        Self::named(crate::i18n::t(&text))
+    }
+    /// A filename or window title supplied by the user or another application.
+    pub fn named(text: impl Into<String>) -> Entry {
+        let text = text.into();
         Entry::Item { text, gesture: String::new(), enabled: true, checked: false }
     }
     pub fn gesture(mut self, g: &str) -> Entry {
@@ -171,7 +175,7 @@ pub fn popup(owner: HWND, entries: &[Entry], at: Anchor, dpi: f64) -> Option<usi
         return None;
     }
     register();
-    let font = Font { face: gfx::UI, px: (13.0 * dpi).round() as i32, weight: 400 };
+    let font = Font { face: gfx::ui_face(), px: (13.0 * dpi).round() as i32, weight: 400 };
     // texts first: their widths size the panel
     let mut texts: Vec<Option<(Pixmap, Option<Pixmap>)>> = Vec::new();
     let mut rows = Vec::new();
@@ -309,7 +313,7 @@ fn paint(sf: &mut Surface, entries: &[Entry], texts: &[Option<(Pixmap, Option<Pi
 
     let (left, top) = (MARGIN + PAD, MARGIN + PAD);
     let mut y = top;
-    let check = gfx::text_ex("✓", Font { face: gfx::UI, px: (12.0 * dpi).round() as i32, weight: 400 }, (255, 255, 255));
+    let check = gfx::text_ex("✓", Font { face: gfx::ui_face(), px: (12.0 * dpi).round() as i32, weight: 400 }, (255, 255, 255));
     for (i, e) in entries.iter().enumerate() {
         match e {
             Entry::Sep => {

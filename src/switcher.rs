@@ -126,7 +126,7 @@ impl Switcher {
             let (name, icon) = self.icons.entry(key.clone()).or_insert_with(|| {
                 let mut name = shell::friendly_name(w.exe.as_deref(), w.aumid.as_deref(), &w.title);
                 if name.eq_ignore_ascii_case("explorer") {
-                    name = "File Explorer".into();
+                    name = crate::i18n::t("File Explorer").into();
                 } else if name.chars().next().is_some_and(|c| c.is_lowercase()) {
                     let mut c = name.chars();
                     name = c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default(); // exe stem "code" -> "Code"
@@ -256,7 +256,7 @@ impl Switcher {
         // come out positive, and one that is not is a panic (`min > max`, 25 Nov 2026).
         if let Some(a) = self.apps.get(self.sel) {
             let (px, _, pw, _) = self.panel();
-            let font = Font { face: gfx::UI, px: (14.0 * s).round() as i32, weight: 600 };
+            let font = Font { face: gfx::ui_face(), px: (14.0 * s).round() as i32, weight: 600 };
             let (_, t) = fit_name(&a.name, font, (pw - 24.0 * s).max(1.0));
             if let Some(t) = t {
                 let x = name_x(sx + cell / 2.0, t.width() as f32, px, pw, s);

@@ -605,6 +605,10 @@ impl Dock {
             let on = self.cfg.auto_hide;
             self.apply_auto_hide(on);
         }
+        if old.interface_font != self.cfg.interface_font || old.language != self.cfg.language {
+            self.label = None;
+            for item in &mut self.items { item.badge_text = None; }
+        }
         if old.badges != self.cfg.badges {
             unsafe {
                 if self.cfg.badges {
@@ -798,7 +802,7 @@ impl Dock {
         let mut it = Item::new(key.clone(), String::new(), None, 1.0);
         it.launch = Some(spec.to_string());
         if spec == APPS_ITEM {
-            it.name = crate::i18n::t("Apps").to_string();
+            it.name = "Apps".to_string();
             it.icon = self.app_icon(&key, spec, None);
             return it;
         }
@@ -1361,7 +1365,7 @@ impl Dock {
                 } else {
                     for w in it.wins.iter().take(12) {
                         let t: String = if w.title.chars().count() > 48 { w.title.chars().take(47).chain(Some('…')).collect() } else { w.title.clone() };
-                        add(Entry::item(t), Some(Do::Activate(w.hwnd)));
+                        add(Entry::named(t), Some(Do::Activate(w.hwnd)));
                     }
                     if it.running() {
                         add(Entry::Sep, None);
@@ -1563,7 +1567,7 @@ impl Dock {
         files.truncate(15);
         let mut entries: Vec<Entry> = files.iter().map(|f| {
             let t: String = if f.1.chars().count() > 44 { f.1.chars().take(43).chain(Some('…')).collect() } else { f.1.clone() };
-            Entry::item(t)
+            Entry::named(t)
         }).collect();
         if entries.is_empty() {
             entries.push(Entry::item("No files").enabled(false));
@@ -1796,9 +1800,14 @@ impl Dock {
         }
         // the label text is rasterized by GDI at the real pixel size, once per name
         if let Some(i) = self.hovered {
-            let name = &self.items[i].name;
-            if self.label.as_ref().map(|l| &l.0) != Some(name) {
-                self.label = gfx::text(name, (13.0 * dpi).round() as i32).map(|p| (name.clone(), p));
+            let item = &self.items[i];
+            let name = if item.key == "trash" || item.key == "downloads" || item.launch.as_deref() == Some(APPS_ITEM) {
+                crate::i18n::t(&item.name)
+            } else {
+                &item.name
+            };
+            if self.label.as_ref().map(|l| l.0.as_str()) != Some(name) {
+                self.label = gfx::text(name, (13.0 * dpi).round() as i32).map(|p| (name.to_string(), p));
             }
         }
         // badge numbers, rasterized at the largest size they get drawn at
@@ -1808,7 +1817,7 @@ impl Dock {
         for it in &mut self.items {
             if it.badge > 0 && it.badge_text.as_ref().map(|t| t.0) != Some(it.badge) {
                 let s = if it.badge > 999 { "999+".to_string() } else { it.badge.to_string() };
-                it.badge_text = gfx::text_ex(&s, Font { face: gfx::UI, px: badge_px.max(6), weight: 600 }, (255, 255, 255)).map(|p| (it.badge, p));
+                it.badge_text = gfx::text_ex(&s, Font { face: gfx::ui_face(), px: badge_px.max(6), weight: 600 }, (255, 255, 255)).map(|p| (it.badge, p));
             }
         }
 

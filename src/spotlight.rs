@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use crate::flyout::{white, Cmd, Content, Ui, ACCENT, MARGIN};
 use crate::i18n::t;
-use crate::launchpad::{ease_out, rank, refresh, App, BLINK_MS, CATALOG, NOTIFY, RESULTS_IN_MS};
+use crate::launchpad::{ease_out, refresh, App, BLINK_MS, CATALOG, NOTIFY, RESULTS_IN_MS};
 
 const W: f32 = 660.0;
 const PAD: (f32, f32) = (16.0, 0.0);
@@ -74,7 +74,7 @@ impl Spotlight {
         self.hits.clear();
         if !q.is_empty() {
             let mut hits: Vec<(u8, usize, usize)> =
-                self.apps.iter().enumerate().filter_map(|(i, a)| rank(&a.name.to_lowercase(), &q).map(|r| (r, a.name.len(), i))).collect();
+                self.apps.iter().enumerate().filter_map(|(i, a)| a.search_rank(&q).map(|r| (r, a.name.len(), i))).collect();
             hits.sort();
             self.hits = hits.into_iter().map(|h| h.2).take(MAX_APPS).collect();
         }
@@ -180,7 +180,7 @@ impl Spotlight {
                             Some(img) => ui.image(img, 0.0, ty - 14.0, 28.0, 28.0),
                             None => ui.fill(2.0, ty - 12.0, 24.0, 24.0, 6.0, white(0x22)),
                         }
-                        (app.name.clone(), t("Application"))
+                        (app.display_name().to_owned(), t("Application"))
                     }
                     None => {
                         ui.glyph(14.0, ty, '\u{E774}', 17.0, white(fade(0xE0)));

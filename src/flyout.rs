@@ -310,7 +310,7 @@ impl Ui<'_> {
     }
 
     fn font(&self, size: f32, weight: i32, icons: bool) -> Font {
-        Font { face: if icons { gfx::ICONS } else { gfx::UI }, px: (size * self.fs).round() as i32, weight }
+        Font { face: if icons { gfx::ICONS } else { gfx::ui_face() }, px: (size * self.fs).round() as i32, weight }
     }
 
     pub fn text_w(&self, s: &str, size: f32, weight: i32) -> f32 {
@@ -422,22 +422,39 @@ impl Ui<'_> {
         gfx::measure("Ag", self.font(size, weight, false)).1 as f32 / self.fs
     }
 
-    /// Word-wrapped text; returns the height used.
-    pub fn text_wrap(&mut self, x: f32, y: f32, s: &str, size: f32, weight: i32, c: (u8, u8, u8, u8), max_w: f32) -> f32 {
-        let lh = self.line_h(size, weight);
-        let mut lines: Vec<String> = Vec::new();
+    pub fn wrapped_lines(&self, s: &str, size: f32, weight: i32, max_w: f32) -> Vec<String> {
+        let mut lines = Vec::new();
         let mut cur = String::new();
         for word in s.split_whitespace() {
             let next = if cur.is_empty() { word.to_string() } else { format!("{cur} {word}") };
-            if !cur.is_empty() && self.text_w(&next, size, weight) > max_w {
-                lines.push(std::mem::replace(&mut cur, word.to_string()));
-            } else {
+            if self.text_w(&next, size, weight) <= max_w {
                 cur = next;
+                continue;
+            }
+            if !cur.is_empty() {
+                lines.push(std::mem::take(&mut cur));
+            }
+            // Chinese sentences can span several lines without a space.
+            for ch in word.chars() {
+                let prev = cur.len();
+                cur.push(ch);
+                if prev > 0 && self.text_w(&cur, size, weight) > max_w {
+                    cur.truncate(prev);
+                    lines.push(std::mem::take(&mut cur));
+                    cur.push(ch);
+                }
             }
         }
         if !cur.is_empty() {
             lines.push(cur);
         }
+        lines
+    }
+
+    /// Word-wrapped text; returns the height used.
+    pub fn text_wrap(&mut self, x: f32, y: f32, s: &str, size: f32, weight: i32, c: (u8, u8, u8, u8), max_w: f32) -> f32 {
+        let lh = self.line_h(size, weight);
+        let lines = self.wrapped_lines(s, size, weight, max_w);
         for (i, l) in lines.iter().enumerate() {
             self.text(x, y + i as f32 * lh, l, size, weight, c, 0.0);
         }
@@ -460,6 +477,10 @@ pub trait Content {
     }
     /// Paint everything; return the content height.
     fn draw(&mut self, ui: &mut Ui) -> f32;
+    /// Screen coordinates of the lower-left corner of the clicked control, for anchored menus.
+    fn click_at(&mut self, id: u32, fx: f32, _owner: HWND, _anchor: (i32, i32)) -> Cmd {
+        self.click(id, fx)
+    }
     fn click(&mut self, _id: u32, _fx: f32) -> Cmd {
         Cmd::None
     }
@@ -578,8 +599,9 @@ fn create_window(window: bool) -> HWND {
         };
         RegisterClassW(&wc);
         // a window panel (Settings) is a normal app window: in Alt+Tab, minimizable, not always on top
+        let settings_title = crate::shell::wide(crate::i18n::t("MacDock Settings"));
         let (ex, title) = if window {
-            (WS_EX_LAYERED | WS_EX_APPWINDOW, w!("MacDock Settings"))
+            (WS_EX_LAYERED | WS_EX_APPWINDOW, windows::core::PCWSTR(settings_title.as_ptr()))
         } else {
             (WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST, w!("MacDock Flyout"))
         };
@@ -796,7 +818,10 @@ impl Flyout {
                     }
                     if self.spot_at(p).is_some_and(|s| s.id == id) {
                         let s = self.spot_at(p).unwrap();
-                        cmd = self.content.click(id, Self::frac(&s, p));
+                        let (scale, ox, oy) = self.view;
+                        let anchor = (self.pos.0 + ((ox + s.x) * scale).round() as i32,
+                                      self.pos.1 + ((oy + s.y + s.h) * scale).round() as i32);
+                        cmd = self.content.click_at(id, Self::frac(&s, p), self.hwnd, anchor);
                     }
                 }
             }

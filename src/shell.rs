@@ -574,12 +574,15 @@ pub fn pick_icon_file(owner: HWND) -> Option<String> {
     use windows::Win32::UI::Shell::{FileOpenDialog, IFileOpenDialog, SIGDN_FILESYSPATH};
     unsafe {
         let d: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let images = wide(crate::i18n::t("Icons and images"));
+        let all = wide(crate::i18n::t("All files"));
+        let title = wide(crate::i18n::t("Choose an icon"));
         let types = [
-            COMDLG_FILTERSPEC { pszName: w!("Icons and images"), pszSpec: w!("*.png;*.ico;*.jpg;*.jpeg;*.bmp;*.exe;*.dll;*.lnk") },
-            COMDLG_FILTERSPEC { pszName: w!("All files"), pszSpec: w!("*.*") },
+            COMDLG_FILTERSPEC { pszName: PCWSTR(images.as_ptr()), pszSpec: w!("*.png;*.ico;*.jpg;*.jpeg;*.bmp;*.exe;*.dll;*.lnk") },
+            COMDLG_FILTERSPEC { pszName: PCWSTR(all.as_ptr()), pszSpec: w!("*.*") },
         ];
         d.SetFileTypes(&types).ok()?;
-        d.SetTitle(w!("Choose an icon")).ok()?;
+        d.SetTitle(PCWSTR(title.as_ptr())).ok()?;
         d.Show(owner).ok()?;
         let item = d.GetResult().ok()?;
         let p = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;

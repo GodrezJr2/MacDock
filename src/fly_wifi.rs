@@ -118,12 +118,12 @@ pub struct WifiFly {
 
 fn status_name(s: WiFiConnectionStatus) -> String {
     match s {
-        WiFiConnectionStatus::AccessRevoked => "AccessRevoked".into(),
-        WiFiConnectionStatus::InvalidCredential => "InvalidCredential".into(),
-        WiFiConnectionStatus::NetworkNotAvailable => "NetworkNotAvailable".into(),
-        WiFiConnectionStatus::Timeout => "Timeout".into(),
-        WiFiConnectionStatus::UnsupportedAuthenticationProtocol => "UnsupportedAuthenticationProtocol".into(),
-        _ => "UnspecifiedFailure".into(),
+        WiFiConnectionStatus::AccessRevoked => crate::i18n::t("AccessRevoked").into(),
+        WiFiConnectionStatus::InvalidCredential => crate::i18n::t("InvalidCredential").into(),
+        WiFiConnectionStatus::NetworkNotAvailable => crate::i18n::t("NetworkNotAvailable").into(),
+        WiFiConnectionStatus::Timeout => crate::i18n::t("Timeout").into(),
+        WiFiConnectionStatus::UnsupportedAuthenticationProtocol => crate::i18n::t("UnsupportedAuthenticationProtocol").into(),
+        _ => crate::i18n::t("UnspecifiedFailure").into(),
     }
 }
 
@@ -232,11 +232,11 @@ impl WifiFly {
     }
 
     fn join(&mut self, ssid: String, secured: bool, password: Option<String>) {
-        self.st.lock().unwrap().status = format!("Joining {ssid}…");
+        self.st.lock().unwrap().status = crate::i18n::fmt!("Joining {ssid}…", "正在连接 {ssid}…");
         self.run(move |st| {
             let Some(ad) = adapter() else { return };
             let Some(n) = find_net(&ad, &ssid) else {
-                st.lock().unwrap().status = format!("{ssid} is out of range.");
+                st.lock().unwrap().status = crate::i18n::fmt!("{ssid} is out of range.", "{ssid} 不在连接范围内。");
                 return;
             };
             let r = match &password {
@@ -259,7 +259,7 @@ impl WifiFly {
             }
             let mut s = st.lock().unwrap();
             if password.is_some() {
-                s.status = if status == WiFiConnectionStatus::InvalidCredential { "Wrong password.".into() } else { format!("Couldn't join ({}).", status_name(status)) };
+                s.status = if status == WiFiConnectionStatus::InvalidCredential { "Wrong password.".into() } else { crate::i18n::fmt!("Couldn't join ({}).", "无法连接（{}）。", status_name(status)) };
             } else if secured
                 && [WiFiConnectionStatus::InvalidCredential, WiFiConnectionStatus::UnspecifiedFailure, WiFiConnectionStatus::AccessRevoked].contains(&status)
             {
@@ -267,7 +267,7 @@ impl WifiFly {
                 s.status.clear();
                 s.expanded = Some(ssid.clone());
             } else {
-                s.status = format!("Couldn't join {ssid} ({}).", status_name(status));
+                s.status = crate::i18n::fmt!("Couldn't join {ssid} ({}).", "无法连接 {ssid}（{}）。", status_name(status));
             }
         });
     }
@@ -368,7 +368,7 @@ impl Content for WifiFly {
         ui.switch(ID_SWITCH, w - 4.0 - 36.0, 0.0, st.on);
         let mut y = 26.0;
         if !st.status.is_empty() {
-            y += ui.text_wrap(8.0, y, &st.status, 11.5, 400, white(0x80), w - 16.0) + 4.0;
+            y += ui.text_wrap(8.0, y, crate::i18n::t(&st.status), 11.5, 400, white(0x80), w - 16.0) + 4.0;
         }
         // the joined network
         if st.on {
@@ -381,7 +381,7 @@ impl Content for WifiFly {
         // other networks
         if st.on && !st.nets.is_empty() {
             y += 4.0;
-            ui.text(8.0, y, "Other Networks", 11.5, 600, white(0x80), 0.0);
+            ui.text(8.0, y, crate::i18n::t("Other Networks"), 11.5, 600, white(0x80), 0.0);
             y += ui.line_h(11.5, 600) + 2.0;
             let visible = (LIST_MAX / ROW_H) as usize;
             let mut shown = 0.0;
@@ -399,7 +399,7 @@ impl Content for WifiFly {
                     ui.outline(fx, fy, fw, 28.0, 6.0, 1.0, ACCENT4);
                     let dots: String = "•".repeat(self.password.chars().count());
                     let tw = if dots.is_empty() {
-                        ui.text_mid(fx + 8.0, fy + 14.0, "Password", 13.0, 400, white(0x60), fw - 16.0);
+                        ui.text_mid(fx + 8.0, fy + 14.0, crate::i18n::t("Password"), 13.0, 400, white(0x60), fw - 16.0);
                         0.0
                     } else {
                         ui.text_mid(fx + 8.0, fy + 14.0, &dots, 13.0, 400, white(0xF2), fw - 16.0)
@@ -408,8 +408,8 @@ impl Content for WifiFly {
                     let jx = w - 8.0 - 56.0;
                     let hov = ui.hit(ID_JOIN, jx, fy, 56.0, 28.0);
                     ui.fill(jx, fy, 56.0, 28.0, 6.0, if hov { (0x30, 0x98, 0xFF, 255) } else { ACCENT4 });
-                    let jw = ui.text_w("Join", 13.0, 500);
-                    ui.text_mid(jx + (56.0 - jw) / 2.0, fy + 14.0, "Join", 13.0, 500, white(255), 0.0);
+                    let jw = ui.text_w(crate::i18n::t("Join"), 13.0, 500);
+                    ui.text_mid(jx + (56.0 - jw) / 2.0, fy + 14.0, crate::i18n::t("Join"), 13.0, 500, white(255), 0.0);
                     y += 2.0 + 28.0 + 8.0;
                 }
             }
@@ -429,12 +429,12 @@ impl Content for WifiFly {
         ui.fill(8.0, y, w - 16.0, 1.0, 0.0, white(0x1A));
         y += 1.0 + 8.0;
         ui.row(ID_SETTINGS, 0.0, y, w, 30.0);
-        ui.text_mid(8.0, y + 15.0, "Wi-Fi Settings…", 13.0, 400, white(0xF2), 0.0);
+        ui.text_mid(8.0, y + 15.0, crate::i18n::t("Wi-Fi Settings…"), 13.0, 400, white(0xF2), 0.0);
         y + 30.0 - 3.0
     }
 }
 
-/// Bubble with bars, name (and "Connected"), lock on the right.
+/// Bubble with bars, name (and crate::i18n::t("Connected")), lock on the right.
 fn net_row(ui: &mut Ui, y: f32, w: f32, ssid: &str, bars: u8, secured: bool, connected: bool) {
     let cy = y + ROW_H / 2.0;
     ui.circle(8.0 + 13.0, cy, 13.0, if connected { ACCENT4 } else { white(0x26) });
@@ -445,7 +445,7 @@ fn net_row(ui: &mut Ui, y: f32, w: f32, ssid: &str, bars: u8, secured: bool, con
         let (h1, h2) = (ui.line_h(13.0, 600), ui.line_h(11.0, 400));
         let top = cy - (h1 + h2) / 2.0;
         ui.text(tx, top, ssid, 13.0, 600, white(0xF2), w - tx - right);
-        ui.text(tx, top + h1, "Connected", 11.0, 400, white(0x80), 0.0);
+        ui.text(tx, top + h1, crate::i18n::t("Connected"), 11.0, 400, white(0x80), 0.0);
     } else {
         ui.text_mid(tx, cy, ssid, 13.0, 400, white(0xF2), w - tx - right);
     }

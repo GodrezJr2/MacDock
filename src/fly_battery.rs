@@ -67,9 +67,9 @@ fn duration(hours: f64) -> String {
     let total = (hours * 60.0).round() as i64;
     let (h, m) = (total / 60, total % 60);
     if h > 0 {
-        format!("{h} h {m:02} min")
+        crate::i18n::fmt!("{h} h {m:02} min", "{h}小时{m:02}分钟")
     } else {
-        format!("{m} min")
+        crate::i18n::fmt!("{m} min", "{m}分钟")
     }
 }
 
@@ -79,17 +79,17 @@ fn time_line(s: &Sample) -> String {
         return String::new();
     }
     if r.charging && r.watts > 0.5 && r.full_mwh > r.capacity_mwh {
-        return duration((r.full_mwh - r.capacity_mwh) as f64 / 1000.0 / r.watts) + " until full";
+        return duration((r.full_mwh - r.capacity_mwh) as f64 / 1000.0 / r.watts) + crate::i18n::t(" until full");
     }
     if !r.on_ac && r.seconds_left > 0 {
-        return duration(r.seconds_left as f64 / 3600.0) + " remaining";
+        return duration(r.seconds_left as f64 / 3600.0) + crate::i18n::t(" remaining");
     }
     if r.charging {
-        "Charging…".into()
+        crate::i18n::t("Charging…").into()
     } else if r.on_ac {
-        if r.percent >= 95 { "Fully charged" } else { "Holding charge" }.into()
+        if r.percent >= 95 { crate::i18n::t("Fully charged") } else { crate::i18n::t("Holding charge") }.into()
     } else {
-        "Estimating…".into()
+        crate::i18n::t("Estimating…").into()
     }
 }
 
@@ -137,8 +137,9 @@ impl Content for BatteryFly {
             Some(r) if r.percent <= 20 => ("Low", AMBER),
             _ => ("On battery", GREY),
         };
-        ui.text_mid(0.0, 10.0, "Battery", 13.5, 600, white(0xF2), 0.0);
+        ui.text_mid(0.0, 10.0, crate::i18n::t("Battery"), 13.5, 600, white(0xF2), 0.0);
         if !status.is_empty() {
+            let status = crate::i18n::t(status);
             let tw = ui.text_w(status, 11.0, 600);
             let (cw, ch) = (tw + 16.0, 19.0);
             ui.fill(w - cw, 10.0 - ch / 2.0, cw, ch, 9.0, (tint.0, tint.1, tint.2, 0x26));
@@ -196,11 +197,11 @@ impl Content for BatteryFly {
             let x = i as f32 * (tile_w + 6.0);
             ui.fill(x, y, tile_w, tile_h, 10.0, white(0x10));
             let mut ty = y + 8.0;
-            ui.text(x + 10.0, ty, label, 11.0, 500, white(0x99), tile_w - 20.0);
+            ui.text(x + 10.0, ty, crate::i18n::t(label), 11.0, 500, white(0x99), tile_w - 20.0);
             ty += lab_h + 3.0;
             ui.text(x + 10.0, ty, value, 19.0, 600, *vc, tile_w - 16.0);
             ty += val_h;
-            ui.text(x + 10.0, ty, sub, 10.5, 400, white(0x80), tile_w - 20.0);
+            ui.text(x + 10.0, ty, crate::i18n::t(sub), 10.5, 400, white(0x80), tile_w - 20.0);
         }
         y += tile_h + 14.0;
 
@@ -231,10 +232,10 @@ impl Content for BatteryFly {
         let legend = match s {
             Some(s) => [
                 if s.cpu_w.is_none() { "CPU —".to_string() } else { format!("CPU {cpu:.0} W") },
-                if s.gpu_asleep { "GPU off".into() } else if s.gpu_w.is_none() { "GPU —".into() } else { format!("GPU {gpu:.0} W") },
-                format!("Rest {}{rest:.0} W", if s.total_measured { "" } else { "~" }),
+                if s.gpu_asleep { crate::i18n::t("GPU off").into() } else if s.gpu_w.is_none() { "GPU —".into() } else { format!("GPU {gpu:.0} W") },
+                crate::i18n::fmt!("Rest {}{rest:.0} W", "其他 {}{rest:.0} W", if s.total_measured { "" } else { "~" }),
             ],
-            None => ["CPU —".into(), "GPU —".into(), "Rest —".into()],
+            None => ["CPU —".into(), "GPU —".into(), crate::i18n::t("Rest —").into()],
         };
         let lh = ui.line_h(10.5, 400);
         let mut lx = 0.0;
@@ -253,10 +254,10 @@ impl Content for BatteryFly {
             if b.full_mwh > 0 {
                 let mut cap = format!("{:.1} / {:.1} Wh", b.capacity_mwh as f64 / 1000.0, b.full_mwh as f64 / 1000.0);
                 if b.wear() >= 0 {
-                    cap += &format!("  ·  {}% wear", b.wear());
+                    cap += &crate::i18n::fmt!("  ·  {}% wear", " · 损耗 {}%", b.wear());
                 }
                 if b.cycles > 0 {
-                    cap += &format!("  ·  {} cycles", b.cycles);
+                    cap += &crate::i18n::fmt!("  ·  {} cycles", " · 循环 {} 次", b.cycles);
                 }
                 ui.text(0.0, y, &cap, 11.5, 400, white(0x80), w);
                 y += ui.line_h(11.5, 400);
@@ -269,9 +270,9 @@ impl Content for BatteryFly {
                 "Estimated: CPU + GPU sensors plus a default for the rest. Run on battery with this open for a minute to calibrate."
             };
             y += 6.0;
-            y += ui.text_wrap(0.0, y, note, 10.5, 400, white(0x66), w);
+            y += ui.text_wrap(0.0, y, crate::i18n::t(note), 10.5, 400, white(0x66), w);
         } else {
-            y += ui.text(0.0, y, "Reading sensors…", 11.5, 400, white(0x80), 0.0).min(0.0) + ui.line_h(11.5, 400);
+            y += ui.text(0.0, y, crate::i18n::t("Reading sensors…"), 11.5, 400, white(0x80), 0.0).min(0.0) + ui.line_h(11.5, 400);
         }
         y
     }
