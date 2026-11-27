@@ -274,7 +274,7 @@ MacDock started as C# / WPF on .NET 10 and was rewritten in Rust (plain Win32, t
 Manager shows it; with 32 cores that number is small, so the brackets give the same load as a share of one core
 (on a 4-core laptop, Task Manager would show about 8 times the first number).
 
-| | C# / WPF | Rust 0.1 | Rust 0.4.2 | Rust 0.5.1 | Rust, next |
+| | C# / WPF | Rust 0.1 | Rust 0.4.2 | Rust 0.5.1 | Rust 0.5.2 |
 | --- | --- | --- | --- | --- | --- |
 | Private memory | 320-379 MB | 12.9 MB | 91.7 MB | 117 MB | 117 MB |
 | CPU idle | 0.04-0.6% (1-19% of a core) | 0% | 0.03% (1% of a core) | 0.05-0.09% (1.5-3% of a core) | 0.03-0.04% (0.9-1.2% of a core) |
@@ -282,8 +282,8 @@ Manager shows it; with 32 cores that number is small, so the brackets give the s
 | Threads | 21-26 | 11 | 38 | 27-28 | 28-29 |
 | On disk | 30 MB + .NET runtime | 1.1 MB exe | 1.66 MB exe | 1.79 MB exe | 1.81 MB exe |
 
-0.5.1 and "next" (the work on top of 0.5.1, in the changelog under Unreleased) were measured back to back on
-27 Nov 2026, two runs each, with the same apps open. "Next" no longer renders the whole desktop every 30 s to
+0.5.1 and 0.5.2 were measured back to back on
+27 Nov 2026, two runs each, with the same apps open. 0.5.2 no longer renders the whole desktop every 30 s to
 check the wallpaper, re-reads only recent AI usage logs between folder walks, and reads the network state off the
 dock's thread. The biggest change does not show in this table: in 0.5.1, any app in the background whose window
 title kept changing (a terminal with a spinner, such as Claude Code at work) bounced its dock icon without end,

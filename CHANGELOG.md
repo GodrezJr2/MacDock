@@ -6,6 +6,8 @@ Each release on GitHub uses its section from this file as its notes.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-27
+
 ### Fixed
 - A dock icon bounced whenever that app changed its window title in the background, as if it were asking for
   attention. A terminal with a spinner in its title (Claude Code, for one) bounced without end and kept the dock
@@ -226,7 +228,9 @@ First public release: a macOS-style dock (magnification, genie minimize and rest
 attention bounce, recent apps and a Downloads stack) and menu bar (battery, Wi-Fi, Control Center, tray icons and
 AI usage flyouts) for Windows 11, written in Rust.
 
-[Unreleased]: https://github.com/GodrezJr2/MacDock/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/GodrezJr2/MacDock/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/GodrezJr2/MacDock/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/GodrezJr2/MacDock/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/GodrezJr2/MacDock/compare/v0.4.5...v0.5.0
 [0.4.5]: https://github.com/GodrezJr2/MacDock/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/GodrezJr2/MacDock/compare/v0.4.3...v0.4.4
