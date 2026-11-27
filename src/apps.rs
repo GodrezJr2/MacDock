@@ -102,10 +102,10 @@ const PAD: (f32, f32) = (16.0, 12.0);
 const DEFAULT_H: f32 = 372.0;
 const COLS: usize = 5;
 const LABEL_SIZE: f32 = 14.0;
-const CHIP_SIZE: f32 = 12.0;
+const CHIP_SIZE: f32 = 14.0;
 const HEAD_LINE: f32 = 31.0;
 const CHIP_Y: f32 = 39.0;
-const CHIP_H: f32 = 25.0;
+const CHIP_H: f32 = 28.0;
 const GRID_Y: f32 = 76.0;
 const CELL_H: f32 = 88.0;
 const ICON: f32 = 46.0;
@@ -344,12 +344,12 @@ impl Apps {
         if self.query.is_empty() {
             // a category picked shows its name; the placeholder dims a little once it has the typing
             let a = if self.cat.is_some() { 0xF2 } else { (0xF2 as f32 - 0x40 as f32 * ease_out(self.focus_t)) as u8 };
-            ui.text_mid(tx, my, self.title(), 17.0, 400, self.ink(a), max);
+            ui.smooth_label_mid(tx, my, self.title(), 17.0, self.ink(a), Some(max));
             if caret_on {
                 ui.fill(tx - 1.5, my - 9.0, 1.5, 18.0, 0.0, caret);
             }
         } else {
-            let end = ui.text_mid(tx, my, &self.query, 17.0, 400, self.ink(0xF5), max);
+            let end = ui.smooth_label_mid(tx, my, &self.query, 17.0, self.ink(0xF5), Some(max));
             if caret_on {
                 ui.fill(tx + end.min(max) + 1.0, my - 9.0, 1.5, 18.0, 0.0, caret);
             }
@@ -367,7 +367,7 @@ impl Apps {
 
     fn draw_chips(&mut self, ui: &mut Ui) {
         let cw = ui.w;
-        let widths: Vec<f32> = self.cats.iter().map(|&c| ui.text_w(t(CATS[c].0), CHIP_SIZE, 400) + 16.0).collect();
+        let widths: Vec<f32> = self.cats.iter().map(|&c| ui.smooth_label_width(t(CATS[c].0), CHIP_SIZE) + 16.0).collect();
         let gap = 6.0;
         let total: f32 = widths.iter().sum::<f32>() + gap * (widths.len().saturating_sub(1)) as f32;
         self.chip_max = (total - cw).max(0.0);
@@ -388,7 +388,7 @@ impl Apps {
                 let pressed = ui.pressed == Some(id);
                 let bg = self.ink(if on { 0x52 } else if pressed { 0x33 } else if hov { 0x28 } else { 0x17 });
                 ui.fill(x, CHIP_Y, w, CHIP_H, 6.0, bg);
-                ui.text_mid(x + 8.0, CHIP_Y + CHIP_H / 2.0, t(CATS[c].0), CHIP_SIZE, 400, self.ink(if on { 0xFF } else { 0xD9 }), 0.0);
+                ui.smooth_label_mid(x + 8.0, CHIP_Y + CHIP_H / 2.0, t(CATS[c].0), CHIP_SIZE, self.ink(if on { 0xFF } else { 0xD9 }), None);
                 x += w + gap + extra;
             }
         });

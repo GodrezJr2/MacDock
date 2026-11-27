@@ -332,24 +332,40 @@ impl Ui<'_> {
 
     /// Rasterize small app labels at double resolution, then average each 2x2 block.
     pub fn app_label(&mut self, cx: f32, y: f32, label: &str, size: f32, color: (u8, u8, u8, u8), max_w: f32) {
+        self.smooth_label(label, size, color, Some(max_w), |w, _| (cx - w / 2.0, y));
+    }
+
+    pub fn smooth_label_width(&self, label: &str, size: f32) -> f32 {
+        gfx::measure(label, self.font(size * 2.0, 400, false)).0 as f32 / (2.0 * self.s)
+    }
+
+    pub fn smooth_label_mid(&mut self, x: f32, cy: f32, label: &str, size: f32, color: (u8, u8, u8, u8), max_w: Option<f32>) -> f32 {
+        self.smooth_label(label, size, color, max_w, |_, h| (x, cy - h / 2.0))
+    }
+
+    fn smooth_label(&mut self, label: &str, size: f32, color: (u8, u8, u8, u8), max_w: Option<f32>, position: impl FnOnce(f32, f32) -> (f32, f32)) -> f32 {
         let font = self.font(size * 2.0, 400, false);
-        let limit = (max_w * self.s * 2.0) as i32;
-        let mut text = label.to_owned();
-        if gfx::measure(&text, font).0 > limit {
-            loop {
-                text.pop();
-                let shortened = format!("{text}…");
-                if text.is_empty() || gfx::measure(&shortened, font).0 <= limit {
-                    text = shortened;
-                    break;
+        let mut text = std::borrow::Cow::Borrowed(label);
+        if let Some(max_w) = max_w {
+            let limit = (max_w * self.s * 2.0) as i32;
+            if gfx::measure(label, font).0 > limit {
+                if gfx::measure("…", font).0 > limit { return 0.0; }
+                let shortened = text.to_mut();
+                while shortened.pop().is_some() {
+                    shortened.push('…');
+                    if gfx::measure(shortened, font).0 <= limit { break; }
+                    shortened.pop();
                 }
             }
         }
-        let Some(img) = gfx::text_ex(&text, font, (color.0, color.1, color.2)) else { return };
-        let x = ((self.ox + cx) * self.s - (img.width() - 2) as f32 / 4.0).round();
+        let Some(img) = gfx::text_ex(&text, font, (color.0, color.1, color.2)) else { return 0.0 };
+        let width = (img.width() - 2) as f32 / (2.0 * self.s);
+        let (x, y) = position(width, img.height() as f32 / (2.0 * self.s));
+        let x = ((self.ox + x) * self.s).round();
         let y = ((self.oy + y) * self.s).round();
         let paint = PixmapPaint { opacity: color.3 as f32 / 255.0, quality: tiny_skia::FilterQuality::Bilinear, ..Default::default() };
         self.pm.draw_pixmap(0, 0, img.as_ref(), &paint, Transform::from_scale(0.5, 0.5).post_translate(x, y), None);
+        width
     }
 
     /// Text vertically centred on cy.
@@ -1264,6 +1280,20 @@ pub fn snapshot(content: &mut dyn Content, s: f32) -> (u32, u32, Vec<u8>) {
     (pw, ph, pm.data().to_vec())
 }
 
+
+#[cfg(test)]
+#[test]
+fn smooth_labels_measure_the_text_that_is_drawn() {
+    for s in [1.0, 1.25, 1.5, 2.0] {
+        let mut pm = Pixmap::new(500, 80).unwrap();
+        let mut spots = Vec::new();
+        let mut ui = Ui { pm: &mut pm, s, ox: 0.0, oy: 0.0, mouse: None, pressed: None, spots: &mut spots, w: 200.0, fs: s, still: true };
+        let chip = "开发工具";
+        assert_eq!(ui.smooth_label_mid(8.0, 14.0, chip, 14.0, white(255), None), ui.smooth_label_width(chip, 14.0));
+        let limit = ui.smooth_label_width("应用 A…", 17.0);
+        assert_eq!(ui.smooth_label_mid(0.0, 14.0, "应用 ABCDEFG", 17.0, white(255), Some(limit)), limit);
+    }
+}
 
 #[cfg(test)]
 mod glass_bench {
