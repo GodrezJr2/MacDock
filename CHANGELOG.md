@@ -12,7 +12,13 @@ Each release on GitHub uses its section from this file as its notes.
   redrawing every frame. Only a real taskbar flash bounces now, and a request that keeps flashing bounces a few
   times and stops, as on macOS.
 
+- Window fan cards looked soft and jagged: tilted cards now have smooth edges, and the window picture is
+  shrunk by averaging its pixels instead of skipping them, so text and detail stay sharp.
+
 ### Changed
+- The window fan and the menu bar panels (Control Center, Wi-Fi and the rest) animate once per screen refresh.
+  They ran on a 64 Hz timer, which skipped a few frames a second on a 60 Hz screen and used under half the frames
+  on a 144-165 Hz one.
 - Lighter when idle: the dock no longer renders the whole desktop every 30 seconds to see if the wallpaper changed
   (it checks the wallpaper files first), AI usage re-reads only recent logs between its once-a-minute folder walk,
   and the menu bar reads the network state on its own thread instead of the one that draws the dock.
