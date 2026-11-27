@@ -63,9 +63,9 @@ pub fn check() -> Result<Option<(String, String)>, String> {
         "Accept: application/vnd.github+json\r\nUser-Agent: MacDock\r\n",
     )?;
     if status != 200 {
-        return Err(format!("GitHub answered {status}"));
+        return Err(crate::i18n::fmt!("GitHub answered {status}", "GitHub 返回状态码 {status}"));
     }
-    let v: serde_json::Value = serde_json::from_str(&body).map_err(|_| "bad answer".to_string())?;
+    let v: serde_json::Value = serde_json::from_str(&body).map_err(|_| crate::i18n::t("bad answer").to_string())?;
     let tag = v["tag_name"].as_str().unwrap_or_default().to_string();
     let url = v["html_url"].as_str().map(str::to_string).unwrap_or_else(|| format!("https://github.com/{REPO}/releases/latest"));
     let found = newer(&tag, CURRENT).then(|| (tag.trim_start_matches(['v', 'V']).to_string(), url));
@@ -97,32 +97,32 @@ pub fn install(version: &str) -> Result<(), String> {
     let base = format!("/{REPO}/releases/download/{tag}");
     let (st, bin) = crate::claude_oauth::get_bytes("github.com", &format!("{base}/macdock.exe"), UA, 64 << 20)?;
     if st != 200 {
-        return Err(format!("GitHub answered {st} for macdock.exe"));
+        return Err(crate::i18n::fmt!("GitHub answered {st} for macdock.exe", "下载 macdock.exe 时 GitHub 返回状态码 {st}"));
     }
     let (st, sum) = crate::claude_oauth::get_bytes("github.com", &format!("{base}/macdock.exe.sha256"), UA, 4096)?;
     if st != 200 {
-        return Err(format!("GitHub answered {st} for macdock.exe.sha256"));
+        return Err(crate::i18n::fmt!("GitHub answered {st} for macdock.exe.sha256", "下载 macdock.exe.sha256 时 GitHub 返回状态码 {st}"));
     }
     let want = String::from_utf8_lossy(&sum).split_whitespace().next().unwrap_or_default().to_ascii_lowercase();
     if want.len() != 64 || hex(&sha256(&bin)) != want {
-        return Err("the download does not match its checksum".into());
+        return Err(crate::i18n::t("the download does not match its checksum").into());
     }
     if bin.len() < 64 * 1024 || !bin.starts_with(b"MZ") {
-        return Err("the download is not a program".into());
+        return Err(crate::i18n::t("the download is not a program").into());
     }
     let (new, old) = (beside(&exe, ".update-new"), beside(&exe, ".update-old"));
-    std::fs::write(&new, &bin).map_err(|e| format!("could not write next to macdock.exe ({e})"))?;
+    std::fs::write(&new, &bin).map_err(|e| crate::i18n::fmt!("could not write next to macdock.exe ({e})", "无法写入 macdock.exe 所在目录（{e}）"))?;
     let _ = std::fs::remove_file(&old);
     if let Err(e) = std::fs::rename(&exe, &old) {
         let _ = std::fs::remove_file(&new);
-        return Err(format!("could not move the running macdock.exe aside ({e})"));
+        return Err(crate::i18n::fmt!("could not move the running macdock.exe aside ({e})", "无法备份当前的 macdock.exe（{e}）"));
     }
     if let Err(e) = std::fs::rename(&new, &exe) {
         let back = std::fs::rename(&old, &exe);
         let _ = std::fs::remove_file(&new);
         return Err(match back {
-            Ok(()) => format!("could not put the new macdock.exe in place ({e})"),
-            Err(b) => format!("could not put the new macdock.exe in place ({e}), nor the old one back ({b}): rename {} to macdock.exe", old.display()),
+            Ok(()) => crate::i18n::fmt!("could not put the new macdock.exe in place ({e})", "无法替换 macdock.exe（{e}）"),
+            Err(b) => crate::i18n::fmt!("could not put the new macdock.exe in place ({e}), nor the old one back ({b}): rename {} to macdock.exe", "替换 macdock.exe 失败（{e}），恢复旧版也失败（{b}）。请将 {} 重命名为 macdock.exe", old.display()),
         });
     }
     Ok(())

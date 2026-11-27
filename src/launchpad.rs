@@ -28,6 +28,21 @@ pub(crate) struct App {
     pub(crate) icon: Option<Arc<Pixmap>>,
 }
 
+impl App {
+    pub(crate) fn search_rank(&self, query: &str) -> Option<u8> {
+        let original = rank(&self.name.to_lowercase(), query);
+        if self.spec == "macdock:settings" {
+            original.into_iter().chain(rank(&self.display_name().to_lowercase(), query)).min()
+        } else {
+            original
+        }
+    }
+
+    pub(crate) fn display_name(&self) -> &str {
+        if self.spec == "macdock:settings" { t("MacDock Settings") } else { &self.name }
+    }
+}
+
 pub(crate) static CATALOG: Mutex<Vec<App>> = Mutex::new(Vec::new());
 static LOADING: AtomicBool = AtomicBool::new(false);
 /// the open panel's window, which the worker tells about new data (0 = none)
@@ -245,7 +260,7 @@ impl Launchpad {
                 .apps
                 .iter()
                 .enumerate()
-                .filter_map(|(i, a)| rank(&a.name.to_lowercase(), &q).map(|r| (r, i)))
+                .filter_map(|(i, a)| a.search_rank(&q).map(|r| (r, i)))
                 .collect();
             hits.sort();
             self.shown = hits.into_iter().map(|h| h.1).collect();
@@ -417,10 +432,10 @@ impl Launchpad {
                 ui.fill(ix + icon * 0.06, iy + icon * 0.06, icon * 0.88, icon * 0.88, icon * 0.22, (0, 0, 0, 0x55));
             }
             let max = cell_w - 12.0;
-            let tw = ui.text_w(&a.name, 12.5, 500).min(max);
+            let tw = ui.text_w(a.display_name(), 12.5, 500).min(max);
             let (tx, ty) = (x + (cell_w - tw) / 2.0, iy + icon + 8.0);
-            ui.text(tx, ty + 1.0, &a.name, 12.5, 500, (0, 0, 0, 0x70), max); // shadow keeps it readable on bright wallpapers
-            ui.text(tx, ty, &a.name, 12.5, 500, white(0xF2), max);
+            ui.text(tx, ty + 1.0, a.display_name(), 12.5, 500, (0, 0, 0, 0x70), max); // shadow keeps it readable on bright wallpapers
+            ui.text(tx, ty, a.display_name(), 12.5, 500, white(0xF2), max);
         }
     }
 }

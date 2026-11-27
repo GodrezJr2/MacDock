@@ -280,7 +280,7 @@ fn make_card(pic: Option<Pixmap>, icon: Option<&Pixmap>, title: &str, s: f32) ->
         let p = Paint { shader, anti_alias: false, ..Default::default() };
         pm.fill_rect(rect, &p, Transform::identity(), None);
     }
-    let font = Font { face: gfx::UI, px: (12.5 * s).round() as i32, weight: 600 };
+    let font = Font { face: gfx::ui_face(), px: (12.5 * s).round() as i32, weight: 600 };
     let title = fit(title.trim(), font, cw - 24.0 * s);
     if let Some(t) = gfx::text_ex(&title, font, (255, 255, 255)) {
         let x = ((cw - t.width() as f32) / 2.0).round() as i32;

@@ -14,7 +14,7 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::Graphics::Imaging::*;
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetClassNameW, GetWindowRect, IsWindowVisible, SystemParametersInfoW, UpdateLayeredWindow, SPI_GETDESKWALLPAPER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ULW_ALPHA,
+    DrawIconEx, HICON, DI_NORMAL, EnumWindows, GetClassNameW, GetWindowRect, IsWindowVisible, SystemParametersInfoW, UpdateLayeredWindow, SPI_GETDESKWALLPAPER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ULW_ALPHA,
 };
 
 use crate::shell::wide;
@@ -348,13 +348,54 @@ pub struct Font {
     pub weight: i32,
 }
 
-pub const UI: &str = "Segoe UI Variable Text";
-pub const ICONS: &str = "Segoe Fluent Icons";
+const UI: &str = "Segoe UI Variable Text";
+static INTERFACE_FACE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// White text as a premultiplied mask (Segoe UI Variable, grayscale antialiasing), `px` tall.
-pub fn text(s: &str, px: i32) -> Option<Pixmap> {
-    text_ex(s, Font { face: UI, px, weight: 400 }, (255, 255, 255))
+pub fn interface_fonts() -> &'static [String] {
+    static FAMILIES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    FAMILIES.get_or_init(|| {
+        unsafe extern "system" fn collect(font: *const LOGFONTW, _: *const TEXTMETRICW, _: u32, data: LPARAM) -> i32 {
+            let face = &(*font).lfFaceName;
+            let end = face.iter().position(|&c| c == 0).unwrap_or(face.len());
+            let name = String::from_utf16_lossy(&face[..end]);
+            if !name.is_empty() && !name.starts_with('@') {
+                (*(data.0 as *mut Vec<String>)).push(name);
+            }
+            1
+        }
+        let mut fonts = Vec::<String>::new();
+        unsafe {
+            let dc = GetDC(HWND::default());
+            if !dc.0.is_null() {
+                let query = LOGFONTW { lfCharSet: DEFAULT_CHARSET, ..Default::default() };
+                EnumFontFamiliesExW(dc, &query, Some(collect), LPARAM((&mut fonts as *mut Vec<String>) as isize), 0);
+                ReleaseDC(HWND::default(), dc);
+            }
+        }
+        fonts.sort_unstable();
+        fonts.dedup();
+        fonts.insert(0, "auto".into());
+        fonts
+    })
 }
+
+pub fn interface_font_index(face: &str) -> usize {
+    interface_fonts().iter().position(|name| name == face).unwrap_or(0)
+}
+
+pub fn set_interface_font(face: &str) {
+    let index = if face == "auto" { 0 } else { interface_font_index(face) };
+    INTERFACE_FACE.store(index, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn ui_face() -> &'static str {
+    match INTERFACE_FACE.load(std::sync::atomic::Ordering::Relaxed) {
+        0 if crate::i18n::lang() == crate::i18n::Lang::ZhCn => "Microsoft YaHei UI",
+        0 => UI,
+        i => &interface_fonts()[i],
+    }
+}
+pub const ICONS: &str = "Segoe Fluent Icons";
 
 /// Measure text in pixels without rasterizing it.
 /// Text is drawn and measured over and over with the same strings (every frame of an animation, every
@@ -365,7 +406,7 @@ const TEXT_PIX_MAX: usize = 400;
 
 thread_local! {
     static MEASURED: std::cell::RefCell<std::collections::HashMap<(String, Font), (i32, i32)>> = Default::default();
-    static RENDERED: std::cell::RefCell<std::collections::HashMap<(String, Font, (u8, u8, u8)), Option<Pixmap>>> = Default::default();
+    static RENDERED: std::cell::RefCell<std::collections::HashMap<(String, Font, (u8, u8, u8), bool), Option<Pixmap>>> = Default::default();
 }
 
 pub fn measure(s: &str, f: Font) -> (i32, i32) {
@@ -411,14 +452,35 @@ unsafe fn make_font(f: Font) -> HFONT {
 
 /// Text in a colour (r, g, b) as a premultiplied BGRA pixmap, sized to the text's cell.
 pub fn text_ex(s: &str, f: Font, rgb: (u8, u8, u8)) -> Option<Pixmap> {
+    cached_text(s, f, rgb, false)
+}
+
+/// Render white interface text at twice the target pixel size and cache the filtered result.
+pub fn smooth_text(s: &str, f: Font) -> Option<Pixmap> {
+    cached_text(s, f, (255, 255, 255), true)
+}
+
+pub fn smooth_text_width(s: &str, f: Font) -> f64 {
+    f64::from(measure(s, Font { px: f.px * 2, ..f }).0) / 2.0
+}
+
+fn cached_text(s: &str, f: Font, rgb: (u8, u8, u8), smooth: bool) -> Option<Pixmap> {
     if s.is_empty() {
         return None;
     }
-    let key = (s.to_string(), f, rgb);
+    let key = (s.to_string(), f, rgb, smooth);
     if let Some(v) = RENDERED.with(|m| m.borrow().get(&key).cloned()) {
         return v;
     }
-    let v = text_gdi(s, f, rgb);
+    let v = if smooth {
+        let mask = text_gdi(s, Font { px: f.px * 2, ..f }, rgb)?;
+        let mut out = Pixmap::new(mask.width().div_ceil(2), mask.height().div_ceil(2))?;
+        let paint = tiny_skia::PixmapPaint { quality: tiny_skia::FilterQuality::Bilinear, ..Default::default() };
+        out.draw_pixmap(0, 0, mask.as_ref(), &paint, tiny_skia::Transform::from_scale(0.5, 0.5), None);
+        Some(out)
+    } else {
+        text_gdi(s, f, rgb)
+    };
     RENDERED.with(|m| {
         let mut m = m.borrow_mut();
         if m.len() > TEXT_PIX_MAX {
@@ -812,7 +874,22 @@ pub fn image_bytes(bytes: &[u8], max_px: u32) -> Option<Pixmap> {
 
 unsafe fn decode(f: &IWICImagingFactory, dec: &IWICBitmapDecoder, max_px: u32) -> Option<Pixmap> {
     {
-        let frame = dec.GetFrame(0).ok()?;
+        let mut frame = dec.GetFrame(0).ok()?;
+        if dec.GetContainerFormat().ok() == Some(GUID_ContainerFormatIco) {
+            // ICO frames are alternative sizes; other multi-frame images keep their first frame.
+            let rank = |edge: u32| (edge < max_px, edge.abs_diff(max_px));
+            let mut best = None;
+            for i in 0..dec.GetFrameCount().unwrap_or(0) {
+                let Ok(candidate) = dec.GetFrame(i) else { continue };
+                let (mut w, mut h) = (0, 0);
+                if candidate.GetSize(&mut w, &mut h).is_err() || w == 0 || h == 0 { continue; }
+                let score = rank(w.max(h));
+                if best.is_none_or(|old| score < old) {
+                    best = Some(score);
+                    frame = candidate;
+                }
+            }
+        }
         let (mut w, mut h) = (0u32, 0u32);
         frame.GetSize(&mut w, &mut h).ok()?;
         if w == 0 || h == 0 {
@@ -828,6 +905,69 @@ unsafe fn decode(f: &IWICImagingFactory, dec: &IWICBitmapDecoder, max_px: u32) -
         cv.CopyPixels(std::ptr::null(), dw * 4, &mut v).ok()?;
         Pixmap::from_vec(v, IntSize::from_wh(dw, dh)?)
     }
+}
+
+#[cfg(test)]
+#[test]
+fn ico_selects_the_smallest_sufficient_frame_or_the_largest_available() {
+    unsafe { let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED); }
+    // Each frame has a distinct colour so simply resizing the first frame cannot pass.
+    let ico = include_bytes!("../tests/fixtures/icon-sizes.ico");
+    for (request, size, bgra) in [
+        (16, 16, [0, 0, 255, 255]), (48, 48, [0, 128, 0, 255]),
+        (91, 91, [255, 0, 0, 255]), (256, 128, [255, 0, 0, 255]),
+    ] {
+        let pm = image_bytes(ico, request).unwrap();
+        assert_eq!((pm.width(), pm.height()), (size, size));
+        assert_eq!(&pm.data()[..4], &bgra);
+    }
+}
+
+/// An HICON as premultiplied BGRA: drawn on black and on white, alpha from the difference (works for 32-bit
+/// icons and for old masked ones alike).
+pub fn icon_pixmap(h: HICON, px: u32) -> Option<Pixmap> {
+    if h.0.is_null() || px == 0 {
+        return None;
+    }
+    let draw = |bg: u8| -> Option<Vec<u8>> {
+        unsafe {
+            let dc = CreateCompatibleDC(HDC::default());
+            let bmi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: px as i32, biHeight: -(px as i32), biPlanes: 1,
+                    biBitCount: 32, biCompression: BI_RGB.0, ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut bits = std::ptr::null_mut();
+            if dc.0.is_null() { return None; }
+            let Ok(bmp) = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0) else {
+                let _ = DeleteDC(dc);
+                return None;
+            };
+            let old = SelectObject(dc, bmp);
+            std::ptr::write_bytes(bits as *mut u8, bg, (px * px * 4) as usize);
+            let ok = DrawIconEx(dc, 0, 0, h, px as i32, px as i32, 0, HBRUSH::default(), DI_NORMAL).is_ok();
+            let _ = GdiFlush();
+            let v = std::slice::from_raw_parts(bits as *const u8, (px * px * 4) as usize).to_vec();
+            SelectObject(dc, old);
+            let _ = DeleteObject(bmp);
+            let _ = DeleteDC(dc);
+            ok.then_some(v)
+        }
+    };
+    let (b, wh) = (draw(0)?, draw(255)?);
+    let mut out = vec![0u8; b.len()];
+    for i in (0..b.len()).step_by(4) {
+        // on black: c·a ; on white: c·a + (1 - a)·255  →  a = 255 - (white - black)
+        let d = (0..3).map(|k| wh[i + k] as i32 - b[i + k] as i32).max().unwrap_or(0);
+        let a = (255 - d).clamp(0, 255) as u8;
+        for k in 0..3 {
+            out[i + k] = b[i + k].min(a);
+        }
+        out[i + 3] = a;
+    }
+    Pixmap::from_vec(out, IntSize::from_wh(px, px)?)
 }
 
 /// Write opaque BGRA pixels as a PNG with WIC. Callable from any thread (initializes COM for it).
@@ -1053,4 +1193,22 @@ pub fn d3d() -> Option<(windows::Win32::Graphics::Direct3D11::ID3D11Device, wind
         }
         c.clone()
     })
+}
+
+#[cfg(test)]
+mod smooth_text_tests {
+    use super::*;
+
+    #[test]
+    fn measured_menu_width_matches_filtered_glyphs() {
+        for px in [14, 18, 21, 28] {
+            for label in ["编辑", "Microsoft Edge", "Ctrl+Shift+S"] {
+                let font = Font { face: "Microsoft YaHei UI", px, weight: 400 };
+                let img = smooth_text(label, font).unwrap();
+                // The GDI bitmap includes two padding pixels before downsampling.
+                assert_eq!(img.width(), smooth_text_width(label, font).ceil() as u32 + 1);
+                assert!(img.data().chunks_exact(4).any(|p| p[3] > 0 && p[3] < 255));
+            }
+        }
+    }
 }

@@ -19,12 +19,12 @@ use windows::Win32::UI::Shell::{ABE_TOP, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::gfx::{self, Font, Surface};
-use crate::menu::{self, Anchor, Entry};
+use crate::menu::{self, Entry};
 use crate::shell::{self, Shell};
 use crate::{push, Ev};
 
 const H: f64 = 30.0;
-const FONT_PX: f64 = 13.5;
+const FONT_PX: f64 = 14.0;
 const GLYPH_PX: f64 = 15.0;
 const PAD_X: f64 = 9.0; // inside each button
 const GAP: f64 = 1.0; // between buttons
@@ -220,6 +220,10 @@ fn clock_text() -> String {
     const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     let t = unsafe { GetLocalTime() };
+    if crate::i18n::lang() == crate::i18n::Lang::ZhCn {
+        let day = ["日", "一", "二", "三", "四", "五", "六"][t.wDayOfWeek as usize % 7];
+        return format!("{}月{}日 周{day}   {:02}:{:02}", t.wMonth, t.wDay, t.wHour, t.wMinute);
+    }
     format!(
         "{} {} {}   {:02}:{:02}",
         DAYS[t.wDayOfWeek as usize % 7], t.wDay, MONTHS[(t.wMonth as usize + 11) % 12], t.wHour, t.wMinute
@@ -553,7 +557,7 @@ impl MenuBar {
         let r = s.rate5();
         let pct = s.worst_pct();
         let label = if r > 0.0 {
-            format!("{}/s", crate::ai_usage::compact(r))
+            crate::i18n::fmt!("{}/s", "{}/秒", crate::ai_usage::compact(r))
         } else {
             pct.map(|p| format!("{p:.0}%")).unwrap_or_default()
         };
@@ -724,10 +728,37 @@ impl MenuBar {
 
     // -------------------------------------------------------------- menus
 
-    fn show_menu(&mut self, i: usize) -> Option<BarAct> {
-        let item = self.slots[i].item;
-        let app = self.app_name.clone();
-        let (entries, acts): (Vec<Entry>, Vec<Do>) = match item {
+    fn show_menu(&mut self, mut i: usize) -> Option<BarAct> {
+        loop {
+            let (entries, acts) = self.menu_entries(self.slots[i].item);
+            self.open = Some(i);
+            self.dirty = true;
+            self.render();
+            let result = menu::bar_popup(self.hwnd, &entries, self.px(self.slots[i].x), self.px(H) + 1, self.dpi);
+            self.open = None;
+            self.hover = None;
+            self.dirty = true;
+            if let menu::MenuResult::BarClick(x) = result {
+                if let Some(next) = self.slot_at(x).filter(|&next| next != i) {
+                    if matches!(self.slots[next].item, Item::Logo | Item::App | Item::Menu(_)) {
+                        i = next;
+                        continue;
+                    }
+                    self.render();
+                    return self.click(next);
+                }
+            }
+            self.render();
+            return match result {
+                menu::MenuResult::Chosen(row) => self.run(acts.into_iter().nth(row)?),
+                _ => None,
+            };
+        }
+    }
+
+    fn menu_entries(&self, item: Item) -> (Vec<Entry>, Vec<Do>) {
+        let app = self.display_app_name().to_string();
+        match item {
             Item::Logo => self.system_menu(),
             Item::App => split(vec![
                 (Entry::item(crate::i18n::fill("Hide {}", &app)), Do::HideApp),
@@ -779,19 +810,8 @@ impl MenuBar {
                 (Entry::item(crate::i18n::fill("{} Help", &app)).gesture("F1"), Do::Keys(&[0x70])),
                 (Entry::item("Windows Tips"), Do::Launch("ms-get-started:")),
             ]),
-            _ => return None,
-        };
-        self.open = Some(i);
-        self.dirty = true;
-        self.render();
-        let s = &self.slots[i];
-        let chosen = menu::popup(self.hwnd, &entries, Anchor::Below(self.px(s.x), self.px(H) + 1), self.dpi);
-        crate::ensure_no_activate(self.hwnd);
-        self.open = None;
-        self.hover = None;
-        self.dirty = true;
-        self.render();
-        self.run(acts.into_iter().nth(chosen?)?)
+            _ => unreachable!("only menu titles have entries"),
+        }
     }
 
     fn system_menu(&self) -> (Vec<Entry>, Vec<Do>) {
@@ -876,12 +896,12 @@ impl MenuBar {
                 let _ = SetSuspendState(false, false, false);
             },
             Do::Restart => {
-                if confirm(self.hwnd, "Restart now?") {
+                if confirm(self.hwnd, crate::i18n::t("Restart now?")) {
                     shell::run_hidden("shutdown.exe", "/r /t 0");
                 }
             }
             Do::ShutDown => {
-                if confirm(self.hwnd, "Shut down now?") {
+                if confirm(self.hwnd, crate::i18n::t("Shut down now?")) {
                     shell::run_hidden("shutdown.exe", "/s /t 0");
                 }
             }
@@ -918,8 +938,8 @@ impl MenuBar {
                         self.update = true;
                         return self.offer_update(&v, &url);
                     }
-                    Ok(None) => inform(self.hwnd, &format!("MacDock {cur} is the latest version.")),
-                    Err(e) => inform(self.hwnd, &format!("Could not check for updates: {e}.")),
+                    Ok(None) => inform(self.hwnd, &crate::i18n::fmt!("MacDock {cur} is the latest version.", "MacDock {cur} 已是最新版本。")),
+                    Err(e) => inform(self.hwnd, &crate::i18n::fmt!("Could not check for updates: {e}.", "检查更新失败：{e}。")),
                 }
                 self.update = crate::update::available().is_some();
                 self.dirty = true;
@@ -933,12 +953,17 @@ impl MenuBar {
     /// "Install and restart" (the exe is swapped in place, see update::install), or the release page.
     fn offer_update(&mut self, v: &str, url: &str) -> Option<BarAct> {
         let cur = crate::update::CURRENT;
-        let q = format!("MacDock {v} is available (you have {cur}).
+        let q = crate::i18n::fmt!("MacDock {v} is available (you have {cur}).
 
 Install it now? MacDock downloads it, checks it and restarts.
 
 Yes: install and restart
-No: open the release page");
+No: open the release page", "发现新版本 MacDock {v}，当前版本为 {cur}。
+
+是否立即安装？MacDock 将下载并校验更新，然后重新启动。
+
+是：安装并重启
+否：打开发布页面");
         let t = shell::wide(&q);
         let answer = unsafe { MessageBoxW(self.hwnd, windows::core::PCWSTR(t.as_ptr()), w!("MacDock"), MB_YESNOCANCEL | MB_ICONQUESTION | MB_TOPMOST) };
         if answer == IDNO {
@@ -966,9 +991,11 @@ No: open the release page");
         match crate::update::take_install()? {
             Ok(_) => Some(BarAct::Restart),
             Err((v, url, e)) => {
-                if confirm(self.hwnd, &format!("Could not install MacDock {v}: {e}.
+                if confirm(self.hwnd, &crate::i18n::fmt!("Could not install MacDock {v}: {e}.
 
-Open the release page to update by hand?")) {
+Open the release page to update by hand?", "安装 MacDock {v} 失败：{e}。
+
+是否打开发布页面手动更新？")) {
                     shell::launch(&url);
                 }
                 None
@@ -978,8 +1005,12 @@ Open the release page to update by hand?")) {
 
     // -------------------------------------------------------------- layout and drawing
 
+    fn display_app_name(&self) -> &str {
+        if self.app_name == "File Explorer" { crate::i18n::t("File Explorer") } else { &self.app_name }
+    }
+
     fn font(&self, weight: i32) -> Font {
-        Font { face: gfx::UI, px: (FONT_PX * self.dpi).round() as i32, weight }
+        Font { face: gfx::ui_face(), px: (FONT_PX * self.dpi).round() as i32, weight }
     }
 
     fn glyph_font(&self, px: f64) -> Font {
@@ -987,7 +1018,7 @@ Open the release page to update by hand?")) {
     }
 
     fn text_w(&self, s: &str, f: Font) -> f64 {
-        gfx::measure(s, f).0 as f64 / self.dpi
+        gfx::smooth_text_width(s, f) / self.dpi
     }
 
     fn battery_text(&self) -> String {
@@ -1002,8 +1033,8 @@ Open the release page to update by hand?")) {
     fn content_w(&self, it: Item) -> f64 {
         match it {
             Item::Logo => 13.0,
-            Item::App => self.text_w(&self.app_name, self.font(700)),
-            Item::Menu(m) => self.text_w(crate::i18n::t(m), self.font(500)),
+            Item::App => self.text_w(self.display_app_name(), self.font(600)),
+            Item::Menu(m) => self.text_w(crate::i18n::t(m), self.font(400)),
             Item::Chevron => self.text_w("\u{E70E}", self.glyph_font(11.0)),
             Item::Ai => 14.0 + if self.ai_label.is_empty() { 0.0 } else { 5.0 + self.text_w(&self.ai_label, self.font(400)) },
             Item::Battery => {
@@ -1092,8 +1123,8 @@ Open the release page to update by hand?")) {
                         }
                     }
                 }
-                Item::App => self.draw_text(&mut content, &self.app_name, self.font(700), cx, mid),
-                Item::Menu(m) => self.draw_text(&mut content, crate::i18n::t(m), self.font(500), cx, mid),
+                Item::App => self.draw_text(&mut content, self.display_app_name(), self.font(600), cx, mid),
+                Item::Menu(m) => self.draw_text(&mut content, crate::i18n::t(m), self.font(400), cx, mid),
                 Item::Chevron => self.draw_text(&mut content, "\u{E70E}", self.glyph_font(11.0), cx, mid),
                 Item::Ai => {
                     draw_ai_ring(&mut content, cx + 7.0 * dpi, mid, 6.0 * dpi, dpi, self.ai_pct, self.ai_label.ends_with("/s"));
@@ -1161,7 +1192,7 @@ Open the release page to update by hand?")) {
     }
 
     fn draw_text(&self, pm: &mut Pixmap, s: &str, f: Font, x: f32, mid: f32) {
-        if let Some(t) = gfx::text_ex(s, f, (255, 255, 255)) {
+        if let Some(t) = gfx::smooth_text(s, f) {
             let y = (mid - t.height() as f32 / 2.0).round() as i32;
             pm.draw_pixmap(x.round() as i32, y, t.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
         }

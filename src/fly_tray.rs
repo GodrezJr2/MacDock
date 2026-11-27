@@ -35,7 +35,7 @@ impl TrayFly {
     fn with_icon(&self, id: u32, f: impl FnOnce(&tray::Icon)) {
         let Some(&(h, u)) = self.shown.get(id.wrapping_sub(ID_ICON) as usize) else { return };
         tray::with_icons(|icons| {
-            if let Some(ic) = icons.and_then(|v| v.iter().find(|i| i.hwnd == h && i.uid == u)) {
+            if let Some(ic) = icons.and_then(|v| v.iter().find(|i| i.hwnd == h && i.uid == u && i.active())) {
                 f(ic);
             }
         });
@@ -67,7 +67,8 @@ impl Content for TrayFly {
         let w = ui.w;
         let mut shown = Vec::new();
         let h = tray::with_icons(|icons| {
-            let visible: Vec<&tray::Icon> = icons.map(|v| v.iter().filter(|i| i.image.is_some() && !i.hidden).collect()).unwrap_or_default();
+            let now = Instant::now();
+            let visible: Vec<&tray::Icon> = icons.map(|v| v.iter().filter(|i| i.visible(now)).collect()).unwrap_or_default();
             let n = visible.len();
             // header: the hovered icon's tooltip, else the title; count on the right
             let hot_tip = self.hot.and_then(|id| visible.get(id.wrapping_sub(ID_ICON) as usize)).map(|i| match i.tip.lines().next().map(str::trim).filter(|t| !t.is_empty()) { Some(t) => t.to_string(), None => i.name.clone() }).filter(|t| !t.is_empty());
@@ -75,16 +76,16 @@ impl Content for TrayFly {
                 let cw = ui.text_w(&n.to_string(), 11.5, 400);
                 ui.text_mid(w - 2.0 - cw, 9.0, &n.to_string(), 11.5, 400, white(0x80), cw + 2.0);
             }
-            let title = hot_tip.unwrap_or_else(|| "Background apps".into());
+            let title = hot_tip.unwrap_or_else(|| crate::i18n::t("Background apps").into());
             ui.text_mid(2.0, 9.0, &title, 13.0, 600, white(0xF2), w - 34.0);
             let mut y = 22.0;
             if n == 0 {
                 let msg = if !self.hosted {
-                    "The notification area could not be hosted."
+                    crate::i18n::t("The notification area could not be hosted.")
                 } else if self.opened.elapsed().as_secs_f32() < 1.4 {
-                    "Loading…"
+                    crate::i18n::t("Loading…")
                 } else {
-                    "Nothing running in the background."
+                    crate::i18n::t("Nothing running in the background.")
                 };
                 y += 6.0;
                 let lh = ui.text_wrap(4.0, y, msg, 12.0, 400, white(0x80), w - 8.0);

@@ -29,7 +29,7 @@ const PANEL_OUT_MS: u64 = 140;
 /// a glass window (the Apps window): springs up from 90% as it fades in
 const GLASS_IN_MS: f32 = 420.0;
 /// the glass window's corners
-const GLASS_R: f32 = 26.0;
+pub(crate) const GLASS_R: f32 = 26.0;
 
 /// false while Reduce motion is on: panels appear and go at once.
 static MOTION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -309,7 +309,7 @@ impl Ui<'_> {
     }
 
     fn font(&self, size: f32, weight: i32, icons: bool) -> Font {
-        Font { face: if icons { gfx::ICONS } else { gfx::UI }, px: (size * self.fs).round() as i32, weight }
+        Font { face: if icons { gfx::ICONS } else { gfx::ui_face() }, px: (size * self.fs).round() as i32, weight }
     }
 
     pub fn text_w(&self, s: &str, size: f32, weight: i32) -> f32 {
@@ -327,6 +327,44 @@ impl Ui<'_> {
             s.push('…');
         }
         self.draw_text(x, y, &s, f, c)
+    }
+
+    /// Rasterize small app labels at double resolution, then average each 2x2 block.
+    pub fn app_label(&mut self, cx: f32, y: f32, label: &str, size: f32, color: (u8, u8, u8, u8), max_w: f32) {
+        self.smooth_label(label, size, color, Some(max_w), |w, _| (cx - w / 2.0, y));
+    }
+
+    pub fn smooth_label_width(&self, label: &str, size: f32) -> f32 {
+        gfx::measure(label, self.font(size * 2.0, 400, false)).0 as f32 / (2.0 * self.s)
+    }
+
+    pub fn smooth_label_mid(&mut self, x: f32, cy: f32, label: &str, size: f32, color: (u8, u8, u8, u8), max_w: Option<f32>) -> f32 {
+        self.smooth_label(label, size, color, max_w, |_, h| (x, cy - h / 2.0))
+    }
+
+    fn smooth_label(&mut self, label: &str, size: f32, color: (u8, u8, u8, u8), max_w: Option<f32>, position: impl FnOnce(f32, f32) -> (f32, f32)) -> f32 {
+        let font = self.font(size * 2.0, 400, false);
+        let mut text = std::borrow::Cow::Borrowed(label);
+        if let Some(max_w) = max_w {
+            let limit = (max_w * self.s * 2.0) as i32;
+            if gfx::measure(label, font).0 > limit {
+                if gfx::measure("…", font).0 > limit { return 0.0; }
+                let shortened = text.to_mut();
+                while shortened.pop().is_some() {
+                    shortened.push('…');
+                    if gfx::measure(shortened, font).0 <= limit { break; }
+                    shortened.pop();
+                }
+            }
+        }
+        let Some(img) = gfx::text_ex(&text, font, (color.0, color.1, color.2)) else { return 0.0 };
+        let width = (img.width() - 2) as f32 / (2.0 * self.s);
+        let (x, y) = position(width, img.height() as f32 / (2.0 * self.s));
+        let x = ((self.ox + x) * self.s).round();
+        let y = ((self.oy + y) * self.s).round();
+        let paint = PixmapPaint { opacity: color.3 as f32 / 255.0, quality: tiny_skia::FilterQuality::Bilinear, ..Default::default() };
+        self.pm.draw_pixmap(0, 0, img.as_ref(), &paint, Transform::from_scale(0.5, 0.5).post_translate(x, y), None);
+        width
     }
 
     /// Text vertically centred on cy.
@@ -421,22 +459,39 @@ impl Ui<'_> {
         gfx::measure("Ag", self.font(size, weight, false)).1 as f32 / self.fs
     }
 
-    /// Word-wrapped text; returns the height used.
-    pub fn text_wrap(&mut self, x: f32, y: f32, s: &str, size: f32, weight: i32, c: (u8, u8, u8, u8), max_w: f32) -> f32 {
-        let lh = self.line_h(size, weight);
-        let mut lines: Vec<String> = Vec::new();
+    pub fn wrapped_lines(&self, s: &str, size: f32, weight: i32, max_w: f32) -> Vec<String> {
+        let mut lines = Vec::new();
         let mut cur = String::new();
         for word in s.split_whitespace() {
             let next = if cur.is_empty() { word.to_string() } else { format!("{cur} {word}") };
-            if !cur.is_empty() && self.text_w(&next, size, weight) > max_w {
-                lines.push(std::mem::replace(&mut cur, word.to_string()));
-            } else {
+            if self.text_w(&next, size, weight) <= max_w {
                 cur = next;
+                continue;
+            }
+            if !cur.is_empty() {
+                lines.push(std::mem::take(&mut cur));
+            }
+            // Chinese sentences can span several lines without a space.
+            for ch in word.chars() {
+                let prev = cur.len();
+                cur.push(ch);
+                if prev > 0 && self.text_w(&cur, size, weight) > max_w {
+                    cur.truncate(prev);
+                    lines.push(std::mem::take(&mut cur));
+                    cur.push(ch);
+                }
             }
         }
         if !cur.is_empty() {
             lines.push(cur);
         }
+        lines
+    }
+
+    /// Word-wrapped text; returns the height used.
+    pub fn text_wrap(&mut self, x: f32, y: f32, s: &str, size: f32, weight: i32, c: (u8, u8, u8, u8), max_w: f32) -> f32 {
+        let lh = self.line_h(size, weight);
+        let lines = self.wrapped_lines(s, size, weight, max_w);
         for (i, l) in lines.iter().enumerate() {
             self.text(x, y + i as f32 * lh, l, size, weight, c, 0.0);
         }
@@ -459,6 +514,10 @@ pub trait Content {
     }
     /// Paint everything; return the content height.
     fn draw(&mut self, ui: &mut Ui) -> f32;
+    /// Screen coordinates of the lower-left corner of the clicked control, for anchored menus.
+    fn click_at(&mut self, id: u32, fx: f32, _owner: HWND, _anchor: (i32, i32)) -> Cmd {
+        self.click(id, fx)
+    }
     fn click(&mut self, _id: u32, _fx: f32) -> Cmd {
         Cmd::None
     }
@@ -516,6 +575,9 @@ pub trait Content {
     /// A floating Liquid Glass window (the Apps window) of this fixed content height in DIPs: centred on the
     /// screen over a lens of what is behind it, springing in when it opens.
     fn glass(&self) -> Option<f32> {
+        None
+    }
+    fn centered_work_area(&self) -> Option<(windows::Win32::Foundation::RECT, f64)> {
         None
     }
     /// A glass window that grows downward as it fills (Spotlight): its top at this fraction of the screen
@@ -577,8 +639,9 @@ fn create_window(window: bool) -> HWND {
         };
         RegisterClassW(&wc);
         // a window panel (Settings) is a normal app window: in Alt+Tab, minimizable, not always on top
+        let settings_title = crate::shell::wide(crate::i18n::t("MacDock Settings"));
         let (ex, title) = if window {
-            (WS_EX_LAYERED | WS_EX_APPWINDOW, w!("MacDock Settings"))
+            (WS_EX_LAYERED | WS_EX_APPWINDOW, windows::core::PCWSTR(settings_title.as_ptr()))
         } else {
             (WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST, w!("MacDock Flyout"))
         };
@@ -642,6 +705,7 @@ pub struct Flyout {
 impl Flyout {
     /// Open under the menu bar item whose right edge is `right_px`; `top_px` is the bar's bottom.
     pub fn open(kind: crate::menubar::Extra, content: Box<dyn Content>, right_px: i32, top_px: i32, dpi: f64) -> Flyout {
+        let dpi = content.centered_work_area().map_or(dpi, |(_, scale)| scale);
         let window = kind.is_window();
         let hwnd = create_window(window);
         let screen_w_px = unsafe { GetSystemMetrics(SM_CXSCREEN) };
@@ -796,7 +860,10 @@ impl Flyout {
                     }
                     if self.spot_at(p).is_some_and(|s| s.id == id) {
                         let s = self.spot_at(p).unwrap();
-                        cmd = self.content.click(id, Self::frac(&s, p));
+                        let (scale, ox, oy) = self.view;
+                        let anchor = (self.pos.0 + ((ox + s.x) * scale).round() as i32,
+                                      self.pos.1 + ((oy + s.y + s.h) * scale).round() as i32);
+                        cmd = self.content.click_at(id, Self::frac(&s, p), self.hwnd, anchor);
                     }
                 }
             }
@@ -968,6 +1035,9 @@ impl Flyout {
             // centred, a little above the middle as macOS places it, and never under the menu bar
             None => ((sh - ph as i32) / 2 - (24.0 * s) as i32).max(self.top_px - (40.0 * s) as i32).max(0),
         };
+        let (x, y) = self.content.centered_work_area().map_or((x, y), |(r, _)| {
+            (r.left + (r.right - r.left - pw as i32) / 2, r.top + (r.bottom - r.top - ph as i32) / 2)
+        });
         self.pos = (x, y);
         let stale = self.glass.as_ref().is_none_or(|g| g.width() != pw || g.height() != ph);
         if top.is_none() {
@@ -1216,6 +1286,20 @@ pub fn snapshot(content: &mut dyn Content, s: f32) -> (u32, u32, Vec<u8>) {
     (pw, ph, pm.data().to_vec())
 }
 
+
+#[cfg(test)]
+#[test]
+fn smooth_labels_measure_the_text_that_is_drawn() {
+    for s in [1.0, 1.25, 1.5, 2.0] {
+        let mut pm = Pixmap::new(500, 80).unwrap();
+        let mut spots = Vec::new();
+        let mut ui = Ui { pm: &mut pm, s, ox: 0.0, oy: 0.0, mouse: None, pressed: None, spots: &mut spots, w: 200.0, fs: s, still: true };
+        let chip = "开发工具";
+        assert_eq!(ui.smooth_label_mid(8.0, 14.0, chip, 14.0, white(255), None), ui.smooth_label_width(chip, 14.0));
+        let limit = ui.smooth_label_width("应用 A…", 17.0);
+        assert_eq!(ui.smooth_label_mid(0.0, 14.0, "应用 ABCDEFG", 17.0, white(255), Some(limit)), limit);
+    }
+}
 
 #[cfg(test)]
 mod glass_bench {

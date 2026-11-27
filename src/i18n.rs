@@ -1,4 +1,4 @@
-//! Interface language: English (the source strings) or Indonesian. Strings stay English in the code and go
+//! Interface language: English (the source strings), Indonesian or Simplified Chinese. Strings stay English in the code and go
 //! through `t` where they are shown; anything missing from the table shows in English.
 
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -7,18 +7,25 @@ use std::sync::atomic::{AtomicU8, Ordering};
 pub enum Lang {
     En,
     Id,
+    ZhCn,
 }
+
+/// Configuration values and the language names shown in Settings.
+pub const LANGUAGES: &[(&str, &str)] = &[("auto", "Auto"), ("en", "English"), ("id", "Indonesia"), ("zh-CN", "简体中文")];
 
 static LANG: AtomicU8 = AtomicU8::new(0);
 
-/// Config value ("auto", "en", "id") → the language to show. Auto follows the Windows display language.
+/// Config value ("auto", "en", "id", "zh-CN") → the language to show. Auto follows the Windows display language.
 pub fn resolve(setting: &str) -> Lang {
     match setting {
+        "zh-CN" => Lang::ZhCn,
         "id" => Lang::Id,
         "en" => Lang::En,
         _ => {
             let ui = unsafe { windows::Win32::Globalization::GetUserDefaultUILanguage() };
-            if ui & 0x3FF == 0x21 {
+            if ui & 0x3FF == 0x04 {
+                Lang::ZhCn // LANG_CHINESE
+            } else if ui & 0x3FF == 0x21 {
                 Lang::Id // LANG_INDONESIAN
             } else {
                 Lang::En
@@ -32,20 +39,34 @@ pub fn set(setting: &str) {
 }
 
 pub fn lang() -> Lang {
-    if LANG.load(Ordering::Relaxed) == Lang::Id as u8 {
-        Lang::Id
-    } else {
-        Lang::En
+    match LANG.load(Ordering::Relaxed) {
+        n if n == Lang::ZhCn as u8 => Lang::ZhCn,
+        n if n == Lang::Id as u8 => Lang::Id,
+        _ => Lang::En,
     }
 }
 
 /// `s` in the interface language.
 pub fn t(s: &str) -> &str {
-    if lang() == Lang::En {
-        return s;
+    match lang() {
+        Lang::En => s,
+        Lang::Id => id(s).unwrap_or(s),
+        Lang::ZhCn => zh(s).unwrap_or(s),
     }
-    id(s).unwrap_or(s)
 }
+
+// Keep both format strings checked by Rust, including numeric precision and named arguments.
+macro_rules! localized_format {
+    ($english:literal, $chinese:literal $(, $arg:expr)* $(,)?) => {
+        if $crate::i18n::lang() == $crate::i18n::Lang::ZhCn {
+            format!($chinese $(, $arg)*)
+        } else {
+            format!($english $(, $arg)*)
+        }
+    };
+}
+
+pub(crate) use localized_format as fmt;
 
 /// A template with one `{}` (e.g. "Hide {}"), translated, then filled in.
 pub fn fill(template: &str, v: &str) -> String {
@@ -175,6 +196,7 @@ fn id(s: &str) -> Option<&'static str> {
         "Reduce motion" => "Kurangi gerakan",
         "Reduce motion snaps the dock instead of animating it. Turn the Genie effect off to minimize with the Windows animation." => "Kurangi gerakan membuat dock langsung berubah tanpa animasi. Matikan efek Genie untuk memakai animasi minimize bawaan Windows.",
         "Language" => "Bahasa",
+        "Interface font" => "Font antarmuka",
         "Auto" => "Otomatis",
         "General" => "Umum",
         "Restart MacDock to apply the menu bar, widgets and Alt+Tab changes." => "Restart MacDock untuk menerapkan perubahan menu bar, widget dan Alt+Tab.",
@@ -201,6 +223,293 @@ fn id(s: &str) -> Option<&'static str> {
     })
 }
 
+fn zh(s: &str) -> Option<&'static str> {
+    Some(match s {
+        "File" => "文件",
+        "Edit" => "编辑",
+        "View" => "显示",
+        "Window" => "窗口",
+        "Help" => "帮助",
+        "Hide {}" => "隐藏 {}",
+        "Quit {}" => "退出 {}",
+        "{} Help" => "{} 帮助",
+        "Update Available: MacDock {}…" => "发现新版本 MacDock {}…",
+        "About This PC" => "关于这台电脑",
+        "Check for MacDock Updates…" => "检查 MacDock 更新…",
+        "System Settings…" => "系统设置…",
+        "MacDock Settings…" => "MacDock 设置…",
+        "Force Quit…" => "强制退出…",
+        "Sleep" => "睡眠",
+        "Restart…" => "重新启动…",
+        "Shut Down…" => "关机…",
+        "Lock Screen" => "锁定屏幕",
+        "Quit MacDock" => "退出 MacDock",
+        "Open MacDock at Login" => "登录时启动 MacDock",
+        "Automatically Hide Dock" => "自动隐藏程序坞",
+        "Show AI Usage" => "显示 AI 用量",
+        "Show Battery Percentage" => "显示电池百分比",
+        "Show Tray Icons" => "显示托盘图标",
+        "Hide Others" => "隐藏其他应用",
+        "New Window" => "新建窗口",
+        "New Tab" => "新建标签页",
+        "Open…" => "打开…",
+        "Open" => "打开",
+        "Save" => "保存",
+        "Save As…" => "另存为…",
+        "Print…" => "打印…",
+        "Close Window" => "关闭窗口",
+        "Undo" => "撤销",
+        "Redo" => "重做",
+        "Cut" => "剪切",
+        "Copy" => "复制",
+        "Paste" => "粘贴",
+        "Select All" => "全选",
+        "Find…" => "查找…",
+        "Emoji & Symbols" => "表情与符号",
+        "Zoom In" => "放大",
+        "Zoom Out" => "缩小",
+        "Actual Size" => "实际大小",
+        "Enter Full Screen" => "进入全屏",
+        "Minimize" => "最小化",
+        "Zoom" => "缩放",
+        "Move to Left Half" => "移到屏幕左半边",
+        "Move to Right Half" => "移到屏幕右半边",
+        "Windows Tips" => "Windows 使用技巧",
+        "Turn Hiding On" => "开启自动隐藏",
+        "Turn Hiding Off" => "关闭自动隐藏",
+        "Show Recent Apps" => "显示最近使用的应用",
+        "Show Downloads Stack" => "显示下载文件堆栈",
+        "Dock Settings…" => "程序坞设置…",
+        "Keep in Dock" => "保留在程序坞中",
+        "Remove from Dock" => "从程序坞移除",
+        "Remove from Recents" => "从最近使用中移除",
+        "Change Icon…" => "更改图标…",
+        "Reset Icon" => "还原图标",
+        "Quit" => "退出",
+        "Open in Explorer" => "在文件资源管理器中打开",
+        "Show in Explorer" => "在文件资源管理器中显示",
+        "Open Downloads" => "打开下载文件夹",
+        "No files" => "没有文件",
+        "Empty Recycle Bin" => "清空回收站",
+        "Search" => "搜索",
+        "Loading apps…" => "正在加载应用…",
+        "No Results" => "无结果",
+        "Applications" => "应用程序",
+        "Apps" => "应用",
+        "Spotlight Search" => "聚焦搜索",
+        "Application" => "应用程序",
+        "Search the Web for" => "在网上搜索",
+        "Utilities" => "实用工具",
+        "Productivity & Finance" => "效率与财务",
+        "Entertainment" => "娱乐",
+        "Information & Reading" => "资讯与阅读",
+        "Social" => "社交",
+        "Creativity" => "创意",
+        "Developer Tools" => "开发工具",
+        "Games" => "游戏",
+        "Other" => "其他",
+        "All apps" => "所有应用",
+        "Apps window" => "应用窗口",
+        "Full screen" => "全屏",
+        "MacDock Settings" => "MacDock 设置",
+        "Dock" => "程序坞",
+        "Size" => "大小",
+        "Magnification" => "图标放大",
+        "Off" => "关闭",
+        "Automatically hide the dock" => "自动隐藏程序坞",
+        "Show recent apps" => "显示最近使用的应用",
+        "Show Downloads stack" => "显示下载文件堆栈",
+        "Icons on rounded tiles" => "使用圆角图标底板",
+        "Notification badges" => "通知角标",
+        "Menu Bar & Desktop" => "菜单栏与桌面",
+        "Hide the Windows taskbar" => "隐藏 Windows 任务栏",
+        "Menu bar" => "菜单栏",
+        "Battery percentage" => "电池百分比",
+        "Docks on secondary monitors" => "在副显示器上显示程序坞",
+        "AI usage in the menu bar" => "在菜单栏显示 AI 用量",
+        "Claude limits from your Claude login" => "使用 Claude 账号获取额度",
+        "Tray icons in the menu bar" => "在菜单栏显示托盘图标",
+        "Desktop widgets" => "桌面小组件",
+        "Mac-style Alt+Tab" => "Mac 风格的 Alt+Tab",
+        "restart" => "需重启",
+        "Animation" => "动画",
+        "Genie effect when minimizing" => "最小化时使用神奇效果",
+        "Minimize duration" => "最小化动画时长",
+        "Magnification speed" => "图标放大速度",
+        "Dock show / hide speed" => "程序坞显示与隐藏速度",
+        "Hide delay" => "隐藏延迟",
+        "Reduce motion" => "减弱动态效果",
+        "Reduce motion snaps the dock instead of animating it. Turn the Genie effect off to minimize with the Windows animation." => "开启后，程序坞会直接切换状态。关闭神奇效果可使用 Windows 的最小化动画。",
+        "Language" => "语言",
+        "Auto" => "自动",
+        "General" => "通用",
+        "Restart MacDock to apply the menu bar, widgets and Alt+Tab changes." => "重启 MacDock 后，菜单栏、小组件和 Alt+Tab 的更改将生效。",
+        "Changes apply right away and are saved to config.json." => "更改立即生效，并保存到 config.json。",
+        "Restart MacDock" => "重启 MacDock",
+        "Reset to Defaults" => "恢复默认设置",
+        "Click again to reset" => "再次点击以重置",
+        "Fan out windows on hover" => "悬停时展开窗口预览",
+        "Windows key opens Spotlight" => "按 Windows 键打开聚焦搜索",
+        "Reset Animations" => "重置动画",
+        "Open config.json" => "打开 config.json",
+        "On" => "开启",
+        "Bluetooth" => "蓝牙",
+        "Unavailable" => "不可用",
+        "Dark Mode" => "深色模式",
+        "Power Mode" => "电源模式",
+        "Efficiency" => "最佳能效",
+        "Balanced" => "平衡",
+        "Performance" => "最佳性能",
+        "Saver" => "节能",
+        "Display" => "显示",
+        "Sound" => "声音",
+        "Not connected · Ethernet" => "未连接 · 使用以太网",
+        "Not connected" => "未连接",
+        "Turning on…" => "正在开启…",
+        "Wi-Fi unavailable" => "Wi-Fi 不可用",
+        "Wi-Fi unavailable · using Ethernet" => "Wi-Fi 不可用 · 正在使用以太网",
+        "Network Settings…" => "网络设置…",
+        "Checking Wi-Fi…" => "正在检测 Wi-Fi…",
+        "Windows could not change Wi-Fi state" => "Windows 未能切换 Wi-Fi 状态",
+        "Wi-Fi is off" => "Wi-Fi 已关闭",
+        "Not connected · using Ethernet" => "未连接 · 使用以太网",
+        "No access to Wi-Fi. Allow location for desktop apps in Settings › Privacy › Location." => "无法访问 Wi-Fi。请在 Windows 隐私设置中允许桌面应用访问位置。",
+        "Searching…" => "正在搜索…",
+        "No networks found" => "未找到网络",
+        "Wrong password." => "密码错误。",
+        "Other Networks" => "其他网络",
+        "Password" => "密码",
+        "Join" => "连接",
+        "Connected" => "已连接",
+        "Wi-Fi Settings…" => "Wi-Fi 设置…",
+        "Notifications" => "通知",
+        "Date & Time Settings…" => "日期和时间设置…",
+        "Background apps" => "后台应用",
+        "The notification area could not be hosted." => "无法加载通知区域。",
+        "Loading…" => "正在加载…",
+        "Nothing running in the background." => "没有正在运行的后台应用。",
+        "Battery" => "电池",
+        "No battery" => "未检测到电池",
+        "Charging" => "正在充电",
+        "Plugged in" => "已接通电源",
+        "Low" => "电量低",
+        "On battery" => "使用电池",
+        "Charging…" => "正在充电…",
+        "Fully charged" => "已充满",
+        "Holding charge" => "维持电量",
+        "Estimating…" => "正在估算…",
+        "DC in" => "直流输入",
+        "Total draw" => "总功耗",
+        "From battery" => "电池输出",
+        "Into battery" => "电池输入",
+        "adapter" => "电源适配器",
+        "measured" => "实测",
+        "estimated" => "估算",
+        "charging" => "充电中",
+        "Reading sensors…" => "正在读取传感器…",
+        "AI Usage" => "AI 用量",
+        "Reading logs…" => "正在读取日志…",
+        "Sessions" => "会话",
+        "Burning" => "使用中",
+        "Idle" => "空闲",
+        "Today" => "今天",
+        "No Claude Code or Codex logs from the last 7 days." => "最近 7 天没有 Claude Code 或 Codex 日志。",
+        "Total draw measured at the battery. Rest = everything besides CPU and GPU (screen, RAM, SSD, fans)." => "总功耗由电池实测。其他功耗包括屏幕、内存、固态硬盘和风扇等组件。",
+        "On the adapter nothing measures the input, so it is CPU + GPU sensors plus the rest, learned while on battery." => "接通电源时无法测量输入功率。总功耗根据 CPU、GPU 传感器读数和电池供电时测得的其他功耗估算。",
+        "Estimated: CPU + GPU sensors plus a default for the rest. Run on battery with this open for a minute to calibrate." => "总功耗根据 CPU、GPU 传感器和其他组件的默认功耗估算。使用电池供电并保持此面板打开一分钟即可校准。",
+        "Read from local logs. Claude Code logs no limit: turn on ClaudeUsageOAuth in config.json for its real 5-hour and weekly limits, or set ClaudeLimit5h for an estimate." => "数据来自本地日志。可在 config.json 中开启 ClaudeUsageOAuth 以查看 Claude 的实际五小时和每周额度，或设置 ClaudeLimit5h 进行估算。",
+        "Tokens from local logs. Claude limits from Anthropic's usage endpoint (your Claude Code login), Codex limits from its own reports." => "用量来自本地日志。Claude 额度通过已登录的 Claude Code 账号获取，Codex 额度来自其服务端报告。",
+        "Read from local logs. Codex limits are its own server reports; Claude's percentage is estimated from ClaudeLimit5h." => "用量来自本地日志。Codex 额度来自服务端报告，Claude 百分比根据 ClaudeLimit5h 估算。",
+        "unplugged" => "未接电源",
+        "discharging" => "放电中",
+        "idle" => "空闲",
+        "active now" => "正在使用",
+        "At this pace it lasts until the reset" => "按当前速度，额度可用到下次重置",
+        "5 min" => "5 分钟",
+        "30 min" => "30 分钟",
+        "24 h ago" => "24 小时前",
+        "now" => "现在",
+        "tok/s" => "词元/秒",
+        "AccessRevoked" => "访问权限已撤销",
+        "InvalidCredential" => "凭据无效",
+        "NetworkNotAvailable" => "网络不可用",
+        "Timeout" => "连接超时",
+        "UnsupportedAuthenticationProtocol" => "不支持此身份验证协议",
+        "UnspecifiedFailure" => "未知错误",
+        "the download does not match its checksum" => "下载文件的校验和不匹配",
+        "the download is not a program" => "下载的文件不是有效的程序",
+        "bad answer" => "服务器响应无效",
+        "no Claude Code login" => "尚未登录 Claude Code",
+        "unreadable credentials" => "无法读取登录凭据",
+        "no OAuth token (API key login?)" => "未找到 OAuth 令牌，可能使用了 API 密钥登录",
+        "login expired; open Claude Code to renew it" => "登录已过期，请打开 Claude Code 重新登录",
+        "login rejected; open Claude Code to renew it" => "登录被拒绝，请打开 Claude Code 重新登录",
+        "rate limited, retrying later" => "请求过于频繁，稍后重试",
+        "unexpected answer" => "服务器响应格式异常",
+        "no limits in the answer" => "服务器未返回额度信息",
+        "network unavailable" => "网络不可用",
+        "request failed" => "请求失败",
+        "offline" => "网络已断开",
+        "no answer" => "服务器未响应",
+        "the download broke off" => "下载中断",
+        "answer too large" => "响应内容过大",
+        " until full" => "后充满",
+        " remaining" => "可用",
+        "GPU off" => "GPU 已关闭",
+        "Rest —" => "其他 —",
+        "Restart now?" => "现在重新启动电脑吗？",
+        "Shut down now?" => "现在关闭电脑吗？",
+        "File Explorer" => "文件资源管理器",
+        "Session" => "会话",
+        "Analog Clock" => "模拟时钟",
+        "Digital Clock" => "数字时钟",
+        "Calendar & Date" => "日历与日期",
+        "System" => "系统",
+        "Memory" => "内存",
+        "Disk C:" => "C 盘",
+        "Plugged In" => "已接通电源",
+        "AC Power" => "交流电源",
+        "Top Left" => "左上角",
+        "Top Right" => "右上角",
+        "Bottom Left" => "左下角",
+        "Bottom Right" => "右下角",
+        "Tile" => "组件",
+        "Hidden" => "已隐藏",
+        "System (CPU / RAM / Disk)" => "系统（处理器 / 内存 / 磁盘）",
+        "Hide this tile" => "隐藏此组件",
+        "Restore All Hidden Tiles" => "恢复所有隐藏组件",
+        "Snap: Top Right" => "贴靠右上角",
+        "Snap: Top Left" => "贴靠左上角",
+        "Snap: Bottom Right" => "贴靠右下角",
+        "Snap: Bottom Left" => "贴靠左下角",
+        "Reset Widgets Layout" => "重置组件布局",
+        "Recycle Bin" => "回收站",
+        "Downloads" => "下载",
+        "Launchpad" => "启动台",
+        "Icons and images" => "图标和图片",
+        "All files" => "所有文件",
+        "Choose an icon" => "选择图标",
+        "Weekly" => "每周",
+        "Weekly Opus" => "Opus 每周",
+        "Weekly Sonnet" => "Sonnet 每周",
+        "5-hour" => "5 小时",
+        "30-day" => "30 天",
+        "Limit" => "用量",
+        "Microsoft Store…" => "微软应用商店…",
+        "SUNDAY" => "星期日",
+        "MONDAY" => "星期一",
+        "TUESDAY" => "星期二",
+        "WEDNESDAY" => "星期三",
+        "THURSDAY" => "星期四",
+        "FRIDAY" => "星期五",
+        "SATURDAY" => "星期六",
+        "MacDock is running at low integrity, so it cannot reserve screen space or save settings.\n\nCopy macdock.exe to a normal folder (for example %LOCALAPPDATA%\\Programs\\MacDock) and start it from there." => "MacDock 正在低完整性级别下运行，无法预留屏幕空间或保存设置。\n\n请将 macdock.exe 复制到普通文件夹（例如 %LOCALAPPDATA%\\Programs\\MacDock），再从该位置启动。",
+        "Interface font" => "界面字体",
+        "Mission Control" => "任务视图",
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,6 +520,9 @@ mod tests {
         assert_eq!(t("Copy"), "Salin");
         assert_eq!(t("Something new"), "Something new");
         assert_eq!(fill("Hide {}", "Chrome"), "Sembunyikan Chrome");
+        set("zh-CN");
+        assert_eq!(t("Copy"), "复制");
+        assert_eq!(fill("Quit {}", "Chrome"), "退出 Chrome");
         set("en");
         assert_eq!(t("Copy"), "Copy");
         assert_eq!(fill("Quit {}", "Chrome"), "Quit Chrome");

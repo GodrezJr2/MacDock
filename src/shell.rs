@@ -158,9 +158,8 @@ pub fn icon(parsing: &str, max_px: u32) -> Option<Pixmap> {
     unsafe {
         let w = wide(parsing);
         let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(w.as_ptr()), None).ok()?;
-        // Packaged apps: the factory's ICONONLY path hands back a generic icon in this process, so read the
-        // package's own logo PNG (the best size/scale variant) straight from its folder.
-        if let Some(pm) = package_logo(&item, max_px) {
+        // Prefer native resources: the image factory can pad a small preview inside a bordered canvas.
+        if let Some(pm) = resource_icon(&item, parsing, max_px) {
             return Some(pm);
         }
         let f: IShellItemImageFactory = item.cast().ok()?;
@@ -186,15 +185,40 @@ pub fn icon(parsing: &str, max_px: u32) -> Option<Pixmap> {
     }
 }
 
-/// For packaged apps the shell's icon location is a logo PNG, e.g. `...\Images\Square44x44Logo.png-100`.
-unsafe fn package_logo(item: &IShellItem, max_px: u32) -> Option<Pixmap> {
+/// Use a packaged logo or the icon group specified by the shell item.
+unsafe fn resource_icon(item: &IShellItem, parsing: &str, max_px: u32) -> Option<Pixmap> {
     let x: IExtractIconW = item.BindToHandler(None, &BHID_SFUIObject).ok()?;
     let mut buf = [0u16; 1024];
     let (mut idx, mut flags) = (0i32, 0u32);
     x.GetIconLocation(0, &mut buf, &mut idx, &mut flags).ok()?;
     let loc = from_wide(&buf);
-    let cut = loc.to_ascii_lowercase().find(".png")?;
-    best_logo(&loc[..cut + 4], max_px).and_then(|p| crate::gfx::image_file(&p, max_px))
+    let lower = loc.to_ascii_lowercase();
+    if let Some(cut) = lower.rfind(".png").filter(|&i| {
+        let suffix = &lower[i + 4..];
+        suffix.is_empty() || suffix.starts_with('-')
+    }) {
+        return best_logo(&loc[..cut + 4], max_px).and_then(|p| crate::gfx::image_file(&p, max_px));
+    }
+    if !(lower.ends_with(".exe") || lower.ends_with(".dll") || lower.ends_with(".ico")) {
+        return None;
+    }
+    // With GIL_NOTFILENAME the index can be a shell cache token. Only use group zero
+    // when the returned location is the executable this item actually launches.
+    if flags & windows::Win32::UI::Shell::GIL_NOTFILENAME != 0 {
+        let target = parsing.strip_prefix(r"shell:AppsFolder\").unwrap_or(parsing);
+        if !lower.ends_with(".exe") || !(loc.eq_ignore_ascii_case(target)
+            || link_target(parsing).is_some_and(|exe| loc.eq_ignore_ascii_case(&exe))) {
+            return None;
+        }
+        idx = 0;
+    }
+    let px = max_px.clamp(1, 256);
+    let mut hicon = HICON::default();
+    let result = windows::Win32::UI::Shell::SHDefExtractIconW(PCWSTR(buf.as_ptr()), idx, 0, Some(&mut hicon), None, px);
+    if hicon.0.is_null() { return None; }
+    let image = result.ok().ok().and_then(|_| crate::gfx::icon_pixmap(hicon, px));
+    let _ = DestroyIcon(hicon);
+    image
 }
 
 /// Pick the best MRT variant of `stem.png`: transparent ("unplated") target sizes first, then scales.
@@ -497,6 +521,21 @@ pub fn activate(h: HWND) {
 #[cfg(test)]
 mod tests {
     #[test]
+    #[ignore = "requires MyTerm installed"]
+    fn myterm_dock_icon() {
+        unsafe { let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED); }
+        let exe = format!(r"{}\Programs\MyTerm\myterm.exe", std::env::var("LOCALAPPDATA").unwrap());
+        let link = format!(r"{}\Microsoft\Windows\Start Menu\Programs\MyTerm\MyTerm.lnk", std::env::var("APPDATA").unwrap());
+        for spec in [exe.clone(), format!(r"shell:AppsFolder\{exe}"), link] {
+            let raw = super::icon(&spec, 256).unwrap();
+            let tile = crate::tile::make(&raw, 91).unwrap();
+            let terminal_pixels = tile.data().chunks_exact(4)
+                .filter(|p| p[3] > 220 && p[..3].iter().all(|&channel| channel < 72)).count();
+            assert!(terminal_pixels > 91 * 91 / 5, "undersized terminal glyph for {spec}");
+        }
+    }
+
+    #[test]
     fn packaged_icons() {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
@@ -574,12 +613,15 @@ pub fn pick_icon_file(owner: HWND) -> Option<String> {
     use windows::Win32::UI::Shell::{FileOpenDialog, IFileOpenDialog, SIGDN_FILESYSPATH};
     unsafe {
         let d: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let images = wide(crate::i18n::t("Icons and images"));
+        let all = wide(crate::i18n::t("All files"));
+        let title = wide(crate::i18n::t("Choose an icon"));
         let types = [
-            COMDLG_FILTERSPEC { pszName: w!("Icons and images"), pszSpec: w!("*.png;*.ico;*.jpg;*.jpeg;*.bmp;*.exe;*.dll;*.lnk") },
-            COMDLG_FILTERSPEC { pszName: w!("All files"), pszSpec: w!("*.*") },
+            COMDLG_FILTERSPEC { pszName: PCWSTR(images.as_ptr()), pszSpec: w!("*.png;*.ico;*.jpg;*.jpeg;*.bmp;*.exe;*.dll;*.lnk") },
+            COMDLG_FILTERSPEC { pszName: PCWSTR(all.as_ptr()), pszSpec: w!("*.*") },
         ];
         d.SetFileTypes(&types).ok()?;
-        d.SetTitle(w!("Choose an icon")).ok()?;
+        d.SetTitle(PCWSTR(title.as_ptr())).ok()?;
         d.Show(owner).ok()?;
         let item = d.GetResult().ok()?;
         let p = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;

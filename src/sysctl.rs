@@ -152,10 +152,18 @@ pub fn set_radio(r: &Radio, on: bool) {
 const THEME_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
 
 pub fn dark() -> bool {
+    theme_is_dark(w!("AppsUseLightTheme"))
+}
+
+pub fn system_dark() -> bool {
+    theme_is_dark(w!("SystemUsesLightTheme"))
+}
+
+fn theme_is_dark(value: PCWSTR) -> bool {
     let mut v = 1u32;
     let mut n = 4u32;
     unsafe {
-        let r = RegGetValueW(HKEY_CURRENT_USER, THEME_KEY, w!("AppsUseLightTheme"), RRF_RT_REG_DWORD, None, Some(&mut v as *mut u32 as *mut _), Some(&mut n));
+        let r = RegGetValueW(HKEY_CURRENT_USER, THEME_KEY, value, RRF_RT_REG_DWORD, None, Some(&mut v as *mut u32 as *mut _), Some(&mut n));
         r.is_ok() && v == 0
     }
 }

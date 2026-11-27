@@ -51,7 +51,7 @@ struct Media {
 
 #[derive(Default)]
 struct State {
-    wifi_on: bool,
+    wifi_on: Option<bool>,
     wifi_sub: String,
     bt: Option<bool>, // None = no radio
     bt_looked: bool,
@@ -78,14 +78,15 @@ pub struct ControlCenter {
     vol_job: Job<f32>,
 }
 
-fn wifi_sub(on: bool) -> String {
-    if !on {
-        return "Off".into();
+fn wifi_sub(on: Option<bool>) -> String {
+    if on.is_none() { return crate::i18n::t("Unavailable").into(); }
+    if on == Some(false) {
+        return crate::i18n::t("Off").into();
     }
     match net::current() {
         Some((ssid, _)) => ssid,
-        None if net::wired() => "Not connected · Ethernet".into(),
-        None => "Not connected".into(),
+        None if net::wired() => crate::i18n::t("Not connected · Ethernet").into(),
+        None => crate::i18n::t("Not connected").into(),
     }
 }
 
@@ -130,7 +131,7 @@ fn read_media(st: &Mutex<State>) {
 impl ControlCenter {
     pub fn new() -> ControlCenter {
         // only cheap reads here: the panel opens at once and the worker fills in the rest
-        let st = State { wifi_on: true, wifi_sub: LAST_WIFI.lock().unwrap().clone(), bt: None, ..Default::default() };
+        let st = State { wifi_on: None, wifi_sub: LAST_WIFI.lock().unwrap().clone(), bt: None, ..Default::default() };
         ControlCenter {
             hwnd: 0, st: Arc::new(Mutex::new(st)), dark: sysctl::dark(), power: sysctl::power_mode(),
             saver: LAST_SAVER.load(std::sync::atomic::Ordering::Relaxed), drag: None,
@@ -269,14 +270,21 @@ impl Content for ControlCenter {
             ID_WIFI_DOT => {
                 let on = {
                     let mut s = self.st.lock().unwrap();
-                    s.wifi_on = !s.wifi_on;
-                    s.wifi_sub = if s.wifi_on { "Turning on…".into() } else { "Off".into() };
-                    s.wifi_on
+                    let Some(current) = s.wifi_on.take() else { return Cmd::None };
+                    s.wifi_sub = crate::i18n::t("Checking Wi-Fi…").into();
+                    !current
                 };
                 self.work(move |st| {
-                    fly_wifi::set_on(on);
-                    std::thread::sleep(std::time::Duration::from_millis(if on { 3000 } else { 100 }));
-                    st.lock().unwrap().wifi_sub = wifi_sub(on);
+                    if fly_wifi::set_on(on) {
+                        std::thread::sleep(std::time::Duration::from_millis(if on { 1500 } else { 200 }));
+                    }
+                    let actual = fly_wifi::is_on();
+                    let sub = if actual.is_some() && actual != Some(on) {
+                        crate::i18n::t("Windows could not change Wi-Fi state").into()
+                    } else { wifi_sub(actual) };
+                    let mut s = st.lock().unwrap();
+                    s.wifi_on = actual;
+                    s.wifi_sub = sub;
                 });
             }
             ID_WIFI_TEXT => return Cmd::OpenWifi,
@@ -326,28 +334,28 @@ impl Content for ControlCenter {
         let right_h = 2.0 * (10.0 + row_h + 10.0) + 8.0;
         tile(ui, 0.0, 0.0, col, right_h);
         let wifi_sub = st.wifi_sub.clone();
-        toggle(ui, 10.0, 10.0, col - 20.0, '\u{E701}', "Wi-Fi", &wifi_sub, st.wifi_on, ID_WIFI_DOT, ID_WIFI_TEXT);
+        toggle(ui, 10.0, 10.0, col - 20.0, '\u{E701}', "Wi-Fi", &wifi_sub, st.wifi_on == Some(true), ID_WIFI_DOT, ID_WIFI_TEXT);
         let bt_sub = match st.bt {
-            None if st.bt_looked => "Unavailable",
+            None if st.bt_looked => crate::i18n::t("Unavailable"),
             None => "",
-            Some(true) => "On",
-            Some(false) => "Off",
+            Some(true) => crate::i18n::t("On"),
+            Some(false) => crate::i18n::t("Off"),
         };
-        toggle(ui, 10.0, 10.0 + row_h + 10.0, col - 20.0, '\u{E702}', "Bluetooth", bt_sub, st.bt == Some(true), ID_BT_DOT, ID_BT_TEXT);
+        toggle(ui, 10.0, 10.0 + row_h + 10.0, col - 20.0, '\u{E702}', crate::i18n::t("Bluetooth"), bt_sub, st.bt == Some(true), ID_BT_DOT, ID_BT_TEXT);
 
         let rx = col + 8.0;
         let th = 10.0 + row_h + 10.0;
         tile(ui, rx, 0.0, col, th);
-        toggle(ui, rx + 10.0, 10.0, col - 20.0, '\u{E708}', "Dark Mode", if self.dark { "On" } else { "Off" }, self.dark, ID_DARK, ID_DARK);
+        toggle(ui, rx + 10.0, 10.0, col - 20.0, '\u{E708}', crate::i18n::t("Dark Mode"), if self.dark { crate::i18n::t("On") } else { crate::i18n::t("Off") }, self.dark, ID_DARK, ID_DARK);
         tile(ui, rx, th + 8.0, col, th);
-        let mode = sysctl::POWER_MODES[self.power].0;
+        let mode = crate::i18n::t(sysctl::POWER_MODES[self.power].0);
         let saver = st.saver.unwrap_or(self.saver);
-        let power_sub = if saver { format!("{mode} · Saver") } else { mode.to_string() };
+        let power_sub = if saver { format!("{mode} · {}", crate::i18n::t("Saver")) } else { mode.to_string() };
         let pg = match self.power {
             0 => '\u{EC0A}',
             _ => '\u{E945}',
         };
-        toggle(ui, rx + 10.0, th + 8.0 + 10.0, col - 20.0, pg, "Power Mode", &power_sub, self.power != 1 || saver, ID_POWER_DOT, ID_POWER_TEXT);
+        toggle(ui, rx + 10.0, th + 8.0 + 10.0, col - 20.0, pg, crate::i18n::t("Power Mode"), &power_sub, self.power != 1 || saver, ID_POWER_DOT, ID_POWER_TEXT);
         let mut y = right_h + 8.0;
 
         // display and sound
@@ -358,7 +366,7 @@ impl Content for ControlCenter {
             }
             let h = 10.0 + title_h + 8.0 + 26.0 + 10.0;
             tile(ui, 0.0, y, w, h);
-            ui.text(12.0, y + 10.0, title, 12.5, 600, white(0xF2), 0.0);
+            ui.text(12.0, y + 10.0, crate::i18n::t(title), 12.5, 600, white(0xF2), 0.0);
             let sy = y + 10.0 + title_h + 8.0;
             let v = self.drag.filter(|d| d.0 == id).map(|d| d.1).or(v).unwrap_or(0.0);
             let g = if id == ID_BRIGHT {

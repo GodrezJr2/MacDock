@@ -8,11 +8,11 @@
 //! the window and broadcasts TaskbarCreated again, so every icon goes back to Explorer.
 
 use std::cell::RefCell;
+use std::time::{Duration, Instant};
 
-use tiny_skia::{IntSize, Pixmap};
+use tiny_skia::Pixmap;
 use windows::core::{w, GUID};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -27,10 +27,33 @@ pub struct Icon {
     pub tip: String,
     /// the owning app's friendly name, for icons without a tooltip
     pub name: String,
-    pub hidden: bool,
+    hidden: bool,
+    deleted: bool,
+    withdrawn_at: Option<Instant>,
     pub image: Option<Pixmap>,
     /// screen rect of its cell, for apps that anchor popups to the icon
     pub place: RECT,
+}
+
+// Keep the old cell during short hide/show and delete/add bursts.
+const WITHDRAW_GRACE: Duration = Duration::from_secs(1);
+
+impl Icon {
+    pub fn visible(&self, now: Instant) -> bool {
+        self.image.is_some() && (self.active() || self.withdrawn_at.is_some_and(|at| now.duration_since(at) < WITHDRAW_GRACE))
+    }
+
+    pub fn active(&self) -> bool {
+        !self.hidden && !self.deleted
+    }
+
+    fn update_withdrawal(&mut self, was_visible: bool, now: Instant) {
+        if self.active() {
+            self.withdrawn_at = None;
+        } else if was_visible && self.withdrawn_at.is_none() {
+            self.withdrawn_at = Some(now);
+        }
+    }
 }
 
 struct Host {
@@ -133,50 +156,6 @@ fn guid_at(b: &[u8], o: usize) -> Option<GUID> {
     (g != GUID::zeroed()).then_some(g)
 }
 
-/// An HICON as premultiplied BGRA: drawn on black and on white, alpha from the difference (works for 32-bit
-/// icons and for old masked ones alike).
-pub fn icon_pixmap(hicon: u32, px: u32) -> Option<Pixmap> {
-    if hicon == 0 {
-        return None;
-    }
-    let h = HICON(hicon as usize as *mut _);
-    let draw = |bg: u8| -> Option<Vec<u8>> {
-        unsafe {
-            let dc = CreateCompatibleDC(HDC::default());
-            let bmi = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER {
-                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: px as i32, biHeight: -(px as i32), biPlanes: 1,
-                    biBitCount: 32, biCompression: BI_RGB.0, ..Default::default()
-                },
-                ..Default::default()
-            };
-            let mut bits = std::ptr::null_mut();
-            let bmp = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).ok()?;
-            let old = SelectObject(dc, bmp);
-            std::ptr::write_bytes(bits as *mut u8, bg, (px * px * 4) as usize);
-            let ok = DrawIconEx(dc, 0, 0, h, px as i32, px as i32, 0, HBRUSH::default(), DI_NORMAL).is_ok();
-            let _ = GdiFlush();
-            let v = std::slice::from_raw_parts(bits as *const u8, (px * px * 4) as usize).to_vec();
-            SelectObject(dc, old);
-            let _ = DeleteObject(bmp);
-            let _ = DeleteDC(dc);
-            ok.then_some(v)
-        }
-    };
-    let (b, wh) = (draw(0)?, draw(255)?);
-    let mut out = vec![0u8; b.len()];
-    for i in (0..b.len()).step_by(4) {
-        // on black: c·a ; on white: c·a + (1 - a)·255  →  a = 255 - (white - black)
-        let d = (0..3).map(|k| wh[i + k] as i32 - b[i + k] as i32).max().unwrap_or(0);
-        let a = (255 - d).clamp(0, 255) as u8;
-        for k in 0..3 {
-            out[i + k] = b[i + k].min(a);
-        }
-        out[i + 3] = a;
-    }
-    Pixmap::from_vec(out, IntSize::from_wh(px, px)?)
-}
-
 fn app_name(hwnd: u32) -> String {
     let pid = crate::shell::window_pid(HWND(hwnd as usize as *mut _));
     let exe = crate::shell::Shell::default().process_info(pid).0;
@@ -196,28 +175,44 @@ fn on_notify(host: &mut Host, b: &[u8]) -> bool {
         (Some(g), Some(ig)) => g == ig,
         _ => i.hwnd == hwnd && i.uid == uid,
     });
+    let now = Instant::now();
     match msg {
         0 | 1 => {
             // NIM_ADD / NIM_MODIFY
             let i = match pos {
                 Some(p) => p,
-                None if msg == 0 || msg == 1 => {
+                None => {
                     host.icons.push(Icon {
-                        hwnd, uid, guid, callback: 0, version: 0, hicon: 0, tip: String::new(), name: app_name(hwnd), hidden: false, image: None, place: RECT::default(),
+                        hwnd, uid, guid, callback: 0, version: 0, hicon: 0, tip: String::new(), name: app_name(hwnd), hidden: false, deleted: false, withdrawn_at: None, image: None, place: RECT::default(),
                     });
                     host.icons.len() - 1
                 }
-                None => return false,
             };
             let ic = &mut host.icons[i];
+            let was_visible = ic.visible(now);
+            if ic.deleted {
+                if msg != 0 { return false; }
+                ic.deleted = false;
+                ic.hidden = false;
+                ic.callback = 0;
+                ic.version = 0;
+                ic.tip.clear();
+            }
+            if msg == 0 {
+                ic.hwnd = hwnd;
+                ic.uid = uid;
+                ic.guid = guid;
+            }
             if flags & 1 != 0 {
                 ic.callback = u32_at(n, 16);
             }
             if flags & 2 != 0 {
                 let hicon = u32_at(n, 20);
                 if hicon != ic.hicon || ic.image.is_none() {
-                    ic.hicon = hicon;
-                    ic.image = icon_pixmap(hicon, 32);
+                    if let Some(image) = crate::gfx::icon_pixmap(HICON(hicon as usize as *mut _), 32) {
+                        ic.hicon = hicon;
+                        ic.image = Some(image);
+                    }
                 }
             }
             if flags & 4 != 0 {
@@ -229,12 +224,17 @@ fn on_notify(host: &mut Host, b: &[u8]) -> bool {
                     ic.hidden = state & 1 != 0;
                 }
             }
+            ic.update_withdrawal(was_visible, now);
             true
         }
         2 => {
             // NIM_DELETE
             if let Some(p) = pos {
-                host.icons.remove(p);
+                let ic = &mut host.icons[p];
+                let was_visible = ic.visible(now);
+                ic.deleted = true;
+                ic.hicon = 0;
+                ic.update_withdrawal(was_visible, now);
                 true
             } else {
                 false
@@ -306,6 +306,14 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             return r.unwrap_or(LRESULT(0));
         }
         WM_TIMER => {
+            let now = Instant::now();
+            HOST.with(|cell| {
+                if let Ok(mut host) = cell.try_borrow_mut() {
+                    if let Some(host) = host.as_mut() {
+                        host.icons.retain(|ic| !ic.deleted || ic.visible(now));
+                    }
+                }
+            });
             // stay above Explorer's Shell_TrayWnd so Shell_NotifyIcon keeps finding us first
             let _ = SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
@@ -334,5 +342,42 @@ pub fn send_mouse(ic: &Icon, mouse_msg: u32) {
             (ic.uid as usize, mouse_msg as isize)
         };
         let _ = SendNotifyMessageW(target, ic.callback, WPARAM(wp), LPARAM(lp));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transient_updates_keep_the_icon_cell() {
+        let mut host = Host { hwnd: HWND::default(), icons: Vec::new(), notify: 0 };
+        let mut packet = [0u8; 296];
+        assert!(on_notify(&mut host, &packet)); // add
+        host.icons[0].image = Pixmap::new(1, 1);
+        packet[4] = 1; // modify with an unusable HICON
+        packet[20] = 2;
+        assert!(on_notify(&mut host, &packet));
+        assert!(host.icons[0].visible(Instant::now()));
+
+        packet[20] = 8; // NIF_STATE
+        packet[288] = 1; // NIS_HIDDEN
+        packet[292] = 1; // state mask
+        assert!(on_notify(&mut host, &packet));
+        let hidden = host.icons[0].withdrawn_at.unwrap();
+        assert!(host.icons[0].visible(hidden));
+        assert!(!host.icons[0].active());
+        assert!(!host.icons[0].visible(hidden + WITHDRAW_GRACE));
+        packet[288] = 0;
+        assert!(on_notify(&mut host, &packet));
+        assert!(host.icons[0].active());
+
+        packet[4] = 2; // delete then re-add the same cell
+        assert!(on_notify(&mut host, &packet));
+        assert!(host.icons[0].visible(Instant::now()));
+        packet[4] = 0;
+        assert!(on_notify(&mut host, &packet));
+        assert_eq!(host.icons.len(), 1);
+        assert!(host.icons[0].visible(Instant::now() + WITHDRAW_GRACE));
     }
 }

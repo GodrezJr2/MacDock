@@ -22,28 +22,28 @@ pub struct Window {
 
 /// Read the token and ask for the usage. Err carries a short reason for the flyout.
 pub fn fetch(home: &Path, now: i64) -> Result<Vec<Window>, String> {
-    let creds = std::fs::read_to_string(home.join(".claude").join(".credentials.json")).map_err(|_| "no Claude Code login".to_string())?;
-    let v: Value = serde_json::from_str(&creds).map_err(|_| "unreadable credentials".to_string())?;
+    let creds = std::fs::read_to_string(home.join(".claude").join(".credentials.json")).map_err(|_| crate::i18n::t("no Claude Code login").to_string())?;
+    let v: Value = serde_json::from_str(&creds).map_err(|_| crate::i18n::t("unreadable credentials").to_string())?;
     let o = &v["claudeAiOauth"];
-    let token = o["accessToken"].as_str().ok_or("no OAuth token (API key login?)")?;
+    let token = o["accessToken"].as_str().ok_or(crate::i18n::t("no OAuth token (API key login?)"))?;
     if o["expiresAt"].as_i64().is_some_and(|ms| ms / 1000 <= now) {
-        return Err("login expired; open Claude Code to renew it".into());
+        return Err(crate::i18n::t("login expired; open Claude Code to renew it").into());
     }
     let (status, body) = get("api.anthropic.com", "/api/oauth/usage", &format!("Authorization: Bearer {token}\r\nanthropic-beta: oauth-2025-04-20\r\nAccept: application/json"))?;
     if status == 401 || status == 403 {
-        return Err("login rejected; open Claude Code to renew it".into());
+        return Err(crate::i18n::t("login rejected; open Claude Code to renew it").into());
     }
     if status == 429 {
-        return Err("rate limited, retrying later".into());
+        return Err(crate::i18n::t("rate limited, retrying later").into());
     }
     if status != 200 {
-        return Err(format!("usage endpoint answered {status}"));
+        return Err(crate::i18n::fmt!("usage endpoint answered {status}", "用量服务返回状态码 {status}"));
     }
     parse(&body)
 }
 
 pub fn parse(body: &str) -> Result<Vec<Window>, String> {
-    let v: Value = serde_json::from_str(body).map_err(|_| "unexpected answer".to_string())?;
+    let v: Value = serde_json::from_str(body).map_err(|_| crate::i18n::t("unexpected answer").to_string())?;
     let mut out = Vec::new();
     for (key, label, min) in [
         ("five_hour", "5-hour", 300),
@@ -58,7 +58,7 @@ pub fn parse(body: &str) -> Result<Vec<Window>, String> {
         }
     }
     if out.is_empty() {
-        return Err("no limits in the answer".into());
+        return Err(crate::i18n::t("no limits in the answer").into());
     }
     Ok(out)
 }
@@ -89,36 +89,36 @@ pub(crate) fn get_bytes(host: &str, path: &str, headers: &str, limit: usize) -> 
     unsafe {
         let s = H(WinHttpOpen(w!("MacDock"), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, PCWSTR::null(), PCWSTR::null(), 0));
         if s.0.is_null() {
-            return Err("network unavailable".into());
+            return Err(crate::i18n::t("network unavailable").into());
         }
         let _ = WinHttpSetTimeouts(s.0, 10_000, 10_000, 10_000, 10_000);
         let c = H(WinHttpConnect(s.0, PCWSTR(host_w.as_ptr()), 443, 0));
         if c.0.is_null() {
-            return Err(format!("can't reach {host}"));
+            return Err(crate::i18n::fmt!("can't reach {host}", "无法连接 {host}"));
         }
         let r = H(WinHttpOpenRequest(c.0, w!("GET"), PCWSTR(path_w.as_ptr()), PCWSTR::null(), PCWSTR::null(), std::ptr::null(), WINHTTP_FLAG_SECURE));
         if r.0.is_null() {
-            return Err("request failed".into());
+            return Err(crate::i18n::t("request failed").into());
         }
-        WinHttpSendRequest(r.0, Some(&hdr), None, 0, 0, 0).map_err(|_| "offline".to_string())?;
-        WinHttpReceiveResponse(r.0, std::ptr::null_mut()).map_err(|_| "no answer".to_string())?;
+        WinHttpSendRequest(r.0, Some(&hdr), None, 0, 0, 0).map_err(|_| crate::i18n::t("offline").to_string())?;
+        WinHttpReceiveResponse(r.0, std::ptr::null_mut()).map_err(|_| crate::i18n::t("no answer").to_string())?;
         let mut status = 0u32;
         let mut len = 4u32;
         WinHttpQueryHeaders(r.0, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, PCWSTR::null(), Some(&mut status as *mut u32 as *mut c_void), &mut len, std::ptr::null_mut())
-            .map_err(|_| "bad answer".to_string())?;
+            .map_err(|_| crate::i18n::t("bad answer").to_string())?;
         let mut body = Vec::new();
         let mut buf = [0u8; 8192];
         loop {
             let mut n = 0u32;
             if WinHttpReadData(r.0, buf.as_mut_ptr() as *mut c_void, buf.len() as u32, &mut n).is_err() {
-                return Err("the download broke off".into()); // a partial body is not the answer
+                return Err(crate::i18n::t("the download broke off").into()); // a partial body is not the answer
             }
             if n == 0 {
                 break;
             }
             body.extend_from_slice(&buf[..n as usize]);
             if body.len() > limit {
-                return Err("answer too large".into());
+                return Err(crate::i18n::t("answer too large").into());
             }
         }
         Ok((status, body))

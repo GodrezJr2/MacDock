@@ -8,7 +8,12 @@
 
 use crate::config::{self, Config};
 use crate::flyout::{white, Cmd, Content, Ui, ACCENT};
-use crate::i18n::t;
+use crate::i18n::{t, LANGUAGES};
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::WindowsAndMessaging::{AppendMenuW, CreatePopupMenu, DestroyMenu, SetMenuInfo, TrackPopupMenu, MENUINFO, MIM_MAXHEIGHT, TPM_BOTTOMALIGN, MF_CHECKED, MF_STRING, TPM_NONOTIFY, TPM_RETURNCMD};
 use crate::{push, Ev};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -37,8 +42,9 @@ pub enum Key {
     HideDelay,
     HideSpeed,
     ReduceMotion,
-    /// 0 auto, 1 English, 2 Indonesian
+    /// 0 auto, 1 English, 2 Indonesian, 3 Simplified Chinese
     Language,
+    InterfaceFont,
     /// 0 the Apps window, 1 the classic full-screen Launchpad
     LaunchpadStyle,
 }
@@ -54,12 +60,8 @@ pub enum Change {
     Open,
 }
 
-const LANGS: [&str; 3] = ["auto", "en", "id"];
-const LANG_NAMES: [&str; 3] = ["Auto", "English", "Indonesia"];
 const STYLES: [&str; 2] = ["apps", "classic"];
 const STYLE_NAMES: [&str; 2] = ["Apps window", "Full screen"];
-/// the choice rows, in the order their option ids are numbered (ID_CHOICE + 10 * row + option)
-const CHOICES: [Key; 2] = [Key::Language, Key::LaunchpadStyle];
 
 /// Write a change into a config. Returns false if nothing changed.
 pub fn apply(c: &mut Config, k: Key, v: f64) -> bool {
@@ -90,8 +92,15 @@ pub fn apply(c: &mut Config, k: Key, v: f64) -> bool {
             c.hide_speed = ((v * 20.0).round() / 20.0).clamp(config::SPEED.0, config::SPEED.1);
             None
         }
+        Key::InterfaceFont => {
+            let fonts = crate::gfx::interface_fonts();
+            let face = &fonts[(v.round() as usize).min(fonts.len() - 1)];
+            let changed = &c.interface_font != face;
+            c.interface_font.clone_from(face);
+            return changed;
+        }
         Key::Language => {
-            let l = LANGS[(v.round() as usize).min(LANGS.len() - 1)];
+            let l = LANGUAGES[(v.round() as usize).min(LANGUAGES.len() - 1)].0;
             let changed = c.language != l;
             c.language = l.into();
             return changed;
@@ -160,6 +169,7 @@ fn restart_state(c: &Config) -> [bool; 4] {
 }
 
 enum Row {
+    Dropdown(Key),
     Switch(Key, &'static str),
     Slider(Key, &'static str, f64, f64),
     /// a segmented control: one of these options
@@ -176,6 +186,8 @@ const ID_CLOSE: u32 = 110;
 const ID_MIN: u32 = 111;
 const ID_ZOOM: u32 = 112;
 const ID_CHOICE: u32 = 200; // 200 + option index
+const ID_LANGUAGE: u32 = 113;
+const ID_FONT: u32 = 114;
 
 const W: f32 = 700.0;
 const COL_GAP: f32 = 22.0;
@@ -227,8 +239,30 @@ fn anim_rows() -> Vec<Row> {
     ]
 }
 
+// Dimensions and coordinates are in screen pixels, including on monitors above the primary.
+fn font_menu_layout(anchor_y: i32, top: i32, bottom: i32, dpi: u32) -> (i32, u32, bool) {
+    let px = |dip: i32| (dip * dpi as i32 + 48) / 96;
+    let field_top = anchor_y - px(26);
+    let above = (field_top - top - px(8)).max(0);
+    let below = (bottom - anchor_y - px(8)).max(0);
+    let limit = px(280);
+    if below < limit && above > below {
+        (field_top, above.min(limit).max(1) as u32, true)
+    } else {
+        (anchor_y, below.min(limit).max(1) as u32, false)
+    }
+}
+
+fn font_name(index: usize) -> &'static str {
+    if index == 0 { t("Auto") } else { &crate::gfx::interface_fonts()[index] }
+}
+
 fn general_rows() -> Vec<Row> {
-    vec![Row::Choice(Key::Language, "Language", &LANG_NAMES), Row::Choice(Key::LaunchpadStyle, "All apps", &STYLE_NAMES)]
+    vec![
+        Row::Dropdown(Key::Language),
+        Row::Dropdown(Key::InterfaceFont),
+        Row::Choice(Key::LaunchpadStyle, "All apps", &STYLE_NAMES),
+    ]
 }
 
 pub struct Settings {
@@ -260,7 +294,7 @@ impl Settings {
     fn label(&self, k: Key) -> String {
         let v = self.value(k);
         match k {
-            Key::IconSize => format!("{v:.0} px"),
+            Key::IconSize => crate::i18n::fmt!("{v:.0} px", "{v:.0} 像素"),
             Key::Magnify => {
                 if v <= 1.001 {
                     t("Off").into()
@@ -268,7 +302,7 @@ impl Settings {
                     format!("{v:.2}×")
                 }
             }
-            Key::GenieMs | Key::HideDelay => format!("{:.2} s", v / 1000.0),
+            Key::GenieMs | Key::HideDelay => crate::i18n::fmt!("{:.2} s", "{:.2} 秒", v / 1000.0),
             Key::MagnifySpeed | Key::HideSpeed => format!("{v:.2}×"),
             _ => String::new(),
         }
@@ -296,6 +330,7 @@ impl Settings {
             if k == Key::Language {
                 crate::i18n::set(&self.cfg.language); // this window redraws before the app sees the change
             }
+            if k == Key::InterfaceFont { crate::gfx::set_interface_font(&self.cfg.interface_font); }
             push(Ev::Settings(Change::Set(k, v, done)));
         }
     }
@@ -313,7 +348,7 @@ impl Settings {
             .map(|r| match r {
                 Row::Switch(..) => SWITCH_H,
                 Row::Slider(..) => SLIDER_H,
-                Row::Choice(..) => CHOICE_H,
+                Row::Dropdown(_) | Row::Choice(..) => CHOICE_H,
                 Row::Note(s) => note_h(ui, t(s), w),
             })
             .sum();
@@ -341,6 +376,25 @@ impl Settings {
                     slider(ui, id_of(k), x + INSET, ry + 30.0, w - 2.0 * INSET, f);
                     ry += SLIDER_H;
                 }
+                Row::Dropdown(key) => {
+                    let selected = self.value(key) as usize;
+                    let (id, caption, name) = if key == Key::InterfaceFont {
+                        (ID_FONT, "Interface font", font_name(selected))
+                    } else {
+                        (ID_LANGUAGE, "Language", t(LANGUAGES[selected].1))
+                    };
+                    let cy = ry + CHOICE_H / 2.0;
+                    ui.text_mid(x + INSET, cy, t(caption), 13.0, 400, white(0xEB), 0.0);
+                    let width = if key == Key::InterfaceFont {
+                        w - 2.0 * INSET - ui.text_w(t(caption), 13.0, 400) - 12.0
+                    } else { 132.0 };
+                    let left = x + w - INSET - width;
+                    let hover = ui.hit(id, left, cy - 13.0, width, 26.0);
+                    ui.fill(left, cy - 13.0, width, 26.0, 7.0, white(if hover { 0x42 } else { 0x28 }));
+                    ui.text_mid(left + 10.0, cy, name, 12.0, 500, white(0xEB), width - 36.0);
+                    ui.glyph(left + width - 14.0, cy, '\u{E70D}', 10.0, white(0xC0));
+                    ry += CHOICE_H;
+                }
                 Row::Choice(k, label, opts) => {
                     ui.text_mid(x + INSET, ry + CHOICE_H / 2.0, t(label), 13.0, 400, white(0xEB), 0.0);
                     let cur = self.value(k).round() as usize;
@@ -351,8 +405,7 @@ impl Settings {
                     let mut cx = sx;
                     for (j, o) in opts.iter().enumerate() {
                         let sw = seg_w[j];
-                        let row = CHOICES.iter().position(|&x| x == k).unwrap_or(0) as u32;
-                        let hov = ui.hit(ID_CHOICE + 10 * row + j as u32, cx, sy, sw, sh);
+                        let hov = ui.hit(ID_CHOICE + j as u32, cx, sy, sw, sh);
                         if j == cur {
                             ui.fill(cx + 2.0, sy + 2.0, sw - 4.0, sh - 4.0, 5.5, white(0x5C));
                         } else if hov {
@@ -388,7 +441,8 @@ fn value_of(c: &Config, k: Key) -> f64 {
         Key::MagnifySpeed => c.magnify_speed,
         Key::HideDelay => c.hide_delay_ms,
         Key::HideSpeed => c.hide_speed,
-        Key::Language => LANGS.iter().position(|l| *l == c.language).unwrap_or(0) as f64,
+        Key::InterfaceFont => crate::gfx::interface_font_index(&c.interface_font) as f64,
+        Key::Language => LANGUAGES.iter().position(|&(code, _)| code == c.language).unwrap_or(0) as f64,
         Key::LaunchpadStyle => STYLES.iter().position(|l| *l == c.launchpad_style).unwrap_or(0) as f64,
         Key::AutoHide => b(c.auto_hide),
         Key::Recents => b(c.show_recents),
@@ -412,27 +466,15 @@ fn value_of(c: &Config, k: Key) -> f64 {
 }
 
 fn note_h(ui: &Ui, s: &str, w: f32) -> f32 {
-    // same wrapping as text_wrap, measured only
-    let max_w = w - 2.0 * INSET;
-    let mut lines = 1;
-    let mut cur = String::new();
-    for word in s.split_whitespace() {
-        let next = if cur.is_empty() { word.to_string() } else { format!("{cur} {word}") };
-        if !cur.is_empty() && ui.text_w(&next, 11.5, 400) > max_w {
-            lines += 1;
-            cur = word.to_string();
-        } else {
-            cur = next;
-        }
-    }
-    lines as f32 * ui.line_h(11.5, 400) + 16.0
+    let lines = ui.wrapped_lines(s, 11.5, 400, w - 2.0 * INSET);
+    lines.len() as f32 * ui.line_h(11.5, 400) + 16.0
 }
 
-const ALL: [Key; 26] = [
+const ALL: [Key; 27] = [
     Key::IconSize, Key::Magnify, Key::AutoHide, Key::Recents, Key::WindowFan, Key::Downloads, Key::Tiles, Key::Badges,
     Key::HideTaskbar, Key::MenuBar, Key::Widgets, Key::Switcher, Key::WinSpotlight, Key::BatteryPct, Key::AiUsage, Key::ClaudeOAuth,
     Key::TrayIcons, Key::SecondaryDocks, Key::Genie, Key::GenieMs, Key::MagnifySpeed, Key::HideDelay, Key::HideSpeed, Key::ReduceMotion,
-    Key::Language, Key::LaunchpadStyle,
+    Key::Language, Key::LaunchpadStyle, Key::InterfaceFont,
 ];
 
 fn id_of(k: Key) -> u32 {
@@ -573,6 +615,52 @@ impl Content for Settings {
         self.slide(id, fx, true);
     }
 
+    fn click_at(&mut self, id: u32, fx: f32, owner: HWND, anchor: (i32, i32)) -> Cmd {
+        let (key, options): (Key, Vec<&str>) = match id {
+            ID_LANGUAGE => (Key::Language, LANGUAGES.iter().map(|&(_, name)| t(name)).collect()),
+            ID_FONT => (Key::InterfaceFont, (0..crate::gfx::interface_fonts().len()).map(font_name).collect()),
+            _ => return self.click(id, fx),
+        };
+        let selected = self.value(key) as usize;
+        unsafe {
+            let Ok(menu) = CreatePopupMenu() else { return Cmd::None };
+            for (index, name) in options.iter().enumerate() {
+                let label = crate::shell::wide(name);
+                let flags = if index == selected { MF_STRING | MF_CHECKED } else { MF_STRING };
+                if AppendMenuW(menu, flags, index + 1, PCWSTR(label.as_ptr())).is_err() {
+                    let _ = DestroyMenu(menu);
+                    return Cmd::None;
+                }
+            }
+            let mut flags = TPM_RETURNCMD | TPM_NONOTIFY;
+            let mut y = anchor.1;
+            if id == ID_FONT {
+                let dpi = GetDpiForWindow(owner).max(96);
+                let monitor = MonitorFromPoint(POINT { x: anchor.0, y }, MONITOR_DEFAULTTONEAREST);
+                let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+                let height = if GetMonitorInfoW(monitor, &mut mi).as_bool() {
+                    let (edge, height, upwards) = font_menu_layout(y, mi.rcWork.top, mi.rcWork.bottom, dpi);
+                    y = edge;
+                    if upwards { flags |= TPM_BOTTOMALIGN; }
+                    height
+                } else {
+                    280 * dpi / 96
+                };
+                let info = MENUINFO { cbSize: std::mem::size_of::<MENUINFO>() as u32, fMask: MIM_MAXHEIGHT, cyMax: height, ..Default::default() };
+                if SetMenuInfo(menu, &info).is_err() {
+                    let _ = DestroyMenu(menu);
+                    return Cmd::None;
+                }
+            }
+            let choice = TrackPopupMenu(menu, flags, anchor.0, y, 0, owner, None).0;
+            let _ = DestroyMenu(menu);
+            if choice > 0 {
+                self.set(key, (choice - 1) as f64, true);
+            }
+        }
+        Cmd::None
+    }
+
     fn click(&mut self, id: u32, _fx: f32) -> Cmd {
         // a second click on Reset to Defaults confirms it; anything else in between cancels
         let confirming = std::mem::take(&mut self.confirm_reset);
@@ -594,9 +682,8 @@ impl Content for Settings {
                 reset_animations(&mut self.cfg);
                 push(Ev::Settings(Change::ResetAnimations));
             }
-            _ if (ID_CHOICE..ID_CHOICE + 10 * CHOICES.len() as u32).contains(&id) => {
-                let (row, opt) = ((id - ID_CHOICE) / 10, (id - ID_CHOICE) % 10);
-                self.set(CHOICES[row as usize], opt as f64, true)
+            _ if (ID_CHOICE..ID_CHOICE + STYLES.len() as u32).contains(&id) => {
+                self.set(Key::LaunchpadStyle, (id - ID_CHOICE) as f64, true)
             }
             _ => {
                 if let Some(k) = Self::key_of(id).filter(|&k| Self::range(k).is_none()) {
@@ -629,10 +716,20 @@ mod tests {
         assert_eq!(c.icon_size, 48.0);
         assert!(apply(&mut c, Key::Language, 2.0));
         assert_eq!(c.language, "id");
+        assert!(apply(&mut c, Key::Language, 3.0));
+        assert_eq!(c.language, "zh-CN");
         c.reduce_motion = true;
         reset_animations(&mut c);
         assert!(!c.reduce_motion);
         assert_eq!(c.genie_ms, 560.0);
+    }
+
+    #[test]
+    fn font_menu_fits_the_work_area() {
+        assert_eq!(font_menu_layout(100, 0, 900, 96), (100, 280, false));
+        assert_eq!(font_menu_layout(830, 0, 900, 96), (804, 280, true));
+        assert_eq!(font_menu_layout(-90, -400, 0, 144), (-129, 259, true));
+        assert_eq!(font_menu_layout(140, 0, 300, 96), (140, 152, false));
     }
 
     #[test]
@@ -666,7 +763,7 @@ mod tests {
     #[test]
     #[ignore]
     fn snapshot() {
-        for (lang, file) in [("en", "settings"), ("id", "settings_id")] {
+        for (lang, file) in [("en", "settings"), ("id", "settings_id"), ("zh-CN", "settings_zh_cn")] {
             crate::i18n::set(lang);
             let mut s = Settings::new(&Config::default());
             s.cfg.menu_bar = false; // show the restart state
@@ -674,6 +771,14 @@ mod tests {
             let (w, h, px) = crate::flyout::snapshot(&mut s, 1.25);
             let path = format!(r"{}\target\{file}.png", env!("CARGO_MANIFEST_DIR"));
             assert!(crate::gfx::save_png(&path, w, h, &px));
+            if crate::gfx::interface_fonts().len() > 1 {
+                assert!(apply(&mut s.cfg, Key::InterfaceFont, 1.0));
+                crate::gfx::set_interface_font(&s.cfg.interface_font);
+                assert_eq!(crate::gfx::ui_face(), s.cfg.interface_font);
+                let (_, _, alternate) = crate::flyout::snapshot(&mut s, 1.25);
+                assert_ne!(alternate.as_slice(), px.as_slice(), "font selection should repaint Settings");
+                crate::gfx::set_interface_font("auto");
+            }
         }
         crate::i18n::set("en");
     }

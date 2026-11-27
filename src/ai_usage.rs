@@ -380,7 +380,7 @@ impl State {
             let title = if codex { self.codex_titles.get(&key[2..]).cloned() } else { st.title.clone() };
             s.sessions.push(Session {
                 provider: if codex { "Codex" } else { "Claude Code" },
-                title: title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| if project.is_empty() { "Session".into() } else { project.clone() }),
+                title: title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| if project.is_empty() { crate::i18n::t("Session").into() } else { project.clone() }),
                 project,
                 model: st.model.clone(),
                 branch: st.branch.clone(),
@@ -701,9 +701,9 @@ fn window_label(min: i64) -> String {
         300 => "5-hour".into(),
         10080 => "Weekly".into(),
         43200 => "30-day".into(),
-        m if m > 0 && m % 1440 == 0 => format!("{}-day", m / 1440),
-        m if m > 0 && m % 60 == 0 => format!("{}-hour", m / 60),
-        m if m > 0 => format!("{m}-min"),
+        m if m > 0 && m % 1440 == 0 => crate::i18n::fmt!("{}-day", "{} 天", m / 1440),
+        m if m > 0 && m % 60 == 0 => crate::i18n::fmt!("{}-hour", "{} 小时", m / 60),
+        m if m > 0 => crate::i18n::fmt!("{m}-min", "{m} 分钟"),
         _ => "Limit".into(),
     }
 }
@@ -740,6 +740,11 @@ fn rl_limits(rl: &[RlSample], now: i64) -> Vec<Limit> {
 
 /// 950 → "950", 12_300 → "12.3k", 4_500_000 → "4.5M"
 pub fn compact(n: f64) -> String {
+    if crate::i18n::lang() == crate::i18n::Lang::ZhCn {
+        return if n >= 1e8 { format!("{:.1}亿", n / 1e8) }
+            else if n >= 1e4 { format!("{:.1}万", n / 1e4) }
+            else { format!("{n:.0}") };
+    }
     let a = n.abs();
     if a >= 1e9 {
         format!("{:.1}B", n / 1e9)
@@ -759,11 +764,11 @@ pub fn span(secs: i64) -> String {
     let s = secs.max(0);
     let (d, h, m) = (s / 86400, s % 86400 / 3600, s % 3600 / 60);
     if d > 0 {
-        format!("{d}d {h}h")
+        crate::i18n::fmt!("{d}d {h}h", "{d}天{h}小时")
     } else if h > 0 {
-        format!("{h}h {m:02}m")
+        crate::i18n::fmt!("{h}h {m:02}m", "{h}小时{m:02}分")
     } else {
-        format!("{}m", m.max(if s > 0 { 1 } else { 0 }))
+        crate::i18n::fmt!("{}m", "{}分钟", m.max(if s > 0 { 1 } else { 0 }))
     }
 }
 

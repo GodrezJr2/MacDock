@@ -60,8 +60,9 @@ pub struct Config {
     pub hide_speed: f64,
     /// Snap instead of animating: magnification, auto-hide and a very short minimize.
     pub reduce_motion: bool,
-    /// Interface language: "auto" (follow Windows), "en" or "id".
+    /// Interface language: "auto" (follow Windows), "en", "id" or "zh-CN".
     pub language: String,
+    pub interface_font: String,
     /// All apps: "apps" (the macOS 26 Apps window, the default) or "classic" (the full-screen Launchpad).
     pub launchpad_style: String,
     /// Keys we don't know (written by a newer build) survive a save.
@@ -150,6 +151,7 @@ impl Default for Config {
             hide_speed: 1.0,
             reduce_motion: false,
             language: "auto".into(),
+            interface_font: "auto".into(),
             launchpad_style: "apps".into(),
             extra: Map::new(),
         }
@@ -212,8 +214,11 @@ impl Config {
         f("MagnifySpeed", &mut c.magnify_speed, SPEED.0, SPEED.1);
         f("AutoHideDelay", &mut c.hide_delay_ms, HIDE_DELAY_MS.0, HIDE_DELAY_MS.1);
         f("AutoHideSpeed", &mut c.hide_speed, SPEED.0, SPEED.1);
+        if let Some(Value::String(face)) = v.remove("InterfaceFont") {
+            c.interface_font = face;
+        }
         if let Some(l) = v.remove("Language").and_then(|x| x.as_str().map(String::from)) {
-            if ["auto", "en", "id"].contains(&l.as_str()) {
+            if crate::i18n::LANGUAGES.iter().any(|&(code, _)| code == l) {
                 c.language = l;
             }
         }
@@ -312,6 +317,7 @@ impl Config {
             "AutoHideSpeed": self.hide_speed,
             "ReduceMotion": self.reduce_motion,
             "Language": self.language,
+            "InterfaceFont": self.interface_font,
             "LaunchpadStyle": self.launchpad_style,
         });
         if let Value::Object(f) = fields {
@@ -378,6 +384,23 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interface_font_round_trips() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.interface_font, "auto");
+        cfg.interface_font = "测试字体".into();
+        assert_eq!(Config::from_value(Some(cfg.to_value())).unwrap().interface_font, "测试字体");
+    }
+
+    #[test]
+    fn language_choices_round_trip() {
+        for &(code, _) in crate::i18n::LANGUAGES {
+            let mut cfg = Config::default();
+            cfg.language = code.into();
+            assert_eq!(Config::from_value(Some(cfg.to_value())).unwrap().language, code);
+        }
+    }
 
     #[test]
     fn secondary_docks_default_true_and_round_trip() {

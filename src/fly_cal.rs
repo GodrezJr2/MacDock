@@ -70,14 +70,18 @@ impl Content for CalFly {
         let (ty, tm, td) = today();
 
         // today in full
-        let wd = DAYS[weekday(ty, tm, td) as usize];
-        ui.text_mid(2.0, 9.0, &format!("{wd}, {td} {} {ty}", MONTHS[(tm - 1) as usize]), 13.0, 600, white(0xF2), w - 4.0);
+        let weekday_index = weekday(ty, tm, td) as usize;
+        let wd = DAYS[weekday_index];
+        let chinese = crate::i18n::lang() == crate::i18n::Lang::ZhCn;
+        let heads = if chinese { ["日", "一", "二", "三", "四", "五", "六"] } else { ["S", "M", "T", "W", "T", "F", "S"] };
+        let date = if chinese { format!("{ty}年{tm}月{td}日 星期{}", heads[weekday_index]) } else { format!("{wd}, {td} {} {ty}", MONTHS[(tm - 1) as usize]) };
+        ui.text_mid(2.0, 9.0, &date, 13.0, 600, white(0xF2), w - 4.0);
         let mut y = 26.0;
         ui.divider(y);
         y += 10.0;
 
         // month title (click = back to today) and arrows
-        let title = format!("{} {}", MONTHS[(self.month - 1) as usize], self.year);
+        let title = if chinese { format!("{}年{}月", self.year, self.month) } else { format!("{} {}", MONTHS[(self.month - 1) as usize], self.year) };
         let tw = ui.text_w(&title, 14.0, 600);
         let away = (self.year, self.month) != (ty, tm);
         if ui.hit(ID_TITLE, 0.0, y, tw + 12.0, 26.0) && away {
@@ -93,7 +97,7 @@ impl Content for CalFly {
         y += 32.0;
 
         // weekday heads
-        for (i, d) in ["S", "M", "T", "W", "T", "F", "S"].iter().enumerate() {
+        for (i, d) in heads.iter().enumerate() {
             let cw = ui.text_w(d, 11.0, 600);
             ui.text_mid(i as f32 * CELL + (CELL - cw) / 2.0, y + 8.0, d, 11.0, 600, white(0x70), 0.0);
         }
@@ -139,7 +143,7 @@ impl Content for CalFly {
         y += 6.0;
         for (id, label) in [(ID_NOTIF, "Notifications"), (ID_SETTINGS, "Date & Time Settings…")] {
             ui.row(id, 0.0, y, w, 28.0);
-            ui.text_mid(8.0, y + 14.0, label, 13.0, 400, white(0xE6), w - 16.0);
+            ui.text_mid(8.0, y + 14.0, crate::i18n::t(label), 13.0, 400, white(0xE6), w - 16.0);
             y += 28.0;
         }
         y

@@ -41,7 +41,7 @@ Same laptop, same wallpaper, a minute apart.
 | --- | --- |
 | **Apps window** | macOS 26's replacement for Launchpad: a Liquid Glass window with a search field that has the typing at once, category chips, recent apps and every installed app. The Apps icon in the dock or the menu bar opens it; the full-screen Launchpad is still there in Settings |
 | **Spotlight** | The menu bar's magnifier or **Alt+Space**: a glass capsule that grows into results as you type, apps first, then a web search |
-| **Settings window** | A floating Mac-style window with traffic lights for every option, animation speeds included, in English or Indonesian |
+| **Settings window** | A floating Mac-style window with traffic lights for every option, animation speeds included, in English, Indonesian or Simplified Chinese |
 | **Liquid Glass dock** | The plate shows the real windows behind it (live capture), bent at the rim like macOS 26, not a blurred wallpaper copy |
 | **Alt+Tab like Cmd+Tab** | One icon per app, most recent first, on a dark frosted panel. A quick tap flips to the previous app without the panel |
 | **Drop files, widgets, recents** | Files dropped on an app icon open in it, on the Trash they are recycled; desktop widgets; the last 3 apps and a Downloads stack by the Trash |
